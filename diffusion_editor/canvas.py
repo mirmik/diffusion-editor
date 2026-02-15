@@ -1,48 +1,54 @@
 import numpy as np
 from PyQt6.QtWidgets import QWidget
 from PyQt6.QtCore import Qt, QPointF, pyqtSignal
-from PyQt6.QtGui import QPainter, QImage, QPixmap, QTransform
+from PyQt6.QtGui import QPainter, QImage, QPen, QColor
+
+from .layer import LayerStack
+from .brush import Brush
 
 
 class Canvas(QWidget):
     mouse_moved = pyqtSignal(int, int)
 
-    def __init__(self, parent=None):
+    def __init__(self, layer_stack: LayerStack, parent=None):
         super().__init__(parent)
-        self._image = None  # numpy array (H, W, 4) RGBA uint8
+        self._layer_stack = layer_stack
+        self._composite = None
         self._qimage = None
         self._zoom = 1.0
         self._offset = QPointF(0, 0)
         self._panning = False
         self._pan_start = QPointF()
+        self._painting = False
+        self._last_paint_pos = None
+        self.brush = Brush()
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
-    def set_image(self, arr: np.ndarray):
-        if arr.ndim == 2:
-            arr = np.stack([arr, arr, arr, np.full_like(arr, 255)], axis=-1)
-        elif arr.shape[2] == 3:
-            alpha = np.full((*arr.shape[:2], 1), 255, dtype=np.uint8)
-            arr = np.concatenate([arr, alpha], axis=-1)
-        self._image = np.ascontiguousarray(arr.astype(np.uint8))
-        h, w, _ = self._image.shape
-        self._qimage = QImage(self._image.data, w, h, w * 4, QImage.Format.Format_RGBA8888)
-        self.fit_in_view()
+        self._layer_stack.changed.connect(self._on_stack_changed)
+
+    def _on_stack_changed(self):
+        self._update_composite()
         self.update()
 
-    def get_image(self) -> np.ndarray | None:
-        return self._image
+    def _update_composite(self):
+        self._composite = np.ascontiguousarray(self._layer_stack.composite())
+        h, w = self._composite.shape[:2]
+        self._qimage = QImage(self._composite.data, w, h, w * 4, QImage.Format.Format_RGBA8888)
+
+    def get_composite(self) -> np.ndarray | None:
+        return self._composite
 
     def image_size(self):
-        if self._image is not None:
-            h, w = self._image.shape[:2]
-            return w, h
+        if self._layer_stack.width > 0:
+            return self._layer_stack.width, self._layer_stack.height
         return None
 
     def fit_in_view(self):
-        if self._image is None:
+        size = self.image_size()
+        if size is None:
             return
-        h, w = self._image.shape[:2]
+        w, h = size
         cw, ch = self.width(), self.height()
         if w == 0 or h == 0:
             return
@@ -59,6 +65,10 @@ class Canvas(QWidget):
         y = (pos.y() - self._offset.y()) / self._zoom
         return int(x), int(y)
 
+    def _brush_cursor_rect(self):
+        """Area around cursor to repaint for brush outline."""
+        return self.rect()
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
@@ -70,7 +80,7 @@ class Canvas(QWidget):
         painter.end()
 
     def wheelEvent(self, event):
-        if self._image is None:
+        if self.image_size() is None:
             return
         pos = event.position()
         old_img = self.widget_to_image(pos)
@@ -82,22 +92,57 @@ class Canvas(QWidget):
         self._offset = QPointF(new_widget_x, new_widget_y)
         self.update()
 
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_BracketRight:
+            self.brush.set_size(self.brush.size + 5)
+            self.update()
+        elif event.key() == Qt.Key.Key_BracketLeft:
+            self.brush.set_size(self.brush.size - 5)
+            self.update()
+        else:
+            super().keyPressEvent(event)
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.MiddleButton:
             self._panning = True
             self._pan_start = event.position() - self._offset
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        elif event.button() == Qt.MouseButton.LeftButton:
+            layer = self._layer_stack.active_layer
+            if layer is None:
+                return
+            self._painting = True
+            ix, iy = self.widget_to_image(event.position())
+            self.brush.dab(layer.image, ix, iy)
+            self._last_paint_pos = (ix, iy)
+            self._layer_stack.changed.emit()
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.MiddleButton:
             self._panning = False
             self.setCursor(Qt.CursorShape.ArrowCursor)
+        elif event.button() == Qt.MouseButton.LeftButton:
+            self._painting = False
+            self._last_paint_pos = None
 
     def mouseMoveEvent(self, event):
         if self._panning:
             self._offset = event.position() - self._pan_start
             self.update()
-        if self._image is not None:
+        elif self._painting:
+            layer = self._layer_stack.active_layer
+            if layer is None:
+                return
+            ix, iy = self.widget_to_image(event.position())
+            if self._last_paint_pos:
+                lx, ly = self._last_paint_pos
+                self.brush.stroke(layer.image, lx, ly, ix, iy)
+            else:
+                self.brush.dab(layer.image, ix, iy)
+            self._last_paint_pos = (ix, iy)
+            self._layer_stack.changed.emit()
+
+        if self.image_size() is not None:
             ix, iy = self.widget_to_image(event.position())
             self.mouse_moved.emit(ix, iy)
 
