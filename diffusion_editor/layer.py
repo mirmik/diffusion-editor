@@ -61,8 +61,10 @@ class DiffusionLayer(Layer):
                  prompt: str, negative_prompt: str,
                  strength: float, guidance_scale: float, steps: int,
                  seed: int,
-                 model_path: str = "", prediction_type: str = ""):
+                 model_path: str = "", prediction_type: str = "",
+                 mode: str = "img2img"):
         super().__init__(name, width, height)
+        self.mode = mode
         self.source_patch = source_patch
         self.patch_x = patch_x
         self.patch_y = patch_y
@@ -104,6 +106,7 @@ class DiffusionLayer(Layer):
     def to_dict(self, index: int) -> dict:
         d = super().to_dict(index)
         d["type"] = "diffusion"
+        d["mode"] = self.mode
         d["mask_file"] = f"layers/{index}_mask.png"
         d["source_file"] = f"layers/{index}_source.png" if self.source_patch is not None else None
         d["patch_x"] = self.patch_x
@@ -166,6 +169,7 @@ class DiffusionLayer(Layer):
         layer.seed = d["seed"]
         layer.model_path = d.get("model_path", "")
         layer.prediction_type = d.get("prediction_type", "")
+        layer.mode = d.get("mode", "img2img")
         return layer
 
 
@@ -178,6 +182,16 @@ class LayerStack(QObject):
         self._active_index = -1
         self._width = 0
         self._height = 0
+
+    def next_name(self, prefix: str) -> str:
+        import re
+        pattern = re.compile(rf'^{re.escape(prefix)} (\d+)$')
+        max_n = -1
+        for layer in self._layers:
+            m = pattern.match(layer.name)
+            if m:
+                max_n = max(max_n, int(m.group(1)))
+        return f"{prefix} {max_n + 1}"
 
     @property
     def width(self):

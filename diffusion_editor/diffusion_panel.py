@@ -4,6 +4,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QComboBox, QLabel, QTextEdit, QLineEdit,
     QSlider, QSpinBox, QGroupBox,
 )
+import random
 from PyQt6.QtCore import Qt, pyqtSignal, QSettings
 
 MODELS_DIR = os.path.expanduser(
@@ -79,6 +80,13 @@ class DiffusionPanel(QDockWidget):
         params_group = QGroupBox("Parameters")
         params_layout = QVBoxLayout(params_group)
 
+        # Mode
+        params_layout.addWidget(QLabel("Mode:"))
+        self._mode_combo = QComboBox()
+        self._mode_combo.addItem("img2img", "img2img")
+        self._mode_combo.addItem("inpaint", "inpaint")
+        params_layout.addWidget(self._mode_combo)
+
         # Denoising strength
         params_layout.addWidget(QLabel("Denoising Strength:"))
         strength_row = QHBoxLayout()
@@ -111,8 +119,8 @@ class DiffusionPanel(QDockWidget):
         # Seed
         params_layout.addWidget(QLabel("Seed:"))
         seed_row = QHBoxLayout()
-        self._seed_edit = QLineEdit("-1")
-        self._seed_edit.setPlaceholderText("-1 = random")
+        self._seed_edit = QLineEdit(str(random.randint(0, 2**32 - 1)))
+        self._seed_edit.setPlaceholderText("seed")
         self._seed_random_btn = QPushButton("Rnd")
         self._seed_random_btn.setFixedWidth(40)
         seed_row.addWidget(self._seed_edit)
@@ -183,7 +191,9 @@ class DiffusionPanel(QDockWidget):
 
         # --- Connections ---
         self._load_btn.clicked.connect(self._on_load)
-        self._seed_random_btn.clicked.connect(lambda: self._seed_edit.setText("-1"))
+        self._seed_random_btn.clicked.connect(
+            lambda: self._seed_edit.setText(str(random.randint(0, 2**32 - 1)))
+        )
         self._regen_btn.clicked.connect(self.regenerate_requested.emit)
         self._new_seed_btn.clicked.connect(self.new_seed_requested.emit)
         self._clear_mask_btn.clicked.connect(self.clear_mask_requested.emit)
@@ -266,6 +276,9 @@ class DiffusionPanel(QDockWidget):
         except ValueError:
             return -1
 
+    def set_seed(self, seed: int):
+        self._seed_edit.setText(str(seed))
+
     @property
     def mask_eraser(self) -> bool:
         return self._mask_eraser_btn.isChecked()
@@ -289,12 +302,26 @@ class DiffusionPanel(QDockWidget):
     def prediction_type(self) -> str:
         return self._prediction_combo.currentData() or ""
 
+    @property
+    def mode(self) -> str:
+        return self._mode_combo.currentData()
+
     def show_diffusion_layer(self, layer):
         self._layer_group.setVisible(True)
+        self._prompt.setPlainText(layer.prompt)
+        self._negative_prompt.setPlainText(layer.negative_prompt)
+        self._strength_slider.setValue(int(layer.strength * 100))
+        self._steps_spin.setValue(layer.steps)
+        self._cfg_slider.setValue(int(layer.guidance_scale * 10))
+        self._seed_edit.setText(str(layer.seed))
+        idx = self._mode_combo.findData(layer.mode)
+        if idx >= 0:
+            self._mode_combo.setCurrentIndex(idx)
         model_name = os.path.basename(layer.model_path) if layer.model_path else "?"
         mask_status = "has mask" if layer.has_mask() else "no mask"
         info = (
             f"model: {model_name}\n"
+            f"mode: {layer.mode}\n"
             f"prompt: {layer.prompt[:60]}\n"
             f"negative: {layer.negative_prompt[:40]}\n"
             f"strength: {layer.strength:.2f}  steps: {layer.steps}  "

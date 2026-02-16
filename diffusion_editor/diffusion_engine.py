@@ -2,7 +2,11 @@ import os
 import threading
 import torch
 from PIL import Image
-from diffusers import StableDiffusionXLImg2ImgPipeline, DPMSolverMultistepScheduler
+from diffusers import (
+    StableDiffusionXLImg2ImgPipeline,
+    StableDiffusionXLInpaintPipeline,
+    DPMSolverMultistepScheduler,
+)
 
 # Filename hints for v-prediction models
 _VPRED_HINTS = ("vpred", "v-pred", "v_pred", "vprediction", "v-prediction", "v_prediction")
@@ -27,6 +31,7 @@ class DiffusionEngine:
         self._result_meta = None
         self._task_type = None  # "inference" or "load"
         self._thread = None
+        self._pipe_mode = None  # "img2img" или "inpaint"
         self.model_info = {}  # диагностика — заполняется после загрузки
 
     @property
@@ -62,6 +67,7 @@ class DiffusionEngine:
         )
         self._pipe.to("cuda")
         self._model_path = safetensors_path
+        self._pipe_mode = "img2img"
 
         # Собираем диагностику
         sched = self._pipe.scheduler
@@ -82,12 +88,32 @@ class DiffusionEngine:
             self._pipe = None
             torch.cuda.empty_cache()
         self._model_path = None
+        self._pipe_mode = None
+
+    def _ensure_pipeline(self, mode: str):
+        if self._pipe is None:
+            raise RuntimeError("No model loaded")
+        if self._pipe_mode == mode:
+            return
+        components = dict(
+            vae=self._pipe.vae,
+            text_encoder=self._pipe.text_encoder,
+            text_encoder_2=self._pipe.text_encoder_2,
+            tokenizer=self._pipe.tokenizer,
+            tokenizer_2=self._pipe.tokenizer_2,
+            unet=self._pipe.unet,
+            scheduler=self._pipe.scheduler,
+        )
+        if mode == "inpaint":
+            self._pipe = StableDiffusionXLInpaintPipeline(**components)
+        else:
+            self._pipe = StableDiffusionXLImg2ImgPipeline(**components)
+        self._pipe_mode = mode
 
     def _img2img(self, image: Image.Image, prompt: str, negative_prompt: str,
                  strength: float, num_inference_steps: int,
                  guidance_scale: float, seed: int = -1) -> tuple[Image.Image, int]:
-        if self._pipe is None:
-            raise RuntimeError("No model loaded")
+        self._ensure_pipeline("img2img")
 
         image = image.convert("RGB")
 
@@ -125,9 +151,55 @@ class DiffusionEngine:
         print(f"[DiffusionEngine] done, result size: {result.size}")
         return result, seed
 
+    def _inpaint(self, image: Image.Image, mask_image: Image.Image,
+                 prompt: str, negative_prompt: str,
+                 strength: float, num_inference_steps: int,
+                 guidance_scale: float, seed: int = -1) -> tuple[Image.Image, int]:
+        self._ensure_pipeline("inpaint")
+
+        image = image.convert("RGB")
+        mask_image = mask_image.convert("L")
+
+        w, h = image.size
+        w8 = (w // 8) * 8
+        h8 = (h // 8) * 8
+        if (w8, h8) != (w, h):
+            image = image.resize((w8, h8), Image.LANCZOS)
+            mask_image = mask_image.resize((w8, h8), Image.NEAREST)
+
+        if seed == -1:
+            seed = torch.randint(0, 2**32, (1,)).item()
+        generator = torch.Generator(device="cuda").manual_seed(seed)
+
+        print(f"[DiffusionEngine] _inpaint params:")
+        print(f"  prompt:          {prompt!r}")
+        print(f"  negative_prompt: {negative_prompt!r}")
+        print(f"  image size:      {image.size}")
+        print(f"  mask size:       {mask_image.size}")
+        print(f"  strength:        {strength}")
+        print(f"  steps:           {num_inference_steps}")
+        print(f"  guidance_scale:  {guidance_scale}")
+        print(f"  seed:            {seed}")
+        print(f"  model:           {self._model_path}")
+
+        result = self._pipe(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            image=image,
+            mask_image=mask_image,
+            strength=strength,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            generator=generator,
+        ).images[0]
+
+        print(f"[DiffusionEngine] inpaint done, result size: {result.size}")
+        return result, seed
+
     def submit(self, image: Image.Image, prompt: str, negative_prompt: str,
                strength: float, steps: int, guidance_scale: float,
-               seed: int = -1, meta=None):
+               seed: int = -1, mode: str = "img2img",
+               mask_image: Image.Image = None, meta=None):
         if self._busy:
             return False
         self._busy = True
@@ -137,17 +209,24 @@ class DiffusionEngine:
         self._task_type = "inference"
         self._thread = threading.Thread(
             target=self._run_inference,
-            args=(image, prompt, negative_prompt, strength, steps, guidance_scale, seed),
+            args=(image, prompt, negative_prompt, strength, steps,
+                  guidance_scale, seed, mode, mask_image),
             daemon=True,
         )
         self._thread.start()
         return True
 
-    def _run_inference(self, image, prompt, negative_prompt, strength, steps, guidance_scale, seed):
+    def _run_inference(self, image, prompt, negative_prompt, strength, steps,
+                       guidance_scale, seed, mode, mask_image):
         try:
-            result_image, used_seed = self._img2img(
-                image, prompt, negative_prompt,
-                strength, steps, guidance_scale, seed)
+            if mode == "inpaint" and mask_image is not None:
+                result_image, used_seed = self._inpaint(
+                    image, mask_image, prompt, negative_prompt,
+                    strength, steps, guidance_scale, seed)
+            else:
+                result_image, used_seed = self._img2img(
+                    image, prompt, negative_prompt,
+                    strength, steps, guidance_scale, seed)
             self._result = (result_image, used_seed)
         except Exception as e:
             self._error = str(e)

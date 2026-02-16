@@ -103,8 +103,7 @@ class LayerPanel(QDockWidget):
         self._layer_stack.reorder(new_order)
 
     def _on_add(self):
-        count = len(self._layer_stack.layers)
-        self._layer_stack.add_layer(f"Layer {count}")
+        self._layer_stack.add_layer(self._layer_stack.next_name("Layer"))
 
     def _on_remove(self):
         idx = self._layer_stack.active_index

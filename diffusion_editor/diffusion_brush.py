@@ -35,6 +35,13 @@ def extract_patch(composite: np.ndarray, center_x: int, center_y: int,
     return patch_pil, x0, y0, actual_w, actual_h
 
 
+def extract_mask_patch(mask: np.ndarray, patch_x: int, patch_y: int,
+                       patch_w: int, patch_h: int) -> Image.Image:
+    """Extract the mask region corresponding to a patch. Returns PIL Image 'L'."""
+    mask_crop = mask[patch_y:patch_y + patch_h, patch_x:patch_x + patch_w]
+    return Image.fromarray(mask_crop, "L")
+
+
 def paste_result(layer_image: np.ndarray, result_pil: Image.Image,
                  paste_x: int, paste_y: int, patch_w: int, patch_h: int,
                  mask: np.ndarray = None):

@@ -1,4 +1,5 @@
 import os
+import random
 import numpy as np
 from PIL import Image
 from PyQt6.QtWidgets import (
@@ -13,7 +14,7 @@ from .layer_panel import LayerPanel
 from .brush_panel import BrushPanel
 from .diffusion_engine import DiffusionEngine
 from .diffusion_panel import DiffusionPanel
-from .diffusion_brush import extract_patch, paste_result
+from .diffusion_brush import extract_patch, extract_mask_patch, paste_result
 
 
 class EditorWindow(QMainWindow):
@@ -57,7 +58,6 @@ class EditorWindow(QMainWindow):
         self._project_path = None
         self._last_dir = self._settings.value("last_dir", "")
         self._pending_request = None  # DiffusionLayer for regenerate
-        self._diffusion_counter = 0
 
         self._poll_timer = QTimer(self)
         self._poll_timer.timeout.connect(self._poll_engine)
@@ -198,8 +198,7 @@ class EditorWindow(QMainWindow):
         self.setWindowTitle("Diffusion Editor")
 
     def _new_layer(self):
-        count = len(self._layer_stack.layers)
-        self._layer_stack.add_layer(f"Layer {count}")
+        self._layer_stack.add_layer(self._layer_stack.next_name("Layer"))
 
     def _remove_layer(self):
         self._layer_stack.remove_layer(self._layer_stack.active_index)
@@ -286,8 +285,13 @@ class EditorWindow(QMainWindow):
         center_x, center_y = self._canvas.view_center_image()
         patch_pil, px, py, pw, ph = extract_patch(composite, center_x, center_y)
 
+        seed = self._diffusion_panel.seed
+        if seed < 0:
+            seed = random.randint(0, 2**32 - 1)
+            self._diffusion_panel.set_seed(seed)
+
         dl = DiffusionLayer(
-            name=f"Diffusion {self._diffusion_counter}",
+            name=self._layer_stack.next_name("Diffusion"),
             width=self._layer_stack.width,
             height=self._layer_stack.height,
             source_patch=patch_pil,
@@ -297,12 +301,12 @@ class EditorWindow(QMainWindow):
             strength=self._diffusion_panel.strength,
             guidance_scale=self._diffusion_panel.guidance_scale,
             steps=self._diffusion_panel.steps,
-            seed=self._diffusion_panel.seed,
+            seed=seed,
             model_path=self._engine.model_path or "",
             prediction_type=self._diffusion_panel.prediction_type,
+            mode=self._diffusion_panel.mode,
         )
         self._layer_stack.insert_layer(dl)
-        self._diffusion_counter += 1
 
     def _on_color_picked(self, r, g, b, a):
         self._canvas.brush.set_color(r, g, b, a)
@@ -324,6 +328,7 @@ class EditorWindow(QMainWindow):
         layer.guidance_scale = self._diffusion_panel.guidance_scale
         layer.steps = self._diffusion_panel.steps
         layer.seed = self._diffusion_panel.seed
+        layer.mode = self._diffusion_panel.mode
         if self._engine.model_path:
             layer.model_path = self._engine.model_path
         layer.prediction_type = self._diffusion_panel.prediction_type
@@ -380,6 +385,14 @@ class EditorWindow(QMainWindow):
 
     def _submit_regenerate(self, layer: DiffusionLayer):
         self._pending_request = layer
+        mask_image = None
+        if layer.mode == "inpaint":
+            if not layer.has_mask():
+                self._statusbar.showMessage("Inpaint requires a mask", 3000)
+                return
+            mask_image = extract_mask_patch(
+                layer.mask, layer.patch_x, layer.patch_y,
+                layer.patch_w, layer.patch_h)
         self._engine.submit(
             image=layer.source_patch,
             prompt=layer.prompt,
@@ -388,6 +401,8 @@ class EditorWindow(QMainWindow):
             steps=layer.steps,
             guidance_scale=layer.guidance_scale,
             seed=layer.seed,
+            mode=layer.mode,
+            mask_image=mask_image,
         )
         self._statusbar.showMessage("Regenerating...")
 
@@ -395,7 +410,9 @@ class EditorWindow(QMainWindow):
         layer = self._layer_stack.active_layer
         if not isinstance(layer, DiffusionLayer):
             return
-        layer.seed = -1
+        new_seed = random.randint(0, 2**32 - 1)
+        layer.seed = new_seed
+        self._diffusion_panel.set_seed(new_seed)
         self._on_regenerate()
 
     def _poll_engine(self):
@@ -426,7 +443,6 @@ class EditorWindow(QMainWindow):
 
             if isinstance(self._pending_request, DiffusionLayer):
                 dl = self._pending_request
-                dl.seed = used_seed
                 dl.image[:] = 0
                 mask_arg = dl.mask if dl.has_mask() else None
                 paste_result(dl.image, result_image, dl.patch_x, dl.patch_y,
