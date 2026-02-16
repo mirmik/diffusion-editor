@@ -9,7 +9,11 @@ def main():
     window.show()
 
     if len(sys.argv) > 1:
-        window._load_image(sys.argv[1])
+        path = sys.argv[1]
+        if path.lower().endswith(".deproj"):
+            window.open_file_path(path)
+        else:
+            window.import_image_path(path)
 
     sys.exit(app.exec())
 

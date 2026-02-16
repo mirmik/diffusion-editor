@@ -1,3 +1,7 @@
+import io
+import json
+import zipfile
+
 import numpy as np
 from PIL import Image
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -20,6 +24,34 @@ class Layer:
     @property
     def height(self):
         return self.image.shape[0]
+
+    def to_dict(self, index: int) -> dict:
+        return {
+            "index": index,
+            "type": "layer",
+            "name": self.name,
+            "visible": self.visible,
+            "opacity": self.opacity,
+            "image_file": f"layers/{index}_image.png",
+        }
+
+    def save_images_to_zip(self, zf: zipfile.ZipFile, index: int):
+        img = Image.fromarray(self.image, "RGBA")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        zf.writestr(f"layers/{index}_image.png", buf.getvalue())
+
+    @classmethod
+    def from_dict(cls, d: dict, zf: zipfile.ZipFile) -> "Layer":
+        image_data = zf.read(d["image_file"])
+        img = Image.open(io.BytesIO(image_data)).convert("RGBA")
+        arr = np.array(img, dtype=np.uint8)
+        layer = cls.__new__(cls)
+        layer.name = d["name"]
+        layer.visible = d["visible"]
+        layer.opacity = d["opacity"]
+        layer.image = np.ascontiguousarray(arr)
+        return layer
 
 
 class DiffusionLayer(Layer):
@@ -68,6 +100,73 @@ class DiffusionLayer(Layer):
             return None
         x0, y0, x1, y1 = bbox
         return (x0 + x1) // 2, (y0 + y1) // 2
+
+    def to_dict(self, index: int) -> dict:
+        d = super().to_dict(index)
+        d["type"] = "diffusion"
+        d["mask_file"] = f"layers/{index}_mask.png"
+        d["source_file"] = f"layers/{index}_source.png" if self.source_patch is not None else None
+        d["patch_x"] = self.patch_x
+        d["patch_y"] = self.patch_y
+        d["patch_w"] = self.patch_w
+        d["patch_h"] = self.patch_h
+        d["prompt"] = self.prompt
+        d["negative_prompt"] = self.negative_prompt
+        d["strength"] = self.strength
+        d["guidance_scale"] = self.guidance_scale
+        d["steps"] = self.steps
+        d["seed"] = self.seed
+        d["model_path"] = self.model_path
+        d["prediction_type"] = self.prediction_type
+        return d
+
+    def save_images_to_zip(self, zf: zipfile.ZipFile, index: int):
+        super().save_images_to_zip(zf, index)
+        mask_img = Image.fromarray(self.mask, "L")
+        buf = io.BytesIO()
+        mask_img.save(buf, format="PNG")
+        zf.writestr(f"layers/{index}_mask.png", buf.getvalue())
+        if self.source_patch is not None:
+            buf = io.BytesIO()
+            self.source_patch.save(buf, format="PNG")
+            zf.writestr(f"layers/{index}_source.png", buf.getvalue())
+
+    @classmethod
+    def from_dict(cls, d: dict, zf: zipfile.ZipFile) -> "DiffusionLayer":
+        image_data = zf.read(d["image_file"])
+        img = Image.open(io.BytesIO(image_data)).convert("RGBA")
+        arr = np.array(img, dtype=np.uint8)
+        h, w = arr.shape[:2]
+
+        mask_data = zf.read(d["mask_file"])
+        mask_img = Image.open(io.BytesIO(mask_data)).convert("L")
+        mask_arr = np.array(mask_img, dtype=np.uint8)
+
+        source_patch = None
+        if d.get("source_file") and d["source_file"] in zf.namelist():
+            source_data = zf.read(d["source_file"])
+            source_patch = Image.open(io.BytesIO(source_data)).convert("RGB")
+
+        layer = cls.__new__(cls)
+        layer.name = d["name"]
+        layer.visible = d["visible"]
+        layer.opacity = d["opacity"]
+        layer.image = np.ascontiguousarray(arr)
+        layer.mask = np.ascontiguousarray(mask_arr)
+        layer.source_patch = source_patch
+        layer.patch_x = d["patch_x"]
+        layer.patch_y = d["patch_y"]
+        layer.patch_w = d["patch_w"]
+        layer.patch_h = d["patch_h"]
+        layer.prompt = d["prompt"]
+        layer.negative_prompt = d["negative_prompt"]
+        layer.strength = d["strength"]
+        layer.guidance_scale = d["guidance_scale"]
+        layer.steps = d["steps"]
+        layer.seed = d["seed"]
+        layer.model_path = d.get("model_path", "")
+        layer.prediction_type = d.get("prediction_type", "")
+        return layer
 
 
 class LayerStack(QObject):
@@ -201,3 +300,46 @@ class LayerStack(QObject):
             result[:, :, 3:4] = alpha * 255.0 + result[:, :, 3:4] * inv_alpha
 
         return np.clip(result, 0, 255).astype(np.uint8)
+
+    FORMAT_VERSION = 1
+
+    def save_project(self, path: str):
+        manifest = {
+            "format_version": self.FORMAT_VERSION,
+            "canvas_width": self._width,
+            "canvas_height": self._height,
+            "active_index": self._active_index,
+            "layers": [],
+        }
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for i, layer in enumerate(self._layers):
+                manifest["layers"].append(layer.to_dict(i))
+                layer.save_images_to_zip(zf, i)
+            zf.writestr("manifest.json",
+                        json.dumps(manifest, indent=2, ensure_ascii=False))
+
+    def load_project(self, path: str):
+        with zipfile.ZipFile(path, "r") as zf:
+            manifest = json.loads(zf.read("manifest.json"))
+            version = manifest.get("format_version", 0)
+            if version > self.FORMAT_VERSION:
+                raise ValueError(
+                    f"Project version {version} is newer than "
+                    f"supported version {self.FORMAT_VERSION}")
+
+            new_layers = []
+            for layer_dict in manifest["layers"]:
+                if layer_dict["type"] == "diffusion":
+                    layer = DiffusionLayer.from_dict(layer_dict, zf)
+                else:
+                    layer = Layer.from_dict(layer_dict, zf)
+                new_layers.append(layer)
+
+        self._layers.clear()
+        self._layers.extend(new_layers)
+        self._width = manifest["canvas_width"]
+        self._height = manifest["canvas_height"]
+        self._active_index = manifest.get("active_index", 0)
+        if not (0 <= self._active_index < len(self._layers)):
+            self._active_index = 0
+        self.changed.emit()

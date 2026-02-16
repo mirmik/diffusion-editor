@@ -2,7 +2,7 @@ import os
 import numpy as np
 from PIL import Image
 from PyQt6.QtWidgets import (
-    QMainWindow, QFileDialog, QStatusBar, QToolBar,
+    QMainWindow, QFileDialog, QStatusBar, QToolBar, QMessageBox,
 )
 from PyQt6.QtGui import QAction, QKeySequence
 from PyQt6.QtCore import Qt, QTimer, QSettings
@@ -54,7 +54,7 @@ class EditorWindow(QMainWindow):
         self._layer_panel.create_diffusion_requested.connect(self._on_create_diffusion)
         self._layer_stack.changed.connect(self._on_layer_changed)
         self._settings = QSettings("DiffusionEditor", "DiffusionEditor")
-        self._current_path = None
+        self._project_path = None
         self._last_dir = self._settings.value("last_dir", "")
         self._pending_request = None  # DiffusionLayer for regenerate
         self._diffusion_counter = 0
@@ -81,6 +81,18 @@ class EditorWindow(QMainWindow):
         save_as_action.setShortcut(QKeySequence("Ctrl+Shift+S"))
         save_as_action.triggered.connect(self.save_file_as)
         file_menu.addAction(save_as_action)
+
+        file_menu.addSeparator()
+
+        import_action = QAction("&Import Image...", self)
+        import_action.setShortcut(QKeySequence("Ctrl+I"))
+        import_action.triggered.connect(self.import_image)
+        file_menu.addAction(import_action)
+
+        export_action = QAction("&Export Image...", self)
+        export_action.setShortcut(QKeySequence("Ctrl+E"))
+        export_action.triggered.connect(self.export_image)
+        file_menu.addAction(export_action)
 
         file_menu.addSeparator()
         quit_action = QAction("&Quit", self)
@@ -146,22 +158,44 @@ class EditorWindow(QMainWindow):
 
     def open_file(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open Image", self._last_dir,
+            self, "Open Project", self._last_dir,
+            "Diffusion Editor Project (*.deproj);;All Files (*)",
+        )
+        if not path:
+            return
+        self._last_dir = os.path.dirname(path)
+        self._settings.setValue("last_dir", self._last_dir)
+        self.open_file_path(path)
+
+    def open_file_path(self, path: str):
+        try:
+            self._layer_stack.load_project(path)
+            self._canvas.fit_in_view()
+            self._project_path = path
+            self.setWindowTitle(f"Diffusion Editor — {os.path.basename(path)}")
+            self._statusbar.showMessage(f"Opened project: {path}", 3000)
+        except Exception as e:
+            QMessageBox.critical(self, "Open Project Error",
+                                 f"Failed to open project:\n{e}")
+
+    def import_image(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import Image", self._last_dir,
             "Images (*.png *.jpg *.jpeg *.bmp *.tiff *.webp);;All Files (*)",
         )
         if not path:
             return
         self._last_dir = os.path.dirname(path)
         self._settings.setValue("last_dir", self._last_dir)
-        self._load_image(path)
+        self.import_image_path(path)
 
-    def _load_image(self, path):
+    def import_image_path(self, path: str):
         img = Image.open(path).convert("RGBA")
         arr = np.array(img, dtype=np.uint8)
         self._layer_stack.init_from_image(arr)
         self._canvas.fit_in_view()
-        self._current_path = path
-        self.setWindowTitle(f"Diffusion Editor — {path}")
+        self._project_path = None
+        self.setWindowTitle("Diffusion Editor")
 
     def _new_layer(self):
         count = len(self._layer_stack.layers)
@@ -171,14 +205,39 @@ class EditorWindow(QMainWindow):
         self._layer_stack.remove_layer(self._layer_stack.active_index)
 
     def save_file(self):
-        if self._current_path:
-            self._save_to(self._current_path)
+        if self._project_path:
+            try:
+                self._layer_stack.save_project(self._project_path)
+                self._statusbar.showMessage(f"Saved: {self._project_path}", 3000)
+            except Exception as e:
+                QMessageBox.critical(self, "Save Error",
+                                     f"Failed to save project:\n{e}")
         else:
             self.save_file_as()
 
     def save_file_as(self):
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save Image", self._last_dir,
+            self, "Save Project", self._last_dir,
+            "Diffusion Editor Project (*.deproj);;All Files (*)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".deproj"):
+            path += ".deproj"
+        self._last_dir = os.path.dirname(path)
+        self._settings.setValue("last_dir", self._last_dir)
+        try:
+            self._layer_stack.save_project(path)
+            self._project_path = path
+            self.setWindowTitle(f"Diffusion Editor — {os.path.basename(path)}")
+            self._statusbar.showMessage(f"Saved project: {path}", 3000)
+        except Exception as e:
+            QMessageBox.critical(self, "Save Project Error",
+                                 f"Failed to save project:\n{e}")
+
+    def export_image(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Image", self._last_dir,
             "PNG (*.png);;JPEG (*.jpg *.jpeg);;BMP (*.bmp);;All Files (*)",
         )
         if not path:
@@ -186,8 +245,6 @@ class EditorWindow(QMainWindow):
         self._last_dir = os.path.dirname(path)
         self._settings.setValue("last_dir", self._last_dir)
         self._save_to(path)
-        self._current_path = path
-        self.setWindowTitle(f"Diffusion Editor — {path}")
 
     def _save_to(self, path):
         arr = self._canvas.get_composite()
