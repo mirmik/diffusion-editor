@@ -29,9 +29,10 @@ class DiffusionEngine:
         self._result = None
         self._error = None
         self._result_meta = None
-        self._task_type = None  # "inference" or "load"
+        self._task_type = None  # "inference", "load", or "load_ip_adapter"
         self._thread = None
         self._pipe_mode = None  # "img2img" или "inpaint"
+        self._ip_adapter_loaded = False
         self.model_info = {}  # диагностика — заполняется после загрузки
 
     @property
@@ -82,6 +83,21 @@ class DiffusionEngine:
         }
         print(f"[DiffusionEngine] Loaded: {self.model_info}")
 
+    @property
+    def ip_adapter_loaded(self) -> bool:
+        return self._ip_adapter_loaded
+
+    def load_ip_adapter(self):
+        if self._pipe is None:
+            raise RuntimeError("No model loaded")
+        self._pipe.load_ip_adapter(
+            "h94/IP-Adapter",
+            subfolder="sdxl_models",
+            weight_name="ip-adapter_sdxl.bin",
+        )
+        self._ip_adapter_loaded = True
+        print("[DiffusionEngine] IP-Adapter loaded")
+
     def unload(self):
         if self._pipe is not None:
             del self._pipe
@@ -89,6 +105,7 @@ class DiffusionEngine:
             torch.cuda.empty_cache()
         self._model_path = None
         self._pipe_mode = None
+        self._ip_adapter_loaded = False
 
     def _ensure_pipeline(self, mode: str):
         if self._pipe is None:
@@ -104,6 +121,9 @@ class DiffusionEngine:
             unet=self._pipe.unet,
             scheduler=self._pipe.scheduler,
         )
+        if self._ip_adapter_loaded:
+            components["image_encoder"] = self._pipe.image_encoder
+            components["feature_extractor"] = self._pipe.feature_extractor
         if mode == "inpaint":
             self._pipe = StableDiffusionXLInpaintPipeline(**components)
         else:
@@ -112,7 +132,9 @@ class DiffusionEngine:
 
     def _img2img(self, image: Image.Image, prompt: str, negative_prompt: str,
                  strength: float, num_inference_steps: int,
-                 guidance_scale: float, seed: int = -1) -> tuple[Image.Image, int]:
+                 guidance_scale: float, seed: int = -1,
+                 ip_adapter_image: Image.Image = None,
+                 ip_adapter_scale: float = 0.6) -> tuple[Image.Image, int]:
         self._ensure_pipeline("img2img")
 
         image = image.convert("RGB")
@@ -136,9 +158,10 @@ class DiffusionEngine:
         print(f"  steps:           {num_inference_steps}")
         print(f"  guidance_scale:  {guidance_scale}")
         print(f"  seed:            {seed}")
+        print(f"  ip_adapter:      {ip_adapter_image is not None} scale={ip_adapter_scale}")
         print(f"  model:           {self._model_path}")
 
-        result = self._pipe(
+        kwargs = dict(
             prompt=prompt,
             negative_prompt=negative_prompt,
             image=image,
@@ -146,7 +169,12 @@ class DiffusionEngine:
             num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale,
             generator=generator,
-        ).images[0]
+        )
+        if ip_adapter_image is not None and self._ip_adapter_loaded:
+            self._pipe.set_ip_adapter_scale(ip_adapter_scale)
+            kwargs["ip_adapter_image"] = ip_adapter_image
+
+        result = self._pipe(**kwargs).images[0]
 
         print(f"[DiffusionEngine] done, result size: {result.size}")
         return result, seed
@@ -154,7 +182,9 @@ class DiffusionEngine:
     def _inpaint(self, image: Image.Image, mask_image: Image.Image,
                  prompt: str, negative_prompt: str,
                  strength: float, num_inference_steps: int,
-                 guidance_scale: float, seed: int = -1) -> tuple[Image.Image, int]:
+                 guidance_scale: float, seed: int = -1,
+                 ip_adapter_image: Image.Image = None,
+                 ip_adapter_scale: float = 0.6) -> tuple[Image.Image, int]:
         self._ensure_pipeline("inpaint")
 
         image = image.convert("RGB")
@@ -180,9 +210,10 @@ class DiffusionEngine:
         print(f"  steps:           {num_inference_steps}")
         print(f"  guidance_scale:  {guidance_scale}")
         print(f"  seed:            {seed}")
+        print(f"  ip_adapter:      {ip_adapter_image is not None} scale={ip_adapter_scale}")
         print(f"  model:           {self._model_path}")
 
-        result = self._pipe(
+        kwargs = dict(
             prompt=prompt,
             negative_prompt=negative_prompt,
             image=image,
@@ -191,7 +222,12 @@ class DiffusionEngine:
             num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale,
             generator=generator,
-        ).images[0]
+        )
+        if ip_adapter_image is not None and self._ip_adapter_loaded:
+            self._pipe.set_ip_adapter_scale(ip_adapter_scale)
+            kwargs["ip_adapter_image"] = ip_adapter_image
+
+        result = self._pipe(**kwargs).images[0]
 
         print(f"[DiffusionEngine] inpaint done, result size: {result.size}")
         return result, seed
@@ -199,7 +235,9 @@ class DiffusionEngine:
     def submit(self, image: Image.Image, prompt: str, negative_prompt: str,
                strength: float, steps: int, guidance_scale: float,
                seed: int = -1, mode: str = "img2img",
-               mask_image: Image.Image = None, meta=None):
+               mask_image: Image.Image = None,
+               ip_adapter_image: Image.Image = None,
+               ip_adapter_scale: float = 0.6, meta=None):
         if self._busy:
             return False
         self._busy = True
@@ -210,24 +248,52 @@ class DiffusionEngine:
         self._thread = threading.Thread(
             target=self._run_inference,
             args=(image, prompt, negative_prompt, strength, steps,
-                  guidance_scale, seed, mode, mask_image),
+                  guidance_scale, seed, mode, mask_image,
+                  ip_adapter_image, ip_adapter_scale),
             daemon=True,
         )
         self._thread.start()
         return True
 
     def _run_inference(self, image, prompt, negative_prompt, strength, steps,
-                       guidance_scale, seed, mode, mask_image):
+                       guidance_scale, seed, mode, mask_image,
+                       ip_adapter_image, ip_adapter_scale):
         try:
             if mode == "inpaint" and mask_image is not None:
                 result_image, used_seed = self._inpaint(
                     image, mask_image, prompt, negative_prompt,
-                    strength, steps, guidance_scale, seed)
+                    strength, steps, guidance_scale, seed,
+                    ip_adapter_image, ip_adapter_scale)
             else:
                 result_image, used_seed = self._img2img(
                     image, prompt, negative_prompt,
-                    strength, steps, guidance_scale, seed)
+                    strength, steps, guidance_scale, seed,
+                    ip_adapter_image, ip_adapter_scale)
             self._result = (result_image, used_seed)
+        except Exception as e:
+            self._error = str(e)
+        self._busy = False
+
+    def submit_load_ip_adapter(self):
+        if self._busy:
+            return False
+        if self._pipe is None:
+            return False
+        self._busy = True
+        self._result = None
+        self._error = None
+        self._result_meta = None
+        self._task_type = "load_ip_adapter"
+        self._thread = threading.Thread(
+            target=self._run_load_ip_adapter, daemon=True,
+        )
+        self._thread.start()
+        return True
+
+    def _run_load_ip_adapter(self):
+        try:
+            self.load_ip_adapter()
+            self._result = True
         except Exception as e:
             self._error = str(e)
         self._busy = False

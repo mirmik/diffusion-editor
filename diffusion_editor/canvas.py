@@ -3,13 +3,14 @@ from PyQt6.QtWidgets import QWidget
 from PyQt6.QtCore import Qt, QPointF, pyqtSignal
 from PyQt6.QtGui import QPainter, QImage, QPen, QColor
 
-from .layer import LayerStack, DiffusionLayer
+from .layer import LayerStack, Layer, DiffusionLayer
 from .brush import Brush
 
 
 class Canvas(QWidget):
     mouse_moved = pyqtSignal(int, int)
     color_picked = pyqtSignal(int, int, int, int)  # r, g, b, a
+    ref_rect_drawn = pyqtSignal(int, int, int, int)  # x0, y0, x1, y1
 
     def __init__(self, layer_stack: LayerStack, parent=None):
         super().__init__(parent)
@@ -28,6 +29,11 @@ class Canvas(QWidget):
         self._mask_eraser = False
         self._show_mask = True
         self._mask_overlay = None
+        self._ref_rect_mode = False
+        self._ref_rect_dragging = False
+        self._ref_rect_start = None
+        self._ref_rect_end = None
+        self._show_ref_rect = True
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
@@ -48,10 +54,10 @@ class Canvas(QWidget):
     def get_composite(self) -> np.ndarray | None:
         return self._composite
 
-    def get_composite_below(self, layer_index: int) -> np.ndarray | None:
-        """Composite of layers below the given index (excluding it and above)."""
+    def get_composite_below(self, layer: Layer) -> np.ndarray | None:
+        """Composite of all layers below the given layer (excluding it and above)."""
         return np.ascontiguousarray(
-            self._layer_stack.composite(exclude_above=layer_index))
+            self._layer_stack.composite(exclude_layer=layer))
 
     def image_size(self):
         if self._layer_stack.width > 0:
@@ -95,6 +101,18 @@ class Canvas(QWidget):
 
     def set_show_mask(self, show: bool):
         self._show_mask = show
+        self.update()
+
+    def set_ref_rect_mode(self, on: bool):
+        self._ref_rect_mode = on
+        if on:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            self._ref_rect_dragging = False
+
+    def set_show_ref_rect(self, show: bool):
+        self._show_ref_rect = show
         self.update()
 
     def _dab_mask(self, mask: np.ndarray, cx: int, cy: int):
@@ -177,6 +195,20 @@ class Canvas(QWidget):
             if self._show_mask and isinstance(layer, DiffusionLayer) and layer.has_mask():
                 self._draw_mask_overlay(painter, layer.mask)
 
+            # IP-Adapter reference rectangle
+            if self._show_ref_rect and isinstance(layer, DiffusionLayer):
+                rect = None
+                if self._ref_rect_dragging and self._ref_rect_start and self._ref_rect_end:
+                    rect = self._ref_rect_start + self._ref_rect_end
+                elif layer.ip_adapter_rect:
+                    rect = layer.ip_adapter_rect
+                if rect:
+                    x0, y0, x1, y1 = rect
+                    pen = QPen(QColor(50, 120, 255, 200), 2.0 / self._zoom)
+                    painter.setPen(pen)
+                    painter.setBrush(QColor(50, 120, 255, 40))
+                    painter.drawRect(x0, y0, x1 - x0, y1 - y0)
+
         painter.end()
 
     def wheelEvent(self, event):
@@ -239,6 +271,13 @@ class Canvas(QWidget):
             layer = self._layer_stack.active_layer
             if layer is None:
                 return
+            # Ref rect drawing mode
+            if self._ref_rect_mode and self._is_diffusion_active():
+                ix, iy = self.widget_to_image(event.position())
+                self._ref_rect_dragging = True
+                self._ref_rect_start = (ix, iy)
+                self._ref_rect_end = (ix, iy)
+                return
             self._painting = True
             ix, iy = self.widget_to_image(event.position())
             if self._is_diffusion_active():
@@ -253,6 +292,20 @@ class Canvas(QWidget):
             self._panning = False
             self.setCursor(Qt.CursorShape.ArrowCursor)
         elif event.button() == Qt.MouseButton.LeftButton:
+            if self._ref_rect_dragging:
+                ix, iy = self.widget_to_image(event.position())
+                sx, sy = self._ref_rect_start
+                x0, y0 = min(sx, ix), min(sy, iy)
+                x1, y1 = max(sx, ix), max(sy, iy)
+                self._ref_rect_dragging = False
+                self._ref_rect_start = None
+                self._ref_rect_end = None
+                self._ref_rect_mode = False
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+                if x1 - x0 > 2 and y1 - y0 > 2:
+                    self.ref_rect_drawn.emit(x0, y0, x1, y1)
+                self.update()
+                return
             if self._painting:
                 self._on_stack_changed()  # full recomposite
                 self._layer_stack.changed.emit()
@@ -262,6 +315,10 @@ class Canvas(QWidget):
     def mouseMoveEvent(self, event):
         if self._panning:
             self._offset = event.position() - self._pan_start
+            self.update()
+        elif self._ref_rect_dragging:
+            ix, iy = self.widget_to_image(event.position())
+            self._ref_rect_end = (ix, iy)
             self.update()
         elif self._painting:
             layer = self._layer_stack.active_layer

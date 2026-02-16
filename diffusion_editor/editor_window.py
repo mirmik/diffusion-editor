@@ -52,6 +52,11 @@ class EditorWindow(QMainWindow):
         self._diffusion_panel.mask_brush_changed.connect(self._on_mask_brush_changed)
         self._diffusion_panel._mask_eraser_btn.toggled.connect(self._canvas.set_mask_eraser)
         self._diffusion_panel._show_mask_btn.toggled.connect(self._canvas.set_show_mask)
+        self._diffusion_panel.load_ip_adapter_requested.connect(self._on_load_ip_adapter)
+        self._diffusion_panel.draw_rect_toggled.connect(self._canvas.set_ref_rect_mode)
+        self._diffusion_panel.show_rect_toggled.connect(self._canvas.set_show_ref_rect)
+        self._diffusion_panel.clear_rect_requested.connect(self._on_clear_ref_rect)
+        self._canvas.ref_rect_drawn.connect(self._on_ref_rect_drawn)
         self._layer_panel.create_diffusion_requested.connect(self._on_create_diffusion)
         self._layer_stack.changed.connect(self._on_layer_changed)
         self._settings = QSettings("DiffusionEditor", "DiffusionEditor")
@@ -201,7 +206,9 @@ class EditorWindow(QMainWindow):
         self._layer_stack.add_layer(self._layer_stack.next_name("Layer"))
 
     def _remove_layer(self):
-        self._layer_stack.remove_layer(self._layer_stack.active_index)
+        layer = self._layer_stack.active_layer
+        if layer is not None:
+            self._layer_stack.remove_layer(layer)
 
     def save_file(self):
         if self._project_path:
@@ -329,6 +336,7 @@ class EditorWindow(QMainWindow):
         layer.steps = self._diffusion_panel.steps
         layer.seed = self._diffusion_panel.seed
         layer.mode = self._diffusion_panel.mode
+        layer.ip_adapter_scale = self._diffusion_panel.ip_adapter_scale
         if self._engine.model_path:
             layer.model_path = self._engine.model_path
         layer.prediction_type = self._diffusion_panel.prediction_type
@@ -347,8 +355,7 @@ class EditorWindow(QMainWindow):
             bbox = layer.mask_bbox()
             center = layer.mask_center()
             if bbox is not None and center is not None:
-                active_idx = self._layer_stack.active_index
-                composite = self._canvas.get_composite_below(active_idx)
+                composite = self._canvas.get_composite_below(layer)
                 if composite is None:
                     return
                 bx0, by0, bx1, by1 = bbox
@@ -393,6 +400,27 @@ class EditorWindow(QMainWindow):
             mask_image = extract_mask_patch(
                 layer.mask, layer.patch_x, layer.patch_y,
                 layer.patch_w, layer.patch_h)
+
+        # IP-Adapter: если есть rect, но адаптер не загружен — загружаем сначала
+        ip_adapter_image = None
+        if layer.ip_adapter_rect is not None:
+            if not self._engine.ip_adapter_loaded:
+                self._pending_request = layer
+                self._engine.submit_load_ip_adapter()
+                self._statusbar.showMessage("Loading IP-Adapter...")
+                return
+            composite = self._canvas.get_composite_below(layer)
+            if composite is not None:
+                x0, y0, x1, y1 = layer.ip_adapter_rect
+                h, w = composite.shape[:2]
+                x0 = max(0, min(x0, w))
+                x1 = max(0, min(x1, w))
+                y0 = max(0, min(y0, h))
+                y1 = max(0, min(y1, h))
+                if x1 > x0 and y1 > y0:
+                    crop = composite[y0:y1, x0:x1, :3]
+                    ip_adapter_image = Image.fromarray(crop, "RGB")
+
         self._engine.submit(
             image=layer.source_patch,
             prompt=layer.prompt,
@@ -403,6 +431,8 @@ class EditorWindow(QMainWindow):
             seed=layer.seed,
             mode=layer.mode,
             mask_image=mask_image,
+            ip_adapter_image=ip_adapter_image,
+            ip_adapter_scale=layer.ip_adapter_scale,
         )
         self._statusbar.showMessage("Regenerating...")
 
@@ -414,6 +444,29 @@ class EditorWindow(QMainWindow):
         layer.seed = new_seed
         self._diffusion_panel.set_seed(new_seed)
         self._on_regenerate()
+
+    def _on_load_ip_adapter(self):
+        if self._engine.is_busy:
+            return
+        if not self._engine.is_loaded:
+            self._statusbar.showMessage("Load a model first", 3000)
+            return
+        self._engine.submit_load_ip_adapter()
+        self._statusbar.showMessage("Loading IP-Adapter...")
+
+    def _on_ref_rect_drawn(self, x0, y0, x1, y1):
+        layer = self._layer_stack.active_layer
+        if isinstance(layer, DiffusionLayer):
+            layer.ip_adapter_rect = (x0, y0, x1, y1)
+            self._diffusion_panel.show_diffusion_layer(layer)
+            self._canvas.update()
+
+    def _on_clear_ref_rect(self):
+        layer = self._layer_stack.active_layer
+        if isinstance(layer, DiffusionLayer):
+            layer.ip_adapter_rect = None
+            self._diffusion_panel.show_diffusion_layer(layer)
+            self._canvas.update()
 
     def _poll_engine(self):
         task_type, result, error, meta = self._engine.poll()
@@ -433,6 +486,18 @@ class EditorWindow(QMainWindow):
                     return
                 self._statusbar.showMessage("Model loaded", 3000)
 
+        elif task_type == "load_ip_adapter":
+            if error:
+                self._diffusion_panel.on_ip_adapter_load_error(error)
+                self._statusbar.showMessage(f"IP-Adapter error: {error[:80]}", 5000)
+                self._pending_request = None
+            else:
+                self._diffusion_panel.on_ip_adapter_loaded()
+                if isinstance(self._pending_request, DiffusionLayer):
+                    self._submit_regenerate(self._pending_request)
+                    return
+                self._statusbar.showMessage("IP-Adapter loaded", 3000)
+
         elif task_type == "inference":
             if error:
                 self._statusbar.showMessage(f"Diffusion error: {error[:80]}", 5000)
@@ -444,7 +509,10 @@ class EditorWindow(QMainWindow):
             if isinstance(self._pending_request, DiffusionLayer):
                 dl = self._pending_request
                 dl.image[:] = 0
-                mask_arg = dl.mask if dl.has_mask() else None
+                # In inpaint mode the pipeline handles masking — don't apply
+                # mask as alpha again (double-masking creates visible edges).
+                # In img2img mode, mask controls where the result is visible.
+                mask_arg = dl.mask if (dl.mode != "inpaint" and dl.has_mask()) else None
                 paste_result(dl.image, result_image, dl.patch_x, dl.patch_y,
                              dl.patch_w, dl.patch_h, mask=mask_arg)
                 self._layer_stack.changed.emit()

@@ -2,10 +2,38 @@ import os
 from PyQt6.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QComboBox, QLabel, QTextEdit, QLineEdit,
-    QSlider, QSpinBox, QGroupBox,
+    QSlider, QSpinBox, QGroupBox, QScrollArea,
 )
 import random
 from PyQt6.QtCore import Qt, pyqtSignal, QSettings
+
+
+def _set_layout_visible(layout, visible):
+    """Recursively show/hide all widgets inside a layout."""
+    for i in range(layout.count()):
+        item = layout.itemAt(i)
+        if item.widget():
+            item.widget().setVisible(visible)
+        elif item.layout():
+            _set_layout_visible(item.layout(), visible)
+
+
+def _make_collapsible(group: QGroupBox, settings: QSettings, key: str):
+    """Make a QGroupBox collapsible with state saved in QSettings."""
+    group.setCheckable(True)
+    collapsed = settings.value(f"collapsed/{key}", False, type=bool)
+    group.setChecked(not collapsed)
+
+    def on_toggled(checked):
+        layout = group.layout()
+        if layout:
+            _set_layout_visible(layout, checked)
+        settings.setValue(f"collapsed/{key}", not checked)
+
+    group.toggled.connect(on_toggled)
+    # Apply initial state
+    if collapsed:
+        on_toggled(False)
 
 MODELS_DIR = os.path.expanduser(
     "~/soft/stable-diffusion-webui-forge/models/Stable-diffusion/"
@@ -18,6 +46,10 @@ class DiffusionPanel(QDockWidget):
     new_seed_requested = pyqtSignal()
     clear_mask_requested = pyqtSignal()
     mask_brush_changed = pyqtSignal(int, float)  # size, hardness
+    load_ip_adapter_requested = pyqtSignal()
+    draw_rect_toggled = pyqtSignal(bool)
+    show_rect_toggled = pyqtSignal(bool)
+    clear_rect_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__("Diffusion", parent)
@@ -27,6 +59,9 @@ class DiffusionPanel(QDockWidget):
         )
         self.setMinimumWidth(280)
 
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         container = QWidget()
         layout = QVBoxLayout(container)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -57,6 +92,7 @@ class DiffusionPanel(QDockWidget):
         self._model_diag.setWordWrap(True)
         self._model_diag.setStyleSheet("color: #888; font-size: 11px;")
         model_layout.addWidget(self._model_diag)
+        _make_collapsible(model_group, self._settings, "model")
         layout.addWidget(model_group)
 
         # --- Prompt ---
@@ -74,6 +110,7 @@ class DiffusionPanel(QDockWidget):
         self._negative_prompt.setMaximumHeight(40)
         self._negative_prompt.setPlaceholderText("worst quality, blurry")
         prompt_layout.addWidget(self._negative_prompt)
+        _make_collapsible(prompt_group, self._settings, "prompt")
         layout.addWidget(prompt_group)
 
         # --- Parameters ---
@@ -126,6 +163,7 @@ class DiffusionPanel(QDockWidget):
         seed_row.addWidget(self._seed_edit)
         seed_row.addWidget(self._seed_random_btn)
         params_layout.addLayout(seed_row)
+        _make_collapsible(params_group, self._settings, "params")
         layout.addWidget(params_group)
 
         # --- Mask Brush ---
@@ -162,7 +200,44 @@ class DiffusionPanel(QDockWidget):
         btn_row.addWidget(self._show_mask_btn)
         mask_layout.addLayout(btn_row)
 
+        _make_collapsible(mask_group, self._settings, "mask_brush")
         layout.addWidget(mask_group)
+
+        # --- IP-Adapter ---
+        ip_group = QGroupBox("IP-Adapter")
+        ip_layout = QVBoxLayout(ip_group)
+
+        self._load_ip_btn = QPushButton("Load IP-Adapter")
+        ip_layout.addWidget(self._load_ip_btn)
+
+        self._ip_status = QLabel("Not loaded")
+        self._ip_status.setStyleSheet("color: #888; font-size: 11px;")
+        ip_layout.addWidget(self._ip_status)
+
+        ip_layout.addWidget(QLabel("Scale:"))
+        ip_scale_row = QHBoxLayout()
+        self._ip_scale_slider = QSlider(Qt.Orientation.Horizontal)
+        self._ip_scale_slider.setRange(0, 100)
+        self._ip_scale_slider.setValue(60)
+        self._ip_scale_label = QLabel("0.60")
+        ip_scale_row.addWidget(self._ip_scale_slider)
+        ip_scale_row.addWidget(self._ip_scale_label)
+        ip_layout.addLayout(ip_scale_row)
+
+        ip_btn_row = QHBoxLayout()
+        self._draw_rect_btn = QPushButton("Draw Rect")
+        self._draw_rect_btn.setCheckable(True)
+        self._show_rect_btn = QPushButton("Show Rect")
+        self._show_rect_btn.setCheckable(True)
+        self._show_rect_btn.setChecked(True)
+        self._clear_rect_btn = QPushButton("Clear Rect")
+        ip_btn_row.addWidget(self._draw_rect_btn)
+        ip_btn_row.addWidget(self._show_rect_btn)
+        ip_btn_row.addWidget(self._clear_rect_btn)
+        ip_layout.addLayout(ip_btn_row)
+
+        _make_collapsible(ip_group, self._settings, "ip_adapter")
+        layout.addWidget(ip_group)
 
         # --- Selected Diffusion Layer ---
         self._layer_group = QGroupBox("Diffusion Layer")
@@ -183,11 +258,13 @@ class DiffusionPanel(QDockWidget):
         self._clear_mask_btn = QPushButton("Clear Mask")
         layer_layout.addWidget(self._clear_mask_btn)
 
+        _make_collapsible(self._layer_group, self._settings, "diffusion_layer")
         self._layer_group.setVisible(False)
         layout.addWidget(self._layer_group)
 
         layout.addStretch()
-        self.setWidget(container)
+        scroll.setWidget(container)
+        self.setWidget(scroll)
 
         # --- Connections ---
         self._load_btn.clicked.connect(self._on_load)
@@ -205,6 +282,13 @@ class DiffusionPanel(QDockWidget):
         )
         self._mask_size_slider.valueChanged.connect(self._on_mask_brush_changed)
         self._mask_hardness_slider.valueChanged.connect(self._on_mask_brush_changed)
+        self._load_ip_btn.clicked.connect(self.load_ip_adapter_requested.emit)
+        self._draw_rect_btn.toggled.connect(self.draw_rect_toggled.emit)
+        self._show_rect_btn.toggled.connect(self.show_rect_toggled.emit)
+        self._clear_rect_btn.clicked.connect(self.clear_rect_requested.emit)
+        self._ip_scale_slider.valueChanged.connect(
+            lambda v: self._ip_scale_label.setText(f"{v / 100:.2f}")
+        )
 
     def _scan_models(self):
         self._model_combo.clear()
@@ -306,6 +390,18 @@ class DiffusionPanel(QDockWidget):
     def mode(self) -> str:
         return self._mode_combo.currentData()
 
+    @property
+    def ip_adapter_scale(self) -> float:
+        return self._ip_scale_slider.value() / 100.0
+
+    def on_ip_adapter_loaded(self):
+        self._ip_status.setText("Loaded")
+        self._load_ip_btn.setEnabled(True)
+
+    def on_ip_adapter_load_error(self, error: str):
+        self._ip_status.setText(f"Error: {error[:60]}")
+        self._load_ip_btn.setEnabled(True)
+
     def show_diffusion_layer(self, layer):
         self._layer_group.setVisible(True)
         self._prompt.setPlainText(layer.prompt)
@@ -317,8 +413,14 @@ class DiffusionPanel(QDockWidget):
         idx = self._mode_combo.findData(layer.mode)
         if idx >= 0:
             self._mode_combo.setCurrentIndex(idx)
+        self._ip_scale_slider.setValue(int(layer.ip_adapter_scale * 100))
         model_name = os.path.basename(layer.model_path) if layer.model_path else "?"
         mask_status = "has mask" if layer.has_mask() else "no mask"
+        if layer.ip_adapter_rect:
+            r = layer.ip_adapter_rect
+            ip_info = f"rect ({r[0]},{r[1]})-({r[2]},{r[3]}) scale={layer.ip_adapter_scale:.2f}"
+        else:
+            ip_info = "none"
         info = (
             f"model: {model_name}\n"
             f"mode: {layer.mode}\n"
@@ -328,7 +430,8 @@ class DiffusionPanel(QDockWidget):
             f"cfg: {layer.guidance_scale:.1f}\n"
             f"seed: {layer.seed}\n"
             f"patch: ({layer.patch_x},{layer.patch_y}) {layer.patch_w}x{layer.patch_h}\n"
-            f"mask: {mask_status}"
+            f"mask: {mask_status}\n"
+            f"ip_adapter: {ip_info}"
         )
         self._layer_info.setText(info)
 
