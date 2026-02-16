@@ -3,6 +3,7 @@ import threading
 import torch
 from PIL import Image
 from diffusers import (
+    StableDiffusionXLPipeline,
     StableDiffusionXLImg2ImgPipeline,
     StableDiffusionXLInpaintPipeline,
     DPMSolverMultistepScheduler,
@@ -53,22 +54,25 @@ class DiffusionEngine:
         guessed = _guess_prediction_type(safetensors_path)
         chosen_prediction = prediction_type or guessed or "epsilon"
 
-        # DPM++ 2M SDE Karras — как в A1111/Forge
-        scheduler = DPMSolverMultistepScheduler(
-            prediction_type=chosen_prediction,
-            algorithm_type="sde-dpmsolver++",
-            use_karras_sigmas=True,
-        )
-
-        self._pipe = StableDiffusionXLImg2ImgPipeline.from_single_file(
+        # Load model with its default scheduler config (correct betas etc.)
+        self._pipe = StableDiffusionXLPipeline.from_single_file(
             safetensors_path,
             torch_dtype=torch.float16,
             use_safetensors=True,
-            scheduler=scheduler,
+        )
+        # DPM++ 2M SDE Karras — inherit base config from model
+        # timestep_spacing="trailing" matches A1111/Forge behaviour and
+        # ensures the first timestep is at full noise (no white borders).
+        self._pipe.scheduler = DPMSolverMultistepScheduler.from_config(
+            self._pipe.scheduler.config,
+            prediction_type=chosen_prediction,
+            algorithm_type="sde-dpmsolver++",
+            use_karras_sigmas=True,
+            timestep_spacing="trailing",
         )
         self._pipe.to("cuda")
         self._model_path = safetensors_path
-        self._pipe_mode = "img2img"
+        self._pipe_mode = "txt2img"
 
         # Собираем диагностику
         sched = self._pipe.scheduler
@@ -124,7 +128,9 @@ class DiffusionEngine:
         if self._ip_adapter_loaded:
             components["image_encoder"] = self._pipe.image_encoder
             components["feature_extractor"] = self._pipe.feature_extractor
-        if mode == "inpaint":
+        if mode == "txt2img":
+            self._pipe = StableDiffusionXLPipeline(**components)
+        elif mode == "inpaint":
             self._pipe = StableDiffusionXLInpaintPipeline(**components)
         else:
             self._pipe = StableDiffusionXLImg2ImgPipeline(**components)
@@ -148,7 +154,7 @@ class DiffusionEngine:
 
         if seed == -1:
             seed = torch.randint(0, 2**32, (1,)).item()
-        generator = torch.Generator(device="cuda").manual_seed(seed)
+        generator = torch.Generator(device="cpu").manual_seed(seed)
 
         print(f"[DiffusionEngine] _img2img params:")
         print(f"  prompt:          {prompt!r}")
@@ -169,6 +175,9 @@ class DiffusionEngine:
             num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale,
             generator=generator,
+            original_size=(1024, 1024),
+            target_size=(h8, w8),
+            crops_coords_top_left=(0, 0),
         )
         if ip_adapter_image is not None and self._ip_adapter_loaded:
             self._pipe.set_ip_adapter_scale(ip_adapter_scale)
@@ -199,7 +208,7 @@ class DiffusionEngine:
 
         if seed == -1:
             seed = torch.randint(0, 2**32, (1,)).item()
-        generator = torch.Generator(device="cuda").manual_seed(seed)
+        generator = torch.Generator(device="cpu").manual_seed(seed)
 
         print(f"[DiffusionEngine] _inpaint params:")
         print(f"  prompt:          {prompt!r}")
@@ -222,6 +231,9 @@ class DiffusionEngine:
             num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale,
             generator=generator,
+            original_size=(1024, 1024),
+            target_size=(h8, w8),
+            crops_coords_top_left=(0, 0),
         )
         if ip_adapter_image is not None and self._ip_adapter_loaded:
             self._pipe.set_ip_adapter_scale(ip_adapter_scale)
@@ -232,12 +244,60 @@ class DiffusionEngine:
         print(f"[DiffusionEngine] inpaint done, result size: {result.size}")
         return result, seed
 
+    def _txt2img(self, prompt: str, negative_prompt: str,
+                 width: int, height: int,
+                 num_inference_steps: int,
+                 guidance_scale: float, seed: int = -1,
+                 ip_adapter_image: Image.Image = None,
+                 ip_adapter_scale: float = 0.6) -> tuple[Image.Image, int]:
+        self._ensure_pipeline("txt2img")
+
+        w8 = (width // 8) * 8
+        h8 = (height // 8) * 8
+
+        if seed == -1:
+            seed = torch.randint(0, 2**32, (1,)).item()
+        generator = torch.Generator(device="cpu").manual_seed(seed)
+
+        print(f"[DiffusionEngine] _txt2img params:")
+        print(f"  prompt:          {prompt!r}")
+        print(f"  negative_prompt: {negative_prompt!r}")
+        print(f"  size:            {w8}x{h8}")
+        print(f"  steps:           {num_inference_steps}")
+        print(f"  guidance_scale:  {guidance_scale}")
+        print(f"  seed:            {seed}")
+        print(f"  ip_adapter:      {ip_adapter_image is not None} scale={ip_adapter_scale}")
+
+        kwargs = dict(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            width=w8,
+            height=h8,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            generator=generator,
+            # SDXL micro-conditioning: tell model this is a full 1024x1024 image
+            original_size=(1024, 1024),
+            target_size=(h8, w8),
+            crops_coords_top_left=(0, 0),
+        )
+        if ip_adapter_image is not None and self._ip_adapter_loaded:
+            self._pipe.set_ip_adapter_scale(ip_adapter_scale)
+            kwargs["ip_adapter_image"] = ip_adapter_image
+
+        result = self._pipe(**kwargs).images[0]
+
+        print(f"[DiffusionEngine] txt2img done, result size: {result.size}")
+        return result, seed
+
     def submit(self, image: Image.Image, prompt: str, negative_prompt: str,
                strength: float, steps: int, guidance_scale: float,
                seed: int = -1, mode: str = "img2img",
                mask_image: Image.Image = None,
                ip_adapter_image: Image.Image = None,
-               ip_adapter_scale: float = 0.6, meta=None):
+               ip_adapter_scale: float = 0.6,
+               width: int = 1024, height: int = 1024,
+               meta=None):
         if self._busy:
             return False
         self._busy = True
@@ -249,7 +309,7 @@ class DiffusionEngine:
             target=self._run_inference,
             args=(image, prompt, negative_prompt, strength, steps,
                   guidance_scale, seed, mode, mask_image,
-                  ip_adapter_image, ip_adapter_scale),
+                  ip_adapter_image, ip_adapter_scale, width, height),
             daemon=True,
         )
         self._thread.start()
@@ -257,9 +317,14 @@ class DiffusionEngine:
 
     def _run_inference(self, image, prompt, negative_prompt, strength, steps,
                        guidance_scale, seed, mode, mask_image,
-                       ip_adapter_image, ip_adapter_scale):
+                       ip_adapter_image, ip_adapter_scale, width, height):
         try:
-            if mode == "inpaint" and mask_image is not None:
+            if mode == "txt2img":
+                result_image, used_seed = self._txt2img(
+                    prompt, negative_prompt, width, height,
+                    steps, guidance_scale, seed,
+                    ip_adapter_image, ip_adapter_scale)
+            elif mode == "inpaint" and mask_image is not None:
                 result_image, used_seed = self._inpaint(
                     image, mask_image, prompt, negative_prompt,
                     strength, steps, guidance_scale, seed,

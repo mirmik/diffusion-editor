@@ -120,6 +120,7 @@ class DiffusionPanel(QDockWidget):
         # Mode
         params_layout.addWidget(QLabel("Mode:"))
         self._mode_combo = QComboBox()
+        self._mode_combo.addItem("txt2img", "txt2img")
         self._mode_combo.addItem("img2img", "img2img")
         self._mode_combo.addItem("inpaint", "inpaint")
         params_layout.addWidget(self._mode_combo)

@@ -4,6 +4,7 @@ import numpy as np
 from PIL import Image
 from PyQt6.QtWidgets import (
     QMainWindow, QFileDialog, QStatusBar, QToolBar, QMessageBox,
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QSpinBox, QDialogButtonBox,
 )
 from PyQt6.QtGui import QAction, QKeySequence
 from PyQt6.QtCore import Qt, QTimer, QSettings
@@ -72,6 +73,11 @@ class EditorWindow(QMainWindow):
         menubar = self.menuBar()
 
         file_menu = menubar.addMenu("&File")
+        new_action = QAction("&New...", self)
+        new_action.setShortcut(QKeySequence("Ctrl+N"))
+        new_action.triggered.connect(self.new_project)
+        file_menu.addAction(new_action)
+
         open_action = QAction("&Open...", self)
         open_action.setShortcut(QKeySequence.StandardKey.Open)
         open_action.triggered.connect(self.open_file)
@@ -160,6 +166,41 @@ class EditorWindow(QMainWindow):
             self._statusbar.showMessage(f"{w}x{h}  |  ({x}, {y})  |  {layer_name}  |  Brush: {brush_size}px")
         else:
             self._statusbar.showMessage(f"{w}x{h}  |  {layer_name}  |  Brush: {brush_size}px")
+
+    def new_project(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("New Project")
+        layout = QVBoxLayout(dlg)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Width:"))
+        w_spin = QSpinBox()
+        w_spin.setRange(64, 8192)
+        w_spin.setValue(1024)
+        row.addWidget(w_spin)
+        row.addWidget(QLabel("Height:"))
+        h_spin = QSpinBox()
+        h_spin.setRange(64, 8192)
+        h_spin.setValue(1024)
+        row.addWidget(h_spin)
+        layout.addLayout(row)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        w, h = w_spin.value(), h_spin.value()
+        white = np.full((h, w, 4), 255, dtype=np.uint8)
+        self._layer_stack.init_from_image(white)
+        self._canvas.fit_in_view()
+        self._project_path = None
+        self.setWindowTitle("Diffusion Editor")
 
     def open_file(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -289,8 +330,17 @@ class EditorWindow(QMainWindow):
         if composite is None:
             return
 
+        mode = self._diffusion_panel.mode
         center_x, center_y = self._canvas.view_center_image()
-        patch_pil, px, py, pw, ph = extract_patch(composite, center_x, center_y)
+
+        if mode == "txt2img":
+            # No source image needed — patch covers entire canvas
+            patch_pil = None
+            px, py = 0, 0
+            pw = self._layer_stack.width
+            ph = self._layer_stack.height
+        else:
+            patch_pil, px, py, pw, ph = extract_patch(composite, center_x, center_y)
 
         seed = self._diffusion_panel.seed
         if seed < 0:
@@ -311,7 +361,7 @@ class EditorWindow(QMainWindow):
             seed=seed,
             model_path=self._engine.model_path or "",
             prediction_type=self._diffusion_panel.prediction_type,
-            mode=self._diffusion_panel.mode,
+            mode=mode,
         )
         self._layer_stack.insert_layer(dl)
 
@@ -350,32 +400,32 @@ class EditorWindow(QMainWindow):
 
         self._sync_panel_to_layer(layer)
 
-        # Вычисляем позицию и размер патча из маски
-        if layer.has_mask():
-            bbox = layer.mask_bbox()
-            center = layer.mask_center()
-            if bbox is not None and center is not None:
-                composite = self._canvas.get_composite_below(layer)
-                if composite is None:
-                    return
-                bx0, by0, bx1, by1 = bbox
-                mask_w = bx1 - bx0
-                mask_h = by1 - by0
-                # Патч — квадрат, покрывающий маску + 25% запас, минимум 512
-                patch_size = max(mask_w, mask_h)
-                patch_size = int(patch_size * 1.25)
-                patch_size = max(patch_size, 512)
-                center_x, center_y = center
-                patch_pil, px, py, pw, ph = extract_patch(
-                    composite, center_x, center_y, patch_size=patch_size)
-                layer.source_patch = patch_pil
-                layer.patch_x = px
-                layer.patch_y = py
-                layer.patch_w = pw
-                layer.patch_h = ph
+        if layer.mode != "txt2img":
+            # Вычисляем позицию и размер патча из маски
+            if layer.has_mask():
+                bbox = layer.mask_bbox()
+                center = layer.mask_center()
+                if bbox is not None and center is not None:
+                    composite = self._canvas.get_composite_below(layer)
+                    if composite is None:
+                        return
+                    bx0, by0, bx1, by1 = bbox
+                    mask_w = bx1 - bx0
+                    mask_h = by1 - by0
+                    patch_size = max(mask_w, mask_h)
+                    patch_size = int(patch_size * 1.25)
+                    patch_size = max(patch_size, 512)
+                    center_x, center_y = center
+                    patch_pil, px, py, pw, ph = extract_patch(
+                        composite, center_x, center_y, patch_size=patch_size)
+                    layer.source_patch = patch_pil
+                    layer.patch_x = px
+                    layer.patch_y = py
+                    layer.patch_w = pw
+                    layer.patch_h = ph
 
-        if layer.source_patch is None:
-            return
+            if layer.source_patch is None:
+                return
 
         # Если нужна другая модель — загружаем сначала
         if layer.model_path and layer.model_path != self._engine.model_path:
@@ -433,6 +483,8 @@ class EditorWindow(QMainWindow):
             mask_image=mask_image,
             ip_adapter_image=ip_adapter_image,
             ip_adapter_scale=layer.ip_adapter_scale,
+            width=layer.patch_w,
+            height=layer.patch_h,
         )
         self._statusbar.showMessage("Regenerating...")
 
