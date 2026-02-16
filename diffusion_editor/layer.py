@@ -177,13 +177,21 @@ class LayerStack(QObject):
         self._active_index = 0
         self.changed.emit()
 
-    def composite(self) -> np.ndarray:
+    def composite(self, exclude_above: int = -1) -> np.ndarray:
+        """Composite visible layers.
+
+        If exclude_above >= 0, only layers with index > exclude_above
+        are included (i.e. layers below the given index in the stack).
+        """
         if not self._layers or self._width == 0:
             return np.zeros((1, 1, 4), dtype=np.uint8)
 
         result = np.zeros((self._height, self._width, 4), dtype=np.float32)
 
-        for layer in reversed(self._layers):
+        for i, layer in enumerate(reversed(self._layers)):
+            real_idx = len(self._layers) - 1 - i
+            if exclude_above >= 0 and real_idx <= exclude_above:
+                continue
             if not layer.visible or layer.opacity <= 0:
                 continue
             src = layer.image.astype(np.float32)

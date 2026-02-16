@@ -48,6 +48,11 @@ class Canvas(QWidget):
     def get_composite(self) -> np.ndarray | None:
         return self._composite
 
+    def get_composite_below(self, layer_index: int) -> np.ndarray | None:
+        """Composite of layers below the given index (excluding it and above)."""
+        return np.ascontiguousarray(
+            self._layer_stack.composite(exclude_above=layer_index))
+
     def image_size(self):
         if self._layer_stack.width > 0:
             return self._layer_stack.width, self._layer_stack.height
@@ -207,6 +212,20 @@ class Canvas(QWidget):
             r, g, b, a = self._composite[iy, ix]
             self.color_picked.emit(int(r), int(g), int(b), int(a))
 
+    def _paint_brush(self, layer, ix, iy):
+        """Dab on both layer and composite buffer (fast, no recomposite)."""
+        self.brush.dab(layer.image, ix, iy)
+        if self._composite is not None:
+            self.brush.dab(self._composite, ix, iy)
+        self.update()
+
+    def _stroke_brush(self, layer, x0, y0, x1, y1):
+        """Stroke on both layer and composite buffer (fast, no recomposite)."""
+        self.brush.stroke(layer.image, x0, y0, x1, y1)
+        if self._composite is not None:
+            self.brush.stroke(self._composite, x0, y0, x1, y1)
+        self.update()
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.MiddleButton:
             self._panning = True
@@ -214,7 +233,7 @@ class Canvas(QWidget):
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
         elif event.button() == Qt.MouseButton.LeftButton:
             # Alt+Click = eyedropper
-            if event.modifiers() & Qt.KeyboardModifier.AltModifier:
+            if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
                 self._pick_color(event)
                 return
             layer = self._layer_stack.active_layer
@@ -226,8 +245,7 @@ class Canvas(QWidget):
                 self._dab_mask(layer.mask, ix, iy)
                 self.update()
             else:
-                self.brush.dab(layer.image, ix, iy)
-                self._on_stack_changed()
+                self._paint_brush(layer, ix, iy)
             self._last_paint_pos = (ix, iy)
 
     def mouseReleaseEvent(self, event):
@@ -236,6 +254,7 @@ class Canvas(QWidget):
             self.setCursor(Qt.CursorShape.ArrowCursor)
         elif event.button() == Qt.MouseButton.LeftButton:
             if self._painting:
+                self._on_stack_changed()  # full recomposite
                 self._layer_stack.changed.emit()
             self._painting = False
             self._last_paint_pos = None
@@ -259,10 +278,9 @@ class Canvas(QWidget):
             else:
                 if self._last_paint_pos:
                     lx, ly = self._last_paint_pos
-                    self.brush.stroke(layer.image, lx, ly, ix, iy)
+                    self._stroke_brush(layer, *self._last_paint_pos, ix, iy)
                 else:
-                    self.brush.dab(layer.image, ix, iy)
-                self._on_stack_changed()
+                    self._paint_brush(layer, ix, iy)
             self._last_paint_pos = (ix, iy)
 
         if self.image_size() is not None:

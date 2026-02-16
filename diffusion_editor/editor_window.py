@@ -285,7 +285,8 @@ class EditorWindow(QMainWindow):
             bbox = layer.mask_bbox()
             center = layer.mask_center()
             if bbox is not None and center is not None:
-                composite = self._canvas.get_composite()
+                active_idx = self._layer_stack.active_index
+                composite = self._canvas.get_composite_below(active_idx)
                 if composite is None:
                     return
                 bx0, by0, bx1, by1 = bbox
