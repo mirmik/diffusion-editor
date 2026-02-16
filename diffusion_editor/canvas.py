@@ -3,13 +3,13 @@ from PyQt6.QtWidgets import QWidget
 from PyQt6.QtCore import Qt, QPointF, pyqtSignal
 from PyQt6.QtGui import QPainter, QImage, QPen, QColor
 
-from .layer import LayerStack
+from .layer import LayerStack, DiffusionLayer
 from .brush import Brush
 
 
 class Canvas(QWidget):
     mouse_moved = pyqtSignal(int, int)
-    diffusion_requested = pyqtSignal(int, int)  # center_x, center_y
+    color_picked = pyqtSignal(int, int, int, int)  # r, g, b, a
 
     def __init__(self, layer_stack: LayerStack, parent=None):
         super().__init__(parent)
@@ -23,20 +23,18 @@ class Canvas(QWidget):
         self._painting = False
         self._last_paint_pos = None
         self.brush = Brush()
-        self._tool_mode = "brush"  # "brush" or "diffusion"
-        self._stroke_positions = []
-        self.diffusion_busy = False
+        self._mask_brush_size = 50
+        self._mask_brush_hardness = 0.8
+        self._mask_eraser = False
+        self._show_mask = True
+        self._mask_overlay = None
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         self._layer_stack.changed.connect(self._on_stack_changed)
 
-    def set_tool_mode(self, mode: str):
-        self._tool_mode = mode
-        if mode == "diffusion":
-            self.setCursor(Qt.CursorShape.CrossCursor)
-        else:
-            self.setCursor(Qt.CursorShape.ArrowCursor)
+    def _is_diffusion_active(self) -> bool:
+        return isinstance(self._layer_stack.active_layer, DiffusionLayer)
 
     def _on_stack_changed(self):
         self._update_composite()
@@ -71,14 +69,95 @@ class Canvas(QWidget):
             (ch - h * self._zoom) / 2,
         )
 
+    def view_center_image(self) -> tuple[int, int]:
+        cx = self.width() / 2
+        cy = self.height() / 2
+        return self.widget_to_image(QPointF(cx, cy))
+
     def widget_to_image(self, pos: QPointF) -> tuple[int, int]:
         x = (pos.x() - self._offset.x()) / self._zoom
         y = (pos.y() - self._offset.y()) / self._zoom
         return int(x), int(y)
 
-    def _brush_cursor_rect(self):
-        """Area around cursor to repaint for brush outline."""
-        return self.rect()
+    # --- Mask painting ---
+
+    def set_mask_brush(self, size: int, hardness: float):
+        self._mask_brush_size = size
+        self._mask_brush_hardness = hardness
+
+    def set_mask_eraser(self, eraser: bool):
+        self._mask_eraser = eraser
+
+    def set_show_mask(self, show: bool):
+        self._show_mask = show
+        self.update()
+
+    def _dab_mask(self, mask: np.ndarray, cx: int, cy: int):
+        d = self._mask_brush_size
+        if d < 1:
+            return
+
+        y, x = np.ogrid[-d / 2:d / 2, -d / 2:d / 2]
+        dist = np.sqrt(x * x + y * y)
+        radius = d / 2
+
+        if self._mask_brush_hardness >= 1.0:
+            alpha_mask = (dist <= radius).astype(np.float32) * 255
+        else:
+            inner = radius * self._mask_brush_hardness
+            alpha_mask = np.clip((radius - dist) / max(radius - inner, 0.001), 0, 1) * 255
+
+        sh, sw = alpha_mask.shape
+        ih, iw = mask.shape
+
+        x0 = cx - sw // 2
+        y0 = cy - sh // 2
+        sx0 = max(0, -x0)
+        sy0 = max(0, -y0)
+        sx1 = min(sw, iw - x0)
+        sy1 = min(sh, ih - y0)
+        dx0 = max(0, x0)
+        dy0 = max(0, y0)
+        dx1 = dx0 + (sx1 - sx0)
+        dy1 = dy0 + (sy1 - sy0)
+
+        if dx0 >= dx1 or dy0 >= dy1:
+            return
+
+        stamp_slice = alpha_mask[sy0:sy1, sx0:sx1].astype(np.uint8)
+        if self._mask_eraser:
+            mask[dy0:dy1, dx0:dx1] = np.clip(
+                mask[dy0:dy1, dx0:dx1].astype(np.int16) - stamp_slice.astype(np.int16),
+                0, 255).astype(np.uint8)
+        else:
+            mask[dy0:dy1, dx0:dx1] = np.maximum(mask[dy0:dy1, dx0:dx1], stamp_slice)
+
+    def _stroke_mask(self, mask: np.ndarray, x0: int, y0: int, x1: int, y1: int):
+        dx = x1 - x0
+        dy = y1 - y0
+        dist = max(abs(dx), abs(dy), 1)
+        spacing = max(1, self._mask_brush_size // 4)
+        steps = max(1, int(dist / spacing))
+        for i in range(steps + 1):
+            t = i / max(steps, 1)
+            x = int(x0 + dx * t)
+            y = int(y0 + dy * t)
+            self._dab_mask(mask, x, y)
+
+    # --- Mask overlay rendering ---
+
+    def _draw_mask_overlay(self, painter: QPainter, mask: np.ndarray):
+        h, w = mask.shape
+        self._mask_overlay = np.zeros((h, w, 4), dtype=np.uint8)
+        self._mask_overlay[:, :, 0] = 255
+        self._mask_overlay[:, :, 1] = 50
+        self._mask_overlay[:, :, 2] = 50
+        self._mask_overlay[:, :, 3] = (mask.astype(np.float32) * 0.4).astype(np.uint8)
+        self._mask_overlay = np.ascontiguousarray(self._mask_overlay)
+        qimg = QImage(self._mask_overlay.data, w, h, w * 4, QImage.Format.Format_RGBA8888)
+        painter.drawImage(0, 0, qimg)
+
+    # --- Events ---
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -88,6 +167,11 @@ class Canvas(QWidget):
             painter.translate(self._offset)
             painter.scale(self._zoom, self._zoom)
             painter.drawImage(0, 0, self._qimage)
+
+            layer = self._layer_stack.active_layer
+            if self._show_mask and isinstance(layer, DiffusionLayer) and layer.has_mask():
+                self._draw_mask_overlay(painter, layer.mask)
+
         painter.end()
 
     def wheelEvent(self, event):
@@ -113,22 +197,37 @@ class Canvas(QWidget):
         else:
             super().keyPressEvent(event)
 
+    def _pick_color(self, event):
+        """Eyedropper: sample color from composite under cursor."""
+        if self._composite is None:
+            return
+        ix, iy = self.widget_to_image(event.position())
+        h, w = self._composite.shape[:2]
+        if 0 <= ix < w and 0 <= iy < h:
+            r, g, b, a = self._composite[iy, ix]
+            self.color_picked.emit(int(r), int(g), int(b), int(a))
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.MiddleButton:
             self._panning = True
             self._pan_start = event.position() - self._offset
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
         elif event.button() == Qt.MouseButton.LeftButton:
+            # Alt+Click = eyedropper
+            if event.modifiers() & Qt.KeyboardModifier.AltModifier:
+                self._pick_color(event)
+                return
             layer = self._layer_stack.active_layer
             if layer is None:
                 return
             self._painting = True
             ix, iy = self.widget_to_image(event.position())
-            if self._tool_mode == "brush":
-                self.brush.dab(layer.image, ix, iy)
-                self._layer_stack.changed.emit()
+            if self._is_diffusion_active():
+                self._dab_mask(layer.mask, ix, iy)
+                self.update()
             else:
-                self._stroke_positions = [(ix, iy)]
+                self.brush.dab(layer.image, ix, iy)
+                self._on_stack_changed()
             self._last_paint_pos = (ix, iy)
 
     def mouseReleaseEvent(self, event):
@@ -136,16 +235,10 @@ class Canvas(QWidget):
             self._panning = False
             self.setCursor(Qt.CursorShape.ArrowCursor)
         elif event.button() == Qt.MouseButton.LeftButton:
+            if self._painting:
+                self._layer_stack.changed.emit()
             self._painting = False
             self._last_paint_pos = None
-            if self._tool_mode == "diffusion" and self._stroke_positions and not self.diffusion_busy:
-                xs = [p[0] for p in self._stroke_positions]
-                ys = [p[1] for p in self._stroke_positions]
-                center_x = (min(xs) + max(xs)) // 2
-                center_y = (min(ys) + max(ys)) // 2
-                self._stroke_positions.clear()
-                self.diffusion_busy = True
-                self.diffusion_requested.emit(center_x, center_y)
 
     def mouseMoveEvent(self, event):
         if self._panning:
@@ -156,15 +249,20 @@ class Canvas(QWidget):
             if layer is None:
                 return
             ix, iy = self.widget_to_image(event.position())
-            if self._tool_mode == "brush":
+            if self._is_diffusion_active():
+                if self._last_paint_pos:
+                    lx, ly = self._last_paint_pos
+                    self._stroke_mask(layer.mask, lx, ly, ix, iy)
+                else:
+                    self._dab_mask(layer.mask, ix, iy)
+                self.update()
+            else:
                 if self._last_paint_pos:
                     lx, ly = self._last_paint_pos
                     self.brush.stroke(layer.image, lx, ly, ix, iy)
                 else:
                     self.brush.dab(layer.image, ix, iy)
-                self._layer_stack.changed.emit()
-            else:
-                self._stroke_positions.append((ix, iy))
+                self._on_stack_changed()
             self._last_paint_pos = (ix, iy)
 
         if self.image_size() is not None:

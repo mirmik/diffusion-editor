@@ -37,6 +37,10 @@ class DiffusionEngine:
     def is_busy(self) -> bool:
         return self._busy
 
+    @property
+    def model_path(self) -> str | None:
+        return self._model_path
+
     def load_model(self, safetensors_path: str, prediction_type: str | None = None):
         self.unload()
 
@@ -81,7 +85,7 @@ class DiffusionEngine:
 
     def _img2img(self, image: Image.Image, prompt: str, negative_prompt: str,
                  strength: float, num_inference_steps: int,
-                 guidance_scale: float) -> Image.Image:
+                 guidance_scale: float, seed: int = -1) -> tuple[Image.Image, int]:
         if self._pipe is None:
             raise RuntimeError("No model loaded")
 
@@ -94,6 +98,20 @@ class DiffusionEngine:
         if (w8, h8) != (w, h):
             image = image.resize((w8, h8), Image.LANCZOS)
 
+        if seed == -1:
+            seed = torch.randint(0, 2**32, (1,)).item()
+        generator = torch.Generator(device="cuda").manual_seed(seed)
+
+        print(f"[DiffusionEngine] _img2img params:")
+        print(f"  prompt:          {prompt!r}")
+        print(f"  negative_prompt: {negative_prompt!r}")
+        print(f"  image size:      {image.size}")
+        print(f"  strength:        {strength}")
+        print(f"  steps:           {num_inference_steps}")
+        print(f"  guidance_scale:  {guidance_scale}")
+        print(f"  seed:            {seed}")
+        print(f"  model:           {self._model_path}")
+
         result = self._pipe(
             prompt=prompt,
             negative_prompt=negative_prompt,
@@ -101,12 +119,15 @@ class DiffusionEngine:
             strength=strength,
             num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale,
+            generator=generator,
         ).images[0]
 
-        return result
+        print(f"[DiffusionEngine] done, result size: {result.size}")
+        return result, seed
 
     def submit(self, image: Image.Image, prompt: str, negative_prompt: str,
-               strength: float, steps: int, guidance_scale: float, meta=None):
+               strength: float, steps: int, guidance_scale: float,
+               seed: int = -1, meta=None):
         if self._busy:
             return False
         self._busy = True
@@ -116,17 +137,18 @@ class DiffusionEngine:
         self._task_type = "inference"
         self._thread = threading.Thread(
             target=self._run_inference,
-            args=(image, prompt, negative_prompt, strength, steps, guidance_scale),
+            args=(image, prompt, negative_prompt, strength, steps, guidance_scale, seed),
             daemon=True,
         )
         self._thread.start()
         return True
 
-    def _run_inference(self, image, prompt, negative_prompt, strength, steps, guidance_scale):
+    def _run_inference(self, image, prompt, negative_prompt, strength, steps, guidance_scale, seed):
         try:
-            result = self._img2img(image, prompt, negative_prompt,
-                                   strength, steps, guidance_scale)
-            self._result = result
+            result_image, used_seed = self._img2img(
+                image, prompt, negative_prompt,
+                strength, steps, guidance_scale, seed)
+            self._result = (result_image, used_seed)
         except Exception as e:
             self._error = str(e)
         self._busy = False

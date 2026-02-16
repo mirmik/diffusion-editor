@@ -1,4 +1,5 @@
 import numpy as np
+from PIL import Image
 from PyQt6.QtCore import QObject, pyqtSignal
 
 
@@ -19,6 +20,54 @@ class Layer:
     @property
     def height(self):
         return self.image.shape[0]
+
+
+class DiffusionLayer(Layer):
+    def __init__(self, name: str, width: int, height: int,
+                 source_patch: Image.Image,
+                 patch_x: int, patch_y: int, patch_w: int, patch_h: int,
+                 prompt: str, negative_prompt: str,
+                 strength: float, guidance_scale: float, steps: int,
+                 seed: int,
+                 model_path: str = "", prediction_type: str = ""):
+        super().__init__(name, width, height)
+        self.source_patch = source_patch
+        self.patch_x = patch_x
+        self.patch_y = patch_y
+        self.patch_w = patch_w
+        self.patch_h = patch_h
+        self.prompt = prompt
+        self.negative_prompt = negative_prompt
+        self.strength = strength
+        self.guidance_scale = guidance_scale
+        self.steps = steps
+        self.seed = seed
+        self.model_path = model_path
+        self.prediction_type = prediction_type
+        self.mask = np.zeros((height, width), dtype=np.uint8)
+
+    def clear_mask(self):
+        self.mask[:] = 0
+
+    def has_mask(self) -> bool:
+        return np.any(self.mask > 0)
+
+    def mask_bbox(self) -> tuple[int, int, int, int] | None:
+        """Return (x0, y0, x1, y1) bounding box of non-zero mask pixels."""
+        rows = np.any(self.mask > 0, axis=1)
+        cols = np.any(self.mask > 0, axis=0)
+        if not np.any(rows):
+            return None
+        y0, y1 = np.where(rows)[0][[0, -1]]
+        x0, x1 = np.where(cols)[0][[0, -1]]
+        return int(x0), int(y0), int(x1) + 1, int(y1) + 1
+
+    def mask_center(self) -> tuple[int, int] | None:
+        bbox = self.mask_bbox()
+        if bbox is None:
+            return None
+        x0, y0, x1, y1 = bbox
+        return (x0 + x1) // 2, (y0 + y1) // 2
 
 
 class LayerStack(QObject):
@@ -78,6 +127,14 @@ class LayerStack(QObject):
         self._active_index = insert_at
         self.changed.emit()
 
+    def insert_layer(self, layer: Layer):
+        if self._width == 0 or self._height == 0:
+            return
+        insert_at = self._active_index if self._active_index >= 0 else 0
+        self._layers.insert(insert_at, layer)
+        self._active_index = insert_at
+        self.changed.emit()
+
     def remove_layer(self, index: int):
         if len(self._layers) <= 1:
             return
@@ -96,6 +153,15 @@ class LayerStack(QObject):
         layer = self._layers.pop(from_idx)
         self._layers.insert(to_idx, layer)
         self._active_index = to_idx
+        self.changed.emit()
+
+    def reorder(self, new_indices: list[int]):
+        if len(new_indices) != len(self._layers):
+            return
+        active_layer = self.active_layer
+        self._layers = [self._layers[i] for i in new_indices]
+        if active_layer in self._layers:
+            self._active_index = self._layers.index(active_layer)
         self.changed.emit()
 
     def set_visibility(self, index: int, visible: bool):

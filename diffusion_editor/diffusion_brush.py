@@ -4,25 +4,27 @@ from PIL import Image
 PATCH_SIZE = 512
 
 
-def extract_patch(composite: np.ndarray, center_x: int, center_y: int):
-    """Extract a PATCH_SIZE x PATCH_SIZE region from the composite.
+def extract_patch(composite: np.ndarray, center_x: int, center_y: int,
+                  patch_size: int = PATCH_SIZE):
+    """Extract a patch_size x patch_size region from the composite.
 
     Returns:
-        patch_pil: PIL Image (RGB, resized to 512x512 if smaller)
+        patch_pil: PIL Image (RGB)
         paste_x, paste_y: top-left corner in image coords
-        patch_w, patch_h: actual extracted size before resize
+        patch_w, patch_h: actual extracted size
     """
     h, w = composite.shape[:2]
-    half = PATCH_SIZE // 2
+    patch_size = max(patch_size, 8)
+    half = patch_size // 2
 
     x0 = max(0, center_x - half)
     y0 = max(0, center_y - half)
-    x1 = min(w, x0 + PATCH_SIZE)
-    y1 = min(h, y0 + PATCH_SIZE)
+    x1 = min(w, x0 + patch_size)
+    y1 = min(h, y0 + patch_size)
 
     # re-adjust if clamped on right/bottom
-    x0 = max(0, x1 - PATCH_SIZE)
-    y0 = max(0, y1 - PATCH_SIZE)
+    x0 = max(0, x1 - patch_size)
+    y0 = max(0, y1 - patch_size)
 
     patch_arr = composite[y0:y1, x0:x1]
     patch_pil = Image.fromarray(patch_arr).convert("RGB")
@@ -34,15 +36,18 @@ def extract_patch(composite: np.ndarray, center_x: int, center_y: int):
 
 
 def paste_result(layer_image: np.ndarray, result_pil: Image.Image,
-                 paste_x: int, paste_y: int, patch_w: int, patch_h: int):
+                 paste_x: int, paste_y: int, patch_w: int, patch_h: int,
+                 mask: np.ndarray = None):
     """Paste diffusion result back onto layer_image.
 
     result_pil is 512x512 RGB from the pipeline.
     Resizes to (patch_w, patch_h) and overwrites the region.
+
+    If mask is provided (2D uint8, full layer size), mask values become
+    the alpha channel of the pasted result (0 = transparent, 255 = opaque).
     """
     result = result_pil.resize((patch_w, patch_h), Image.LANCZOS)
     result_arr = np.array(result.convert("RGBA"), dtype=np.uint8)
-    result_arr[:, :, 3] = 255
 
     h, w = layer_image.shape[:2]
     rh, rw = result_arr.shape[:2]
@@ -55,4 +60,12 @@ def paste_result(layer_image: np.ndarray, result_pil: Image.Image,
     if rw_clamp <= 0 or rh_clamp <= 0:
         return
 
-    layer_image[paste_y:ey, paste_x:ex] = result_arr[:rh_clamp, :rw_clamp]
+    result_slice = result_arr[:rh_clamp, :rw_clamp]
+
+    if mask is not None:
+        mask_slice = mask[paste_y:ey, paste_x:ex]
+        result_slice[:, :, 3] = mask_slice
+    else:
+        result_slice[:, :, 3] = 255
+
+    layer_image[paste_y:ey, paste_x:ex] = result_slice
