@@ -9,6 +9,7 @@ from .brush import Brush
 
 class Canvas(QWidget):
     mouse_moved = pyqtSignal(int, int)
+    diffusion_requested = pyqtSignal(int, int)  # center_x, center_y
 
     def __init__(self, layer_stack: LayerStack, parent=None):
         super().__init__(parent)
@@ -22,10 +23,20 @@ class Canvas(QWidget):
         self._painting = False
         self._last_paint_pos = None
         self.brush = Brush()
+        self._tool_mode = "brush"  # "brush" or "diffusion"
+        self._stroke_positions = []
+        self.diffusion_busy = False
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         self._layer_stack.changed.connect(self._on_stack_changed)
+
+    def set_tool_mode(self, mode: str):
+        self._tool_mode = mode
+        if mode == "diffusion":
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
 
     def _on_stack_changed(self):
         self._update_composite()
@@ -113,9 +124,12 @@ class Canvas(QWidget):
                 return
             self._painting = True
             ix, iy = self.widget_to_image(event.position())
-            self.brush.dab(layer.image, ix, iy)
+            if self._tool_mode == "brush":
+                self.brush.dab(layer.image, ix, iy)
+                self._layer_stack.changed.emit()
+            else:
+                self._stroke_positions = [(ix, iy)]
             self._last_paint_pos = (ix, iy)
-            self._layer_stack.changed.emit()
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.MiddleButton:
@@ -124,6 +138,14 @@ class Canvas(QWidget):
         elif event.button() == Qt.MouseButton.LeftButton:
             self._painting = False
             self._last_paint_pos = None
+            if self._tool_mode == "diffusion" and self._stroke_positions and not self.diffusion_busy:
+                xs = [p[0] for p in self._stroke_positions]
+                ys = [p[1] for p in self._stroke_positions]
+                center_x = (min(xs) + max(xs)) // 2
+                center_y = (min(ys) + max(ys)) // 2
+                self._stroke_positions.clear()
+                self.diffusion_busy = True
+                self.diffusion_requested.emit(center_x, center_y)
 
     def mouseMoveEvent(self, event):
         if self._panning:
@@ -134,13 +156,16 @@ class Canvas(QWidget):
             if layer is None:
                 return
             ix, iy = self.widget_to_image(event.position())
-            if self._last_paint_pos:
-                lx, ly = self._last_paint_pos
-                self.brush.stroke(layer.image, lx, ly, ix, iy)
+            if self._tool_mode == "brush":
+                if self._last_paint_pos:
+                    lx, ly = self._last_paint_pos
+                    self.brush.stroke(layer.image, lx, ly, ix, iy)
+                else:
+                    self.brush.dab(layer.image, ix, iy)
+                self._layer_stack.changed.emit()
             else:
-                self.brush.dab(layer.image, ix, iy)
+                self._stroke_positions.append((ix, iy))
             self._last_paint_pos = (ix, iy)
-            self._layer_stack.changed.emit()
 
         if self.image_size() is not None:
             ix, iy = self.widget_to_image(event.position())

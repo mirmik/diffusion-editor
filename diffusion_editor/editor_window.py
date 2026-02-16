@@ -4,11 +4,14 @@ from PyQt6.QtWidgets import (
     QMainWindow, QFileDialog, QStatusBar, QToolBar, QColorDialog,
 )
 from PyQt6.QtGui import QAction, QKeySequence, QColor
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 
 from .layer import LayerStack
 from .canvas import Canvas
 from .layer_panel import LayerPanel
+from .diffusion_engine import DiffusionEngine
+from .diffusion_panel import DiffusionPanel
+from .diffusion_brush import extract_patch, paste_result
 
 
 class EditorWindow(QMainWindow):
@@ -24,12 +27,24 @@ class EditorWindow(QMainWindow):
         self._layer_panel = LayerPanel(self._layer_stack, self)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._layer_panel)
 
+        self._engine = DiffusionEngine()
+        self._diffusion_panel = DiffusionPanel(self)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._diffusion_panel)
+
         self._setup_menu()
         self._setup_toolbar()
         self._setup_statusbar()
 
         self._canvas.mouse_moved.connect(self._on_mouse_moved)
+        self._canvas.diffusion_requested.connect(self._on_diffusion_requested)
+        self._diffusion_panel.load_model_requested.connect(self._on_load_model)
+        self._diffusion_panel.tool_toggled.connect(self._on_tool_toggled)
         self._current_path = None
+        self._pending_paste = None
+
+        self._poll_timer = QTimer(self)
+        self._poll_timer.timeout.connect(self._poll_engine)
+        self._poll_timer.start(50)
 
     def _setup_menu(self):
         menubar = self.menuBar()
@@ -184,3 +199,63 @@ class EditorWindow(QMainWindow):
             img = img.convert("RGB")
         img.save(path)
         self._statusbar.showMessage(f"Saved: {path}", 3000)
+
+    # --- Diffusion ---
+
+    def _on_load_model(self, path: str, prediction_type: str):
+        if self._engine.is_busy:
+            return
+        pred = prediction_type if prediction_type else None
+        self._engine.submit_load(path, pred)
+
+    def _on_tool_toggled(self, active: bool):
+        self._canvas.set_tool_mode("diffusion" if active else "brush")
+
+    def _on_diffusion_requested(self, center_x: int, center_y: int):
+        composite = self._canvas.get_composite()
+        if composite is None:
+            self._canvas.diffusion_busy = False
+            return
+        if not self._engine.is_loaded:
+            self._statusbar.showMessage("No diffusion model loaded!", 3000)
+            self._canvas.diffusion_busy = False
+            return
+
+        patch_pil, px, py, pw, ph = extract_patch(composite, center_x, center_y)
+        self._pending_paste = (px, py, pw, ph)
+
+        self._engine.submit(
+            image=patch_pil,
+            prompt=self._diffusion_panel.prompt,
+            negative_prompt=self._diffusion_panel.negative_prompt,
+            strength=self._diffusion_panel.strength,
+            steps=self._diffusion_panel.steps,
+            guidance_scale=self._diffusion_panel.guidance_scale,
+        )
+        self._statusbar.showMessage("Diffusion processing...")
+
+    def _poll_engine(self):
+        task_type, result, error, meta = self._engine.poll()
+        if task_type is None:
+            return
+
+        if task_type == "load":
+            if error:
+                self._diffusion_panel.on_model_load_error(error)
+                self._statusbar.showMessage(f"Model load error: {error[:80]}", 5000)
+            else:
+                self._diffusion_panel.on_model_loaded(result, self._engine.model_info)
+                self._statusbar.showMessage("Model loaded", 3000)
+
+        elif task_type == "inference":
+            if error:
+                self._statusbar.showMessage(f"Diffusion error: {error[:80]}", 5000)
+            else:
+                layer = self._layer_stack.active_layer
+                if layer is not None and self._pending_paste is not None:
+                    px, py, pw, ph = self._pending_paste
+                    paste_result(layer.image, result, px, py, pw, ph)
+                    self._layer_stack.changed.emit()
+                    self._statusbar.showMessage("Diffusion done", 2000)
+                self._pending_paste = None
+            self._canvas.diffusion_busy = False
