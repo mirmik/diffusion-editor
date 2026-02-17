@@ -50,6 +50,7 @@ class DiffusionPanel(QDockWidget):
     draw_rect_toggled = pyqtSignal(bool)
     show_rect_toggled = pyqtSignal(bool)
     clear_rect_requested = pyqtSignal()
+    select_background_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__("Diffusion", parent)
@@ -124,6 +125,15 @@ class DiffusionPanel(QDockWidget):
         self._mode_combo.addItem("img2img", "img2img")
         self._mode_combo.addItem("inpaint", "inpaint")
         params_layout.addWidget(self._mode_combo)
+
+        # Masked content (inpaint only)
+        params_layout.addWidget(QLabel("Masked Content:"))
+        self._masked_content_combo = QComboBox()
+        self._masked_content_combo.addItem("original", "original")
+        self._masked_content_combo.addItem("fill", "fill")
+        self._masked_content_combo.addItem("latent noise", "latent_noise")
+        self._masked_content_combo.addItem("latent nothing", "latent_nothing")
+        params_layout.addWidget(self._masked_content_combo)
 
         # Denoising strength
         params_layout.addWidget(QLabel("Denoising Strength:"))
@@ -200,6 +210,9 @@ class DiffusionPanel(QDockWidget):
         btn_row.addWidget(self._mask_eraser_btn)
         btn_row.addWidget(self._show_mask_btn)
         mask_layout.addLayout(btn_row)
+
+        self._select_bg_btn = QPushButton("Select Background")
+        mask_layout.addWidget(self._select_bg_btn)
 
         _make_collapsible(mask_group, self._settings, "mask_brush")
         layout.addWidget(mask_group)
@@ -287,6 +300,7 @@ class DiffusionPanel(QDockWidget):
         self._draw_rect_btn.toggled.connect(self.draw_rect_toggled.emit)
         self._show_rect_btn.toggled.connect(self.show_rect_toggled.emit)
         self._clear_rect_btn.clicked.connect(self.clear_rect_requested.emit)
+        self._select_bg_btn.clicked.connect(self.select_background_requested.emit)
         self._ip_scale_slider.valueChanged.connect(
             lambda v: self._ip_scale_label.setText(f"{v / 100:.2f}")
         )
@@ -392,6 +406,10 @@ class DiffusionPanel(QDockWidget):
         return self._mode_combo.currentData()
 
     @property
+    def masked_content(self) -> str:
+        return self._masked_content_combo.currentData()
+
+    @property
     def ip_adapter_scale(self) -> float:
         return self._ip_scale_slider.value() / 100.0
 
@@ -414,6 +432,9 @@ class DiffusionPanel(QDockWidget):
         idx = self._mode_combo.findData(layer.mode)
         if idx >= 0:
             self._mode_combo.setCurrentIndex(idx)
+        mc_idx = self._masked_content_combo.findData(layer.masked_content)
+        if mc_idx >= 0:
+            self._masked_content_combo.setCurrentIndex(mc_idx)
         self._ip_scale_slider.setValue(int(layer.ip_adapter_scale * 100))
         model_name = os.path.basename(layer.model_path) if layer.model_path else "?"
         mask_status = "has mask" if layer.has_mask() else "no mask"

@@ -118,6 +118,7 @@ class DiffusionLayer(Layer):
         self.mask = np.zeros((height, width), dtype=np.uint8)
         self.ip_adapter_rect = None   # (x0, y0, x1, y1) or None
         self.ip_adapter_scale = 0.6
+        self.masked_content = "original"  # original, fill, latent_noise, latent_nothing
 
     def clear_mask(self):
         self.mask[:] = 0
@@ -163,6 +164,7 @@ class DiffusionLayer(Layer):
         d["prediction_type"] = self.prediction_type
         d["ip_adapter_rect"] = list(self.ip_adapter_rect) if self.ip_adapter_rect else None
         d["ip_adapter_scale"] = self.ip_adapter_scale
+        d["masked_content"] = self.masked_content
         return d
 
     def save_images_to_zip(self, zf: zipfile.ZipFile, path: str):
@@ -218,6 +220,7 @@ class DiffusionLayer(Layer):
         rect = d.get("ip_adapter_rect")
         layer.ip_adapter_rect = tuple(rect) if rect else None
         layer.ip_adapter_scale = d.get("ip_adapter_scale", 0.6)
+        layer.masked_content = d.get("masked_content", "original")
         for child_dict in d.get("children", []):
             child = _layer_from_dict(child_dict, zf)
             child.parent = layer

@@ -15,6 +15,7 @@ from .layer_panel import LayerPanel
 from .brush_panel import BrushPanel
 from .diffusion_engine import DiffusionEngine
 from .diffusion_panel import DiffusionPanel
+from .segmentation import SegmentationEngine
 from .diffusion_brush import extract_patch, extract_mask_patch, paste_result
 
 
@@ -36,6 +37,7 @@ class EditorWindow(QMainWindow):
         self._brush_panel.setVisible(False)
 
         self._engine = DiffusionEngine()
+        self._seg_engine = SegmentationEngine()
         self._diffusion_panel = DiffusionPanel(self)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._diffusion_panel)
         self._diffusion_panel.setVisible(False)
@@ -57,6 +59,7 @@ class EditorWindow(QMainWindow):
         self._diffusion_panel.draw_rect_toggled.connect(self._canvas.set_ref_rect_mode)
         self._diffusion_panel.show_rect_toggled.connect(self._canvas.set_show_ref_rect)
         self._diffusion_panel.clear_rect_requested.connect(self._on_clear_ref_rect)
+        self._diffusion_panel.select_background_requested.connect(self._on_select_background)
         self._canvas.ref_rect_drawn.connect(self._on_ref_rect_drawn)
         self._layer_panel.create_diffusion_requested.connect(self._on_create_diffusion)
         self._layer_stack.changed.connect(self._on_layer_changed)
@@ -77,6 +80,12 @@ class EditorWindow(QMainWindow):
         new_action.setShortcut(QKeySequence("Ctrl+N"))
         new_action.triggered.connect(self.new_project)
         file_menu.addAction(new_action)
+
+        new_from_image_action = QAction("New From &Image...", self)
+        new_from_image_action.triggered.connect(self.new_project_from_image)
+        file_menu.addAction(new_from_image_action)
+
+        file_menu.addSeparator()
 
         open_action = QAction("&Open...", self)
         open_action.setShortcut(QKeySequence.StandardKey.Open)
@@ -198,6 +207,21 @@ class EditorWindow(QMainWindow):
         w, h = w_spin.value(), h_spin.value()
         white = np.full((h, w, 4), 255, dtype=np.uint8)
         self._layer_stack.init_from_image(white)
+        self._canvas.fit_in_view()
+        self._project_path = None
+        self.setWindowTitle("Diffusion Editor")
+
+    def new_project_from_image(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "New Project From Image", self._last_dir,
+            "Images (*.png *.jpg *.jpeg *.bmp *.tiff *.webp);;All Files (*)")
+        if not path:
+            return
+        self._last_dir = os.path.dirname(path)
+        self._settings.setValue("last_dir", self._last_dir)
+        img = Image.open(path).convert("RGBA")
+        arr = np.array(img, dtype=np.uint8)
+        self._layer_stack.init_from_image(arr)
         self._canvas.fit_in_view()
         self._project_path = None
         self.setWindowTitle("Diffusion Editor")
@@ -386,6 +410,7 @@ class EditorWindow(QMainWindow):
         layer.steps = self._diffusion_panel.steps
         layer.seed = self._diffusion_panel.seed
         layer.mode = self._diffusion_panel.mode
+        layer.masked_content = self._diffusion_panel.masked_content
         layer.ip_adapter_scale = self._diffusion_panel.ip_adapter_scale
         if self._engine.model_path:
             layer.model_path = self._engine.model_path
@@ -481,6 +506,7 @@ class EditorWindow(QMainWindow):
             seed=layer.seed,
             mode=layer.mode,
             mask_image=mask_image,
+            masked_content=layer.masked_content,
             ip_adapter_image=ip_adapter_image,
             ip_adapter_scale=layer.ip_adapter_scale,
             width=layer.patch_w,
@@ -520,7 +546,40 @@ class EditorWindow(QMainWindow):
             self._diffusion_panel.show_diffusion_layer(layer)
             self._canvas.update()
 
+    def _on_select_background(self):
+        print("[SelectBG] handler called")
+        layer = self._layer_stack.active_layer
+        if not isinstance(layer, DiffusionLayer):
+            print(f"[SelectBG] not a DiffusionLayer: {type(layer)}")
+            return
+        if self._seg_engine.is_busy:
+            print("[SelectBG] seg_engine is busy")
+            return
+        composite = self._canvas.get_composite_below(layer)
+        if composite is None:
+            print("[SelectBG] composite is None")
+            return
+        print(f"[SelectBG] submitting, composite shape={composite.shape}")
+        self._seg_engine.submit(composite, invert=True)
+        self._diffusion_panel._select_bg_btn.setEnabled(False)
+        self._statusbar.showMessage("Segmenting background...")
+
+    def _poll_segmentation(self):
+        seg_mask, seg_error = self._seg_engine.poll()
+        if seg_mask is not None:
+            layer = self._layer_stack.active_layer
+            if isinstance(layer, DiffusionLayer):
+                layer.mask = seg_mask
+                self._layer_stack.changed.emit()
+            self._diffusion_panel._select_bg_btn.setEnabled(True)
+            self._statusbar.showMessage("Background mask applied", 3000)
+        elif seg_error is not None:
+            self._diffusion_panel._select_bg_btn.setEnabled(True)
+            self._statusbar.showMessage(f"Segmentation error: {seg_error[:80]}", 5000)
+
     def _poll_engine(self):
+        self._poll_segmentation()
+
         task_type, result, error, meta = self._engine.poll()
         if task_type is None:
             return
@@ -561,10 +620,15 @@ class EditorWindow(QMainWindow):
             if isinstance(self._pending_request, DiffusionLayer):
                 dl = self._pending_request
                 dl.image[:] = 0
-                # In inpaint mode the pipeline handles masking — don't apply
-                # mask as alpha again (double-masking creates visible edges).
-                # In img2img mode, mask controls where the result is visible.
-                mask_arg = dl.mask if (dl.mode != "inpaint" and dl.has_mask()) else None
+                if dl.has_mask():
+                    # Feather the mask: dilate + blur for smooth edges
+                    from PIL import ImageFilter
+                    mask_pil = Image.fromarray(dl.mask, "L")
+                    mask_pil = mask_pil.filter(ImageFilter.MaxFilter(7))
+                    mask_pil = mask_pil.filter(ImageFilter.GaussianBlur(radius=4))
+                    mask_arg = np.array(mask_pil, dtype=np.uint8)
+                else:
+                    mask_arg = None
                 paste_result(dl.image, result_image, dl.patch_x, dl.patch_y,
                              dl.patch_w, dl.patch_h, mask=mask_arg)
                 self._layer_stack.changed.emit()

@@ -193,7 +193,8 @@ class DiffusionEngine:
                  strength: float, num_inference_steps: int,
                  guidance_scale: float, seed: int = -1,
                  ip_adapter_image: Image.Image = None,
-                 ip_adapter_scale: float = 0.6) -> tuple[Image.Image, int]:
+                 ip_adapter_scale: float = 0.6,
+                 masked_content: str = "original") -> tuple[Image.Image, int]:
         self._ensure_pipeline("inpaint")
 
         image = image.convert("RGB")
@@ -206,6 +207,27 @@ class DiffusionEngine:
             image = image.resize((w8, h8), Image.LANCZOS)
             mask_image = mask_image.resize((w8, h8), Image.NEAREST)
 
+        # Preprocess masked area based on masked_content mode
+        if masked_content != "original":
+            import numpy as np
+            img_arr = np.array(image)
+            mask_arr = np.array(mask_image).astype(np.float32) / 255.0
+            if masked_content == "fill":
+                from PIL import ImageFilter
+                blurred = image.filter(ImageFilter.GaussianBlur(radius=32))
+                blur_arr = np.array(blurred)
+                mask_3d = mask_arr[:, :, None]
+                img_arr = (blur_arr * mask_3d + img_arr * (1 - mask_3d)).astype(np.uint8)
+            elif masked_content == "latent_noise":
+                noise = np.random.randint(0, 256, img_arr.shape, dtype=np.uint8)
+                mask_3d = mask_arr[:, :, None]
+                img_arr = (noise * mask_3d + img_arr * (1 - mask_3d)).astype(np.uint8)
+            elif masked_content == "latent_nothing":
+                mask_3d = mask_arr[:, :, None]
+                gray = np.full_like(img_arr, 127)
+                img_arr = (gray * mask_3d + img_arr * (1 - mask_3d)).astype(np.uint8)
+            image = Image.fromarray(img_arr, "RGB")
+
         if seed == -1:
             seed = torch.randint(0, 2**32, (1,)).item()
         generator = torch.Generator(device="cpu").manual_seed(seed)
@@ -215,6 +237,7 @@ class DiffusionEngine:
         print(f"  negative_prompt: {negative_prompt!r}")
         print(f"  image size:      {image.size}")
         print(f"  mask size:       {mask_image.size}")
+        print(f"  masked_content:  {masked_content}")
         print(f"  strength:        {strength}")
         print(f"  steps:           {num_inference_steps}")
         print(f"  guidance_scale:  {guidance_scale}")
@@ -227,6 +250,8 @@ class DiffusionEngine:
             negative_prompt=negative_prompt,
             image=image,
             mask_image=mask_image,
+            width=w8,
+            height=h8,
             strength=strength,
             num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale,
@@ -294,6 +319,7 @@ class DiffusionEngine:
                strength: float, steps: int, guidance_scale: float,
                seed: int = -1, mode: str = "img2img",
                mask_image: Image.Image = None,
+               masked_content: str = "original",
                ip_adapter_image: Image.Image = None,
                ip_adapter_scale: float = 0.6,
                width: int = 1024, height: int = 1024,
@@ -308,7 +334,7 @@ class DiffusionEngine:
         self._thread = threading.Thread(
             target=self._run_inference,
             args=(image, prompt, negative_prompt, strength, steps,
-                  guidance_scale, seed, mode, mask_image,
+                  guidance_scale, seed, mode, mask_image, masked_content,
                   ip_adapter_image, ip_adapter_scale, width, height),
             daemon=True,
         )
@@ -316,7 +342,7 @@ class DiffusionEngine:
         return True
 
     def _run_inference(self, image, prompt, negative_prompt, strength, steps,
-                       guidance_scale, seed, mode, mask_image,
+                       guidance_scale, seed, mode, mask_image, masked_content,
                        ip_adapter_image, ip_adapter_scale, width, height):
         try:
             if mode == "txt2img":
@@ -328,7 +354,8 @@ class DiffusionEngine:
                 result_image, used_seed = self._inpaint(
                     image, mask_image, prompt, negative_prompt,
                     strength, steps, guidance_scale, seed,
-                    ip_adapter_image, ip_adapter_scale)
+                    ip_adapter_image, ip_adapter_scale,
+                    masked_content=masked_content)
             else:
                 result_image, used_seed = self._img2img(
                     image, prompt, negative_prompt,
