@@ -1,15 +1,17 @@
 from PyQt6.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QSlider, QSpinBox, QLabel, QGroupBox,
-    QColorDialog,
+    QPushButton, QLabel, QColorDialog,
 )
 from PyQt6.QtGui import QPixmap, QIcon, QColor
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 
 from .brush import Brush
+from .slider_edit import SliderEdit
 
 
 class BrushPanel(QDockWidget):
+    eraser_toggled = pyqtSignal(bool)
+
     def __init__(self, brush: Brush, parent=None):
         super().__init__("Brush", parent)
         self._brush = brush
@@ -23,38 +25,27 @@ class BrushPanel(QDockWidget):
         layout = QVBoxLayout(container)
         layout.setContentsMargins(4, 4, 4, 4)
 
-        # --- Color ---
+        # --- Color + Eraser ---
         color_row = QHBoxLayout()
         color_row.addWidget(QLabel("Color:"))
         self._color_btn = QPushButton()
         self._color_btn.setFixedSize(40, 24)
         color_row.addWidget(self._color_btn)
+        self._eraser_btn = QPushButton("Eraser")
+        self._eraser_btn.setCheckable(True)
+        color_row.addWidget(self._eraser_btn)
         color_row.addStretch()
         layout.addLayout(color_row)
 
         # --- Size ---
         layout.addWidget(QLabel("Size:"))
-        size_row = QHBoxLayout()
-        self._size_slider = QSlider(Qt.Orientation.Horizontal)
-        self._size_slider.setRange(1, 500)
-        self._size_slider.setValue(brush.size)
-        self._size_label = QLabel(str(brush.size))
-        self._size_label.setFixedWidth(30)
-        size_row.addWidget(self._size_slider)
-        size_row.addWidget(self._size_label)
-        layout.addLayout(size_row)
+        self._size_slider = SliderEdit(1, 500, brush.size, decimals=0, step=1)
+        layout.addWidget(self._size_slider)
 
         # --- Hardness ---
         layout.addWidget(QLabel("Hardness:"))
-        hard_row = QHBoxLayout()
-        self._hard_slider = QSlider(Qt.Orientation.Horizontal)
-        self._hard_slider.setRange(0, 100)
-        self._hard_slider.setValue(int(brush.hardness * 100))
-        self._hard_label = QLabel(f"{brush.hardness:.2f}")
-        self._hard_label.setFixedWidth(30)
-        hard_row.addWidget(self._hard_slider)
-        hard_row.addWidget(self._hard_label)
-        layout.addLayout(hard_row)
+        self._hard_slider = SliderEdit(0.0, 1.0, brush.hardness, decimals=2, step=0.05)
+        layout.addWidget(self._hard_slider)
 
         layout.addStretch()
         self.setWidget(container)
@@ -63,6 +54,7 @@ class BrushPanel(QDockWidget):
         self._color_btn.clicked.connect(self._pick_color)
         self._size_slider.valueChanged.connect(self._on_size_changed)
         self._hard_slider.valueChanged.connect(self._on_hard_changed)
+        self._eraser_btn.toggled.connect(self.eraser_toggled.emit)
 
         self._update_color_icon()
 
@@ -84,15 +76,12 @@ class BrushPanel(QDockWidget):
             self._update_color_icon()
 
     def _on_size_changed(self, value):
-        self._brush.set_size(value)
-        self._size_label.setText(str(value))
+        self._brush.set_size(int(value))
 
     def _on_hard_changed(self, value):
-        h = value / 100.0
-        self._brush.set_hardness(h)
-        self._hard_label.setText(f"{h:.2f}")
+        self._brush.set_hardness(value)
 
     def sync_from_brush(self):
         self._size_slider.setValue(self._brush.size)
-        self._hard_slider.setValue(int(self._brush.hardness * 100))
+        self._hard_slider.setValue(self._brush.hardness)
         self._update_color_icon()

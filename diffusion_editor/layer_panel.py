@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 
-from .layer import LayerStack, Layer, DiffusionLayer
+from .layer import LayerStack, Layer, DiffusionLayer, LamaLayer, InstructLayer
 
 _LAYER_ID_ROLE = Qt.ItemDataRole.UserRole
 
@@ -38,6 +38,8 @@ class _DragTreeWidget(QTreeWidget):
 
 class LayerPanel(QDockWidget):
     create_diffusion_requested = pyqtSignal()
+    create_lama_requested = pyqtSignal()
+    create_instruct_requested = pyqtSignal()
 
     def __init__(self, layer_stack: LayerStack, parent=None):
         super().__init__("Layers", parent)
@@ -79,12 +81,20 @@ class LayerPanel(QDockWidget):
         self._create_diff_btn = QPushButton("Create Diffusion Layer")
         layout.addWidget(self._create_diff_btn)
 
+        self._create_lama_btn = QPushButton("Create LaMa Layer")
+        layout.addWidget(self._create_lama_btn)
+
+        self._create_instruct_btn = QPushButton("Create Instruct Layer")
+        layout.addWidget(self._create_instruct_btn)
+
         self.setWidget(container)
 
         self._add_btn.clicked.connect(self._on_add)
         self._remove_btn.clicked.connect(self._on_remove)
         self._merge_btn.clicked.connect(self._on_flatten)
         self._create_diff_btn.clicked.connect(self.create_diffusion_requested.emit)
+        self._create_lama_btn.clicked.connect(self.create_lama_requested.emit)
+        self._create_instruct_btn.clicked.connect(self.create_instruct_requested.emit)
         self._tree.currentItemChanged.connect(self._on_selection_changed)
         self._tree.itemChanged.connect(self._on_item_changed)
         self._tree.drop_requested.connect(self._on_drop)
@@ -99,7 +109,14 @@ class LayerPanel(QDockWidget):
         return None
 
     def _create_tree_item(self, layer: Layer) -> QTreeWidgetItem:
-        name = f"[D] {layer.name}" if isinstance(layer, DiffusionLayer) else layer.name
+        if isinstance(layer, DiffusionLayer):
+            name = f"[D] {layer.name}"
+        elif isinstance(layer, LamaLayer):
+            name = f"[L] {layer.name}"
+        elif isinstance(layer, InstructLayer):
+            name = f"[I] {layer.name}"
+        else:
+            name = layer.name
         item = QTreeWidgetItem([name])
         item.setFlags(
             item.flags()

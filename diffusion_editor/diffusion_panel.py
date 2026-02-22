@@ -2,10 +2,12 @@ import os
 from PyQt6.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QComboBox, QLabel, QTextEdit, QLineEdit,
-    QSlider, QSpinBox, QGroupBox, QScrollArea,
+    QSpinBox, QGroupBox, QScrollArea,
 )
 import random
 from PyQt6.QtCore import Qt, pyqtSignal, QSettings
+
+from .slider_edit import SliderEdit
 
 
 def _set_layout_visible(layout, visible):
@@ -51,6 +53,8 @@ class DiffusionPanel(QDockWidget):
     show_rect_toggled = pyqtSignal(bool)
     clear_rect_requested = pyqtSignal()
     select_background_requested = pyqtSignal()
+    draw_patch_toggled = pyqtSignal(bool)
+    clear_patch_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__("Diffusion", parent)
@@ -124,6 +128,7 @@ class DiffusionPanel(QDockWidget):
         self._mode_combo.addItem("txt2img", "txt2img")
         self._mode_combo.addItem("img2img", "img2img")
         self._mode_combo.addItem("inpaint", "inpaint")
+        self._mode_combo.setCurrentIndex(2)  # inpaint by default
         params_layout.addWidget(self._mode_combo)
 
         # Masked content (inpaint only)
@@ -137,14 +142,8 @@ class DiffusionPanel(QDockWidget):
 
         # Denoising strength
         params_layout.addWidget(QLabel("Denoising Strength:"))
-        strength_row = QHBoxLayout()
-        self._strength_slider = QSlider(Qt.Orientation.Horizontal)
-        self._strength_slider.setRange(5, 80)
-        self._strength_slider.setValue(30)
-        self._strength_label = QLabel("0.30")
-        strength_row.addWidget(self._strength_slider)
-        strength_row.addWidget(self._strength_label)
-        params_layout.addLayout(strength_row)
+        self._strength_slider = SliderEdit(0.0, 1.0, 0.30, decimals=2, step=0.05)
+        params_layout.addWidget(self._strength_slider)
 
         # Steps
         params_layout.addWidget(QLabel("Steps:"))
@@ -155,14 +154,8 @@ class DiffusionPanel(QDockWidget):
 
         # CFG Scale
         params_layout.addWidget(QLabel("CFG Scale:"))
-        cfg_row = QHBoxLayout()
-        self._cfg_slider = QSlider(Qt.Orientation.Horizontal)
-        self._cfg_slider.setRange(10, 200)
-        self._cfg_slider.setValue(70)
-        self._cfg_label = QLabel("7.0")
-        cfg_row.addWidget(self._cfg_slider)
-        cfg_row.addWidget(self._cfg_label)
-        params_layout.addLayout(cfg_row)
+        self._cfg_slider = SliderEdit(1.0, 20.0, 7.0, decimals=1, step=0.5)
+        params_layout.addWidget(self._cfg_slider)
 
         # Seed
         params_layout.addWidget(QLabel("Seed:"))
@@ -182,24 +175,12 @@ class DiffusionPanel(QDockWidget):
         mask_layout = QVBoxLayout(mask_group)
 
         mask_layout.addWidget(QLabel("Size:"))
-        size_row = QHBoxLayout()
-        self._mask_size_slider = QSlider(Qt.Orientation.Horizontal)
-        self._mask_size_slider.setRange(1, 500)
-        self._mask_size_slider.setValue(50)
-        self._mask_size_label = QLabel("50")
-        size_row.addWidget(self._mask_size_slider)
-        size_row.addWidget(self._mask_size_label)
-        mask_layout.addLayout(size_row)
+        self._mask_size_slider = SliderEdit(1, 500, 50, decimals=0, step=1)
+        mask_layout.addWidget(self._mask_size_slider)
 
         mask_layout.addWidget(QLabel("Hardness:"))
-        hard_row = QHBoxLayout()
-        self._mask_hardness_slider = QSlider(Qt.Orientation.Horizontal)
-        self._mask_hardness_slider.setRange(0, 100)
-        self._mask_hardness_slider.setValue(80)
-        self._mask_hardness_label = QLabel("0.80")
-        hard_row.addWidget(self._mask_hardness_slider)
-        hard_row.addWidget(self._mask_hardness_label)
-        mask_layout.addLayout(hard_row)
+        self._mask_hardness_slider = SliderEdit(0.0, 1.0, 0.40, decimals=2, step=0.05)
+        mask_layout.addWidget(self._mask_hardness_slider)
 
         btn_row = QHBoxLayout()
         self._mask_eraser_btn = QPushButton("Eraser")
@@ -229,14 +210,8 @@ class DiffusionPanel(QDockWidget):
         ip_layout.addWidget(self._ip_status)
 
         ip_layout.addWidget(QLabel("Scale:"))
-        ip_scale_row = QHBoxLayout()
-        self._ip_scale_slider = QSlider(Qt.Orientation.Horizontal)
-        self._ip_scale_slider.setRange(0, 100)
-        self._ip_scale_slider.setValue(60)
-        self._ip_scale_label = QLabel("0.60")
-        ip_scale_row.addWidget(self._ip_scale_slider)
-        ip_scale_row.addWidget(self._ip_scale_label)
-        ip_layout.addLayout(ip_scale_row)
+        self._ip_scale_slider = SliderEdit(0.0, 1.0, 0.60, decimals=2, step=0.05)
+        ip_layout.addWidget(self._ip_scale_slider)
 
         ip_btn_row = QHBoxLayout()
         self._draw_rect_btn = QPushButton("Draw Rect")
@@ -272,6 +247,14 @@ class DiffusionPanel(QDockWidget):
         self._clear_mask_btn = QPushButton("Clear Mask")
         layer_layout.addWidget(self._clear_mask_btn)
 
+        patch_row = QHBoxLayout()
+        self._draw_patch_btn = QPushButton("Draw Patch")
+        self._draw_patch_btn.setCheckable(True)
+        self._clear_patch_btn = QPushButton("Clear Patch")
+        patch_row.addWidget(self._draw_patch_btn)
+        patch_row.addWidget(self._clear_patch_btn)
+        layer_layout.addLayout(patch_row)
+
         _make_collapsible(self._layer_group, self._settings, "diffusion_layer")
         self._layer_group.setVisible(False)
         layout.addWidget(self._layer_group)
@@ -288,12 +271,6 @@ class DiffusionPanel(QDockWidget):
         self._regen_btn.clicked.connect(self.regenerate_requested.emit)
         self._new_seed_btn.clicked.connect(self.new_seed_requested.emit)
         self._clear_mask_btn.clicked.connect(self.clear_mask_requested.emit)
-        self._strength_slider.valueChanged.connect(
-            lambda v: self._strength_label.setText(f"{v / 100:.2f}")
-        )
-        self._cfg_slider.valueChanged.connect(
-            lambda v: self._cfg_label.setText(f"{v / 10:.1f}")
-        )
         self._mask_size_slider.valueChanged.connect(self._on_mask_brush_changed)
         self._mask_hardness_slider.valueChanged.connect(self._on_mask_brush_changed)
         self._load_ip_btn.clicked.connect(self.load_ip_adapter_requested.emit)
@@ -301,9 +278,8 @@ class DiffusionPanel(QDockWidget):
         self._show_rect_btn.toggled.connect(self.show_rect_toggled.emit)
         self._clear_rect_btn.clicked.connect(self.clear_rect_requested.emit)
         self._select_bg_btn.clicked.connect(self.select_background_requested.emit)
-        self._ip_scale_slider.valueChanged.connect(
-            lambda v: self._ip_scale_label.setText(f"{v / 100:.2f}")
-        )
+        self._draw_patch_btn.toggled.connect(self.draw_patch_toggled.emit)
+        self._clear_patch_btn.clicked.connect(self.clear_patch_requested.emit)
 
     def _scan_models(self):
         self._model_combo.clear()
@@ -358,7 +334,7 @@ class DiffusionPanel(QDockWidget):
 
     @property
     def strength(self) -> float:
-        return self._strength_slider.value() / 100.0
+        return self._strength_slider.value()
 
     @property
     def steps(self) -> int:
@@ -366,7 +342,7 @@ class DiffusionPanel(QDockWidget):
 
     @property
     def guidance_scale(self) -> float:
-        return self._cfg_slider.value() / 10.0
+        return self._cfg_slider.value()
 
     @property
     def seed(self) -> int:
@@ -384,17 +360,15 @@ class DiffusionPanel(QDockWidget):
 
     @property
     def mask_brush_size(self) -> int:
-        return self._mask_size_slider.value()
+        return int(self._mask_size_slider.value())
 
     @property
     def mask_brush_hardness(self) -> float:
-        return self._mask_hardness_slider.value() / 100.0
+        return self._mask_hardness_slider.value()
 
     def _on_mask_brush_changed(self):
-        size = self._mask_size_slider.value()
-        hardness = self._mask_hardness_slider.value() / 100.0
-        self._mask_size_label.setText(str(size))
-        self._mask_hardness_label.setText(f"{hardness:.2f}")
+        size = int(self._mask_size_slider.value())
+        hardness = self._mask_hardness_slider.value()
         self.mask_brush_changed.emit(size, hardness)
 
     @property
@@ -411,7 +385,7 @@ class DiffusionPanel(QDockWidget):
 
     @property
     def ip_adapter_scale(self) -> float:
-        return self._ip_scale_slider.value() / 100.0
+        return self._ip_scale_slider.value()
 
     def on_ip_adapter_loaded(self):
         self._ip_status.setText("Loaded")
@@ -425,9 +399,9 @@ class DiffusionPanel(QDockWidget):
         self._layer_group.setVisible(True)
         self._prompt.setPlainText(layer.prompt)
         self._negative_prompt.setPlainText(layer.negative_prompt)
-        self._strength_slider.setValue(int(layer.strength * 100))
+        self._strength_slider.setValue(layer.strength)
         self._steps_spin.setValue(layer.steps)
-        self._cfg_slider.setValue(int(layer.guidance_scale * 10))
+        self._cfg_slider.setValue(layer.guidance_scale)
         self._seed_edit.setText(str(layer.seed))
         idx = self._mode_combo.findData(layer.mode)
         if idx >= 0:
@@ -435,7 +409,7 @@ class DiffusionPanel(QDockWidget):
         mc_idx = self._masked_content_combo.findData(layer.masked_content)
         if mc_idx >= 0:
             self._masked_content_combo.setCurrentIndex(mc_idx)
-        self._ip_scale_slider.setValue(int(layer.ip_adapter_scale * 100))
+        self._ip_scale_slider.setValue(layer.ip_adapter_scale)
         model_name = os.path.basename(layer.model_path) if layer.model_path else "?"
         mask_status = "has mask" if layer.has_mask() else "no mask"
         if layer.ip_adapter_rect:
@@ -443,6 +417,12 @@ class DiffusionPanel(QDockWidget):
             ip_info = f"rect ({r[0]},{r[1]})-({r[2]},{r[3]}) scale={layer.ip_adapter_scale:.2f}"
         else:
             ip_info = "none"
+        if layer.manual_patch_rect:
+            r = layer.manual_patch_rect
+            pw, ph = r[2] - r[0], r[3] - r[1]
+            patch_info = f"manual ({r[0]},{r[1]})-({r[2]},{r[3]}) {pw}x{ph}"
+        else:
+            patch_info = f"auto ({layer.patch_x},{layer.patch_y}) {layer.patch_w}x{layer.patch_h}"
         info = (
             f"model: {model_name}\n"
             f"mode: {layer.mode}\n"
@@ -451,7 +431,7 @@ class DiffusionPanel(QDockWidget):
             f"strength: {layer.strength:.2f}  steps: {layer.steps}  "
             f"cfg: {layer.guidance_scale:.1f}\n"
             f"seed: {layer.seed}\n"
-            f"patch: ({layer.patch_x},{layer.patch_y}) {layer.patch_w}x{layer.patch_h}\n"
+            f"patch: {patch_info}\n"
             f"mask: {mask_status}\n"
             f"ip_adapter: {ip_info}"
         )
