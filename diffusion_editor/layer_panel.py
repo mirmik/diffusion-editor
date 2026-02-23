@@ -28,10 +28,10 @@ class LayerPanel(VStack):
         self.on_create_lama: callable = None
         self.on_create_instruct: callable = None
 
-        # Tree widget
+        # Tree widget (stretch to fill remaining space)
         self._tree = TreeWidget()
         self._tree.preferred_width = pct(100)
-        self._tree.preferred_height = px(300)
+        self._tree.stretch = True
         self._tree.row_height = 24
         self._tree.row_spacing = 1
         self._tree.draggable = True

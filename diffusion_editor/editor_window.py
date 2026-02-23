@@ -18,6 +18,7 @@ from tcgui.widgets.menu import MenuItem, Menu
 from tcgui.widgets.tool_bar import ToolBar
 from tcgui.widgets.status_bar import StatusBar
 from tcgui.widgets.units import px, pct
+from tcgui.widgets.splitter import Splitter
 
 from .layer import LayerStack, Layer, DiffusionLayer, LamaLayer, InstructLayer
 from .editor_canvas import EditorCanvas
@@ -111,6 +112,7 @@ class EditorWindow:
         self._left_container.add_child(self._instruct_panel)
 
         main_area.add_child(self._left_container)
+        main_area.add_child(Splitter(target=self._left_container, side="left"))
 
         # Canvas (center, stretches to fill remaining space)
         self._canvas = EditorCanvas(self._layer_stack)
@@ -121,7 +123,7 @@ class EditorWindow:
 
         # Right panel: layer panel
         self._layer_panel = LayerPanel(self._layer_stack)
-        self._layer_panel.preferred_height = pct(100)
+        main_area.add_child(Splitter(target=self._layer_panel, side="right"))
         main_area.add_child(self._layer_panel)
 
         root.add_child(main_area)
