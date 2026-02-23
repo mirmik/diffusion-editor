@@ -2,7 +2,7 @@ import os
 from PyQt6.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QComboBox, QLabel, QTextEdit, QLineEdit,
-    QSpinBox, QGroupBox, QScrollArea,
+    QSpinBox, QGroupBox, QScrollArea, QCheckBox,
 )
 import random
 from PyQt6.QtCore import Qt, pyqtSignal, QSettings
@@ -156,6 +156,10 @@ class DiffusionPanel(QDockWidget):
         params_layout.addWidget(QLabel("CFG Scale:"))
         self._cfg_slider = SliderEdit(1.0, 20.0, 7.0, decimals=1, step=0.5)
         params_layout.addWidget(self._cfg_slider)
+
+        # Resize to model resolution
+        self._resize_to_model_res_cb = QCheckBox("Resize to model resolution (1024)")
+        params_layout.addWidget(self._resize_to_model_res_cb)
 
         # Seed
         params_layout.addWidget(QLabel("Seed:"))
@@ -387,6 +391,10 @@ class DiffusionPanel(QDockWidget):
     def ip_adapter_scale(self) -> float:
         return self._ip_scale_slider.value()
 
+    @property
+    def resize_to_model_resolution(self) -> bool:
+        return self._resize_to_model_res_cb.isChecked()
+
     def on_ip_adapter_loaded(self):
         self._ip_status.setText("Loaded")
         self._load_ip_btn.setEnabled(True)
@@ -410,6 +418,7 @@ class DiffusionPanel(QDockWidget):
         if mc_idx >= 0:
             self._masked_content_combo.setCurrentIndex(mc_idx)
         self._ip_scale_slider.setValue(layer.ip_adapter_scale)
+        self._resize_to_model_res_cb.setChecked(layer.resize_to_model_resolution)
         model_name = os.path.basename(layer.model_path) if layer.model_path else "?"
         mask_status = "has mask" if layer.has_mask() else "no mask"
         if layer.ip_adapter_rect:

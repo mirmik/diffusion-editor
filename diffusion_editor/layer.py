@@ -120,6 +120,7 @@ class DiffusionLayer(Layer):
         self.ip_adapter_scale = 0.6
         self.masked_content = "original"  # original, fill, latent_noise, latent_nothing
         self.manual_patch_rect = None  # (x0, y0, x1, y1) or None — explicit patch area
+        self.resize_to_model_resolution = False
 
     def clear_mask(self):
         self.mask[:] = 0
@@ -167,6 +168,7 @@ class DiffusionLayer(Layer):
         d["ip_adapter_scale"] = self.ip_adapter_scale
         d["masked_content"] = self.masked_content
         d["manual_patch_rect"] = list(self.manual_patch_rect) if self.manual_patch_rect else None
+        d["resize_to_model_resolution"] = self.resize_to_model_resolution
         return d
 
     def save_images_to_zip(self, zf: zipfile.ZipFile, path: str):
@@ -225,6 +227,7 @@ class DiffusionLayer(Layer):
         layer.masked_content = d.get("masked_content", "original")
         mpr = d.get("manual_patch_rect")
         layer.manual_patch_rect = tuple(mpr) if mpr else None
+        layer.resize_to_model_resolution = d.get("resize_to_model_resolution", False)
         for child_dict in d.get("children", []):
             child = _layer_from_dict(child_dict, zf)
             child.parent = layer

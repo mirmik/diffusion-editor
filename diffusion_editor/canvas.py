@@ -184,9 +184,8 @@ class Canvas(QWidget):
 
         stamp_slice = alpha_mask[sy0:sy1, sx0:sx1].astype(np.uint8)
         if self._mask_eraser:
-            mask[dy0:dy1, dx0:dx1] = np.clip(
-                mask[dy0:dy1, dx0:dx1].astype(np.int16) - stamp_slice.astype(np.int16),
-                0, 255).astype(np.uint8)
+            mask[dy0:dy1, dx0:dx1] = np.minimum(
+                mask[dy0:dy1, dx0:dx1], (255 - stamp_slice))
         else:
             mask[dy0:dy1, dx0:dx1] = np.maximum(mask[dy0:dy1, dx0:dx1], stamp_slice)
 

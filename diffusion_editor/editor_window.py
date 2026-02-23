@@ -463,6 +463,7 @@ class EditorWindow(QMainWindow):
         layer.mode = self._diffusion_panel.mode
         layer.masked_content = self._diffusion_panel.masked_content
         layer.ip_adapter_scale = self._diffusion_panel.ip_adapter_scale
+        layer.resize_to_model_resolution = self._diffusion_panel.resize_to_model_resolution
         if self._engine.model_path:
             layer.model_path = self._engine.model_path
         layer.prediction_type = self._diffusion_panel.prediction_type
@@ -563,8 +564,23 @@ class EditorWindow(QMainWindow):
                     crop = composite[y0:y1, x0:x1, :3]
                     ip_adapter_image = Image.fromarray(crop, "RGB")
 
+        # Rescale patch to model resolution if needed
+        submit_image = layer.source_patch
+        submit_mask = mask_image
+        submit_w, submit_h = layer.patch_w, layer.patch_h
+        MODEL_RES = 1024
+        if layer.resize_to_model_resolution and submit_image is not None:
+            longest = max(submit_w, submit_h)
+            if longest != MODEL_RES:
+                scale = MODEL_RES / longest
+                submit_w = max(8, round(layer.patch_w * scale / 8) * 8)
+                submit_h = max(8, round(layer.patch_h * scale / 8) * 8)
+                submit_image = submit_image.resize((submit_w, submit_h), Image.LANCZOS)
+                if submit_mask is not None:
+                    submit_mask = submit_mask.resize((submit_w, submit_h), Image.NEAREST)
+
         self._engine.submit(
-            image=layer.source_patch,
+            image=submit_image,
             prompt=layer.prompt,
             negative_prompt=layer.negative_prompt,
             strength=layer.strength,
@@ -572,14 +588,14 @@ class EditorWindow(QMainWindow):
             guidance_scale=layer.guidance_scale,
             seed=layer.seed,
             mode=layer.mode,
-            mask_image=mask_image,
+            mask_image=submit_mask,
             masked_content=layer.masked_content,
             ip_adapter_image=ip_adapter_image,
             ip_adapter_scale=layer.ip_adapter_scale,
-            width=layer.patch_w,
-            height=layer.patch_h,
+            width=submit_w,
+            height=submit_h,
         )
-        self._statusbar.showMessage("Regenerating...")
+        self._statusbar.showMessage(f"Regenerating ({submit_w}x{submit_h})...")
 
     def _on_new_seed(self):
         layer = self._layer_stack.active_layer
