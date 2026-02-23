@@ -1,69 +1,54 @@
-"""Native file dialogs via zenity (Linux)."""
+"""Native file dialogs via tkinter."""
 
-import subprocess
-import shutil
-
-
-def _has_zenity() -> bool:
-    return shutil.which("zenity") is not None
+import tkinter as tk
+from tkinter import filedialog
 
 
-def _has_kdialog() -> bool:
-    return shutil.which("kdialog") is not None
+def _ensure_root():
+    """Get hidden tkinter root window."""
+    try:
+        root = tk._default_root
+        if root is None:
+            root = tk.Tk()
+            root.withdraw()
+        return root
+    except Exception:
+        root = tk.Tk()
+        root.withdraw()
+        return root
+
+
+def _parse_filters(filter_str: str):
+    """Parse 'Label | *.ext1 *.ext2;;Label2 | *.ext3' into tkinter filetypes."""
+    if not filter_str:
+        return [("All files", "*.*")]
+    result = []
+    for part in filter_str.split(";;"):
+        if "|" in part:
+            label, exts = part.split("|", 1)
+            result.append((label.strip(), exts.strip()))
+        else:
+            result.append((part.strip(), "*.*"))
+    return result
 
 
 def open_file_dialog(title: str = "Open", directory: str = "",
                      filter_str: str = "") -> str | None:
-    """Show a native open-file dialog. Returns path or None."""
-    if _has_zenity():
-        cmd = ["zenity", "--file-selection", f"--title={title}"]
-        if directory:
-            cmd.append(f"--filename={directory}/")
-        if filter_str:
-            for flt in filter_str.split(";;"):
-                cmd.extend(["--file-filter", flt])
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-            if result.returncode == 0:
-                return result.stdout.strip()
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass
-    elif _has_kdialog():
-        cmd = ["kdialog", "--getopenfilename", directory or ".", filter_str or "*"]
-        cmd.extend(["--title", title])
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-            if result.returncode == 0:
-                return result.stdout.strip()
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass
-    return None
+    _ensure_root()
+    path = filedialog.askopenfilename(
+        title=title,
+        initialdir=directory or None,
+        filetypes=_parse_filters(filter_str),
+    )
+    return path if path else None
 
 
 def save_file_dialog(title: str = "Save", directory: str = "",
                      filter_str: str = "") -> str | None:
-    """Show a native save-file dialog. Returns path or None."""
-    if _has_zenity():
-        cmd = ["zenity", "--file-selection", "--save", "--confirm-overwrite",
-               f"--title={title}"]
-        if directory:
-            cmd.append(f"--filename={directory}/")
-        if filter_str:
-            for flt in filter_str.split(";;"):
-                cmd.extend(["--file-filter", flt])
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-            if result.returncode == 0:
-                return result.stdout.strip()
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass
-    elif _has_kdialog():
-        cmd = ["kdialog", "--getsavefilename", directory or ".", filter_str or "*"]
-        cmd.extend(["--title", title])
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-            if result.returncode == 0:
-                return result.stdout.strip()
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass
-    return None
+    _ensure_root()
+    path = filedialog.asksaveasfilename(
+        title=title,
+        initialdir=directory or None,
+        filetypes=_parse_filters(filter_str),
+    )
+    return path if path else None
