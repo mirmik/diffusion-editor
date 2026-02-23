@@ -93,23 +93,19 @@ class EditorWindow:
         # Left panel container
         self._left_container = VStack()
         self._left_container.preferred_width = px(260)
+        self._left_container.clip = True
 
-        # Create all panels (only one visible at a time)
+        # Create all panels (only one visible at a time, stretch to fill)
         self._brush_panel = BrushPanel(self._canvas_placeholder_brush())
         self._diffusion_panel = DiffusionPanel()
         self._lama_panel = LamaPanel()
         self._instruct_panel = InstructPanel()
 
-        # Start with all hidden
-        self._brush_panel.visible = False
-        self._diffusion_panel.visible = False
-        self._lama_panel.visible = False
-        self._instruct_panel.visible = False
-
-        self._left_container.add_child(self._brush_panel)
-        self._left_container.add_child(self._diffusion_panel)
-        self._left_container.add_child(self._lama_panel)
-        self._left_container.add_child(self._instruct_panel)
+        for p in (self._brush_panel, self._diffusion_panel,
+                  self._lama_panel, self._instruct_panel):
+            p.visible = False
+            p.stretch = True
+            self._left_container.add_child(p)
 
         main_area.add_child(self._left_container)
         main_area.add_child(Splitter(target=self._left_container, side="left"))
@@ -254,6 +250,14 @@ class EditorWindow:
             self._instruct_panel.visible = True
         else:
             self._brush_panel.visible = True
+
+        self.ui.request_layout()
+
+        # Debug: print visible panel coords after next layout
+        for name, p in [("brush", self._brush_panel), ("diffusion", self._diffusion_panel),
+                         ("lama", self._lama_panel), ("instruct", self._instruct_panel)]:
+            if p.visible:
+                print(f"[panel] {name}: x={p.x:.0f} y={p.y:.0f} w={p.width:.0f} h={p.height:.0f}")
 
     # ------------------------------------------------------------------
     # Status
