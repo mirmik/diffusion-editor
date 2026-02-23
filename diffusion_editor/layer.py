@@ -4,7 +4,6 @@ import zipfile
 
 import numpy as np
 from PIL import Image
-from PyQt6.QtCore import QObject, pyqtSignal
 
 
 class Layer:
@@ -460,15 +459,13 @@ def _layer_from_dict(d: dict, zf: zipfile.ZipFile) -> Layer:
     return Layer.from_dict(d, zf)
 
 
-class LayerStack(QObject):
-    changed = pyqtSignal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
+class LayerStack:
+    def __init__(self):
         self._layers: list[Layer] = []  # root-level layers
         self._active_layer: Layer | None = None
         self._width = 0
         self._height = 0
+        self.on_changed: callable = None
 
     # --- Tree traversal ---
 
@@ -510,7 +507,8 @@ class LayerStack(QObject):
     def active_layer(self, layer: Layer | None):
         if layer is not self._active_layer:
             self._active_layer = layer
-            self.changed.emit()
+            if self.on_changed:
+                self.on_changed()
 
     def init_from_image(self, image: np.ndarray):
         self._layers.clear()
@@ -520,7 +518,8 @@ class LayerStack(QObject):
         layer = Layer("Background", w, h, image)
         self._layers.append(layer)
         self._active_layer = layer
-        self.changed.emit()
+        if self.on_changed:
+            self.on_changed()
 
     def _insert_near_active(self, layer: Layer):
         """Insert layer as a sibling above the active layer."""
@@ -540,13 +539,15 @@ class LayerStack(QObject):
             return
         layer = Layer(name, self._width, self._height, image)
         self._insert_near_active(layer)
-        self.changed.emit()
+        if self.on_changed:
+            self.on_changed()
 
     def insert_layer(self, layer: Layer):
         if self._width == 0 or self._height == 0:
             return
         self._insert_near_active(layer)
-        self.changed.emit()
+        if self.on_changed:
+            self.on_changed()
 
     def remove_layer(self, layer: Layer):
         """Remove layer and its entire subtree."""
@@ -569,7 +570,8 @@ class LayerStack(QObject):
                 self._active_layer = self._layers[min(idx, len(self._layers) - 1)]
             else:
                 self._active_layer = None
-        self.changed.emit()
+        if self.on_changed:
+            self.on_changed()
 
     def move_layer(self, layer: Layer, new_parent: Layer | None, index: int):
         """Move layer to new_parent at index (or root if new_parent is None)."""
@@ -584,11 +586,13 @@ class LayerStack(QObject):
         else:
             self._layers.insert(index, layer)
         self._active_layer = layer
-        self.changed.emit()
+        if self.on_changed:
+            self.on_changed()
 
     def set_visibility(self, layer: Layer, visible: bool):
         layer.visible = visible
-        self.changed.emit()
+        if self.on_changed:
+            self.on_changed()
 
     def flatten(self):
         result = self.composite()
@@ -596,7 +600,8 @@ class LayerStack(QObject):
         layer = Layer("Background", self._width, self._height, result)
         self._layers.append(layer)
         self._active_layer = layer
-        self.changed.emit()
+        if self.on_changed:
+            self.on_changed()
 
     # --- Compositing ---
 
@@ -756,4 +761,5 @@ class LayerStack(QObject):
 
         if self._active_layer is None and self._layers:
             self._active_layer = self._layers[0]
-        self.changed.emit()
+        if self.on_changed:
+            self.on_changed()

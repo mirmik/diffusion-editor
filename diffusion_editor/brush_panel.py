@@ -1,87 +1,97 @@
-from PyQt6.QtWidgets import (
-    QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QColorDialog,
-)
-from PyQt6.QtGui import QPixmap, QIcon, QColor
-from PyQt6.QtCore import Qt, pyqtSignal
+"""BrushPanel — tcgui panel for brush settings (color, size, hardness, eraser)."""
+
+from __future__ import annotations
+
+from tcgui.widgets.group_box import GroupBox
+from tcgui.widgets.hstack import HStack
+from tcgui.widgets.button import Button
+from tcgui.widgets.checkbox import Checkbox
+from tcgui.widgets.slider_edit import SliderEdit
+from tcgui.widgets.color_dialog import ColorDialog
+from tcgui.widgets.units import px
 
 from .brush import Brush
-from .slider_edit import SliderEdit
 
 
-class BrushPanel(QDockWidget):
-    eraser_toggled = pyqtSignal(bool)
+class BrushPanel(GroupBox):
+    def __init__(self, brush: Brush):
+        super().__init__()
+        self.title = "Brush"
+        self.preferred_width = px(240)
 
-    def __init__(self, brush: Brush, parent=None):
-        super().__init__("Brush", parent)
         self._brush = brush
-        self.setAllowedAreas(
-            Qt.DockWidgetArea.LeftDockWidgetArea |
-            Qt.DockWidgetArea.RightDockWidgetArea
-        )
-        self.setMinimumWidth(200)
 
-        container = QWidget()
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(4, 4, 4, 4)
+        # Callbacks
+        self.on_eraser_toggled: callable = None
 
-        # --- Color + Eraser ---
-        color_row = QHBoxLayout()
-        color_row.addWidget(QLabel("Color:"))
-        self._color_btn = QPushButton()
-        self._color_btn.setFixedSize(40, 24)
-        color_row.addWidget(self._color_btn)
-        self._eraser_btn = QPushButton("Eraser")
-        self._eraser_btn.setCheckable(True)
-        color_row.addWidget(self._eraser_btn)
-        color_row.addStretch()
-        layout.addLayout(color_row)
+        # Color + eraser row
+        row = HStack()
+        row.spacing = 8
 
-        # --- Size ---
-        layout.addWidget(QLabel("Size:"))
-        self._size_slider = SliderEdit(1, 500, brush.size, decimals=0, step=1)
-        layout.addWidget(self._size_slider)
+        self._color_btn = Button()
+        self._color_btn.text = "Color"
+        self._color_btn.preferred_width = px(60)
+        self._color_btn.on_click = self._pick_color
+        self._update_color_btn()
+        row.add_child(self._color_btn)
 
-        # --- Hardness ---
-        layout.addWidget(QLabel("Hardness:"))
-        self._hard_slider = SliderEdit(0.0, 1.0, brush.hardness, decimals=2, step=0.05)
-        layout.addWidget(self._hard_slider)
+        self._eraser_cb = Checkbox()
+        self._eraser_cb.text = "Eraser"
+        self._eraser_cb.on_changed = self._on_eraser_changed
+        row.add_child(self._eraser_cb)
 
-        layout.addStretch()
-        self.setWidget(container)
+        self.add_child(row)
 
-        # --- Connections ---
-        self._color_btn.clicked.connect(self._pick_color)
-        self._size_slider.valueChanged.connect(self._on_size_changed)
-        self._hard_slider.valueChanged.connect(self._on_hard_changed)
-        self._eraser_btn.toggled.connect(self.eraser_toggled.emit)
+        # Size slider
+        self._size_slider = SliderEdit()
+        self._size_slider.label = "Size"
+        self._size_slider.min_value = 1
+        self._size_slider.max_value = 500
+        self._size_slider.value = brush.size
+        self._size_slider.decimals = 0
+        self._size_slider.on_changed = self._on_size_changed
+        self.add_child(self._size_slider)
 
-        self._update_color_icon()
+        # Hardness slider
+        self._hard_slider = SliderEdit()
+        self._hard_slider.label = "Hardness"
+        self._hard_slider.min_value = 0.0
+        self._hard_slider.max_value = 1.0
+        self._hard_slider.value = brush.hardness
+        self._hard_slider.decimals = 2
+        self._hard_slider.on_changed = self._on_hard_changed
+        self.add_child(self._hard_slider)
 
-    def _update_color_icon(self):
+    def _update_color_btn(self):
         r, g, b, _ = self._brush.color
-        px = QPixmap(32, 16)
-        px.fill(QColor(r, g, b))
-        self._color_btn.setIcon(QIcon(px))
+        self._color_btn.background_color = (r / 255, g / 255, b / 255, 1.0)
 
     def _pick_color(self):
         r, g, b, a = self._brush.color
-        initial = QColor(r, g, b, a)
-        color = QColorDialog.getColor(
-            initial, self, "Brush Color",
-            QColorDialog.ColorDialogOption.ShowAlphaChannel,
-        )
-        if color.isValid():
-            self._brush.set_color(color.red(), color.green(), color.blue(), color.alpha())
-            self._update_color_icon()
+        initial = (r / 255, g / 255, b / 255, a / 255)
+        ColorDialog.pick_color(
+            self, self._on_color_result, initial_color=initial)
 
-    def _on_size_changed(self, value):
+    def _on_color_result(self, color: tuple | None):
+        if color is not None:
+            r = int(color[0] * 255)
+            g = int(color[1] * 255)
+            b = int(color[2] * 255)
+            a = int(color[3] * 255)
+            self._brush.set_color(r, g, b, a)
+            self._update_color_btn()
+
+    def _on_eraser_changed(self, checked: bool):
+        if self.on_eraser_toggled:
+            self.on_eraser_toggled(checked)
+
+    def _on_size_changed(self, value: float):
         self._brush.set_size(int(value))
 
-    def _on_hard_changed(self, value):
+    def _on_hard_changed(self, value: float):
         self._brush.set_hardness(value)
 
     def sync_from_brush(self):
-        self._size_slider.setValue(self._brush.size)
-        self._hard_slider.setValue(self._brush.hardness)
-        self._update_color_icon()
+        self._size_slider.value = self._brush.size
+        self._hard_slider.value = self._brush.hardness
+        self._update_color_btn()

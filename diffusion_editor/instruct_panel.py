@@ -1,238 +1,283 @@
+"""InstructPanel — tcgui panel for InstructPix2Pix settings."""
+
+from __future__ import annotations
+
 import random
-from PyQt6.QtWidgets import (
-    QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QTextEdit, QLineEdit,
-    QSpinBox, QGroupBox, QScrollArea,
-)
-from PyQt6.QtCore import Qt, pyqtSignal, QSettings
 
-from .diffusion_panel import _make_collapsible
-from .slider_edit import SliderEdit
+from tcgui.widgets.scroll_area import ScrollArea
+from tcgui.widgets.vstack import VStack
+from tcgui.widgets.hstack import HStack
+from tcgui.widgets.group_box import GroupBox
+from tcgui.widgets.label import Label
+from tcgui.widgets.button import Button
+from tcgui.widgets.checkbox import Checkbox
+from tcgui.widgets.text_area import TextArea
+from tcgui.widgets.text_input import TextInput
+from tcgui.widgets.slider_edit import SliderEdit
+from tcgui.widgets.units import px, pct
 
 
-class InstructPanel(QDockWidget):
-    load_model_requested = pyqtSignal()
-    apply_requested = pyqtSignal()
-    new_seed_requested = pyqtSignal()
-    clear_mask_requested = pyqtSignal()
-    mask_brush_changed = pyqtSignal(int, float)  # size, hardness
-    draw_patch_toggled = pyqtSignal(bool)
-    clear_patch_requested = pyqtSignal()
+class InstructPanel(ScrollArea):
+    def __init__(self):
+        super().__init__()
+        self.preferred_width = px(280)
 
-    def __init__(self, parent=None):
-        super().__init__("InstructPix2Pix", parent)
-        self.setAllowedAreas(
-            Qt.DockWidgetArea.LeftDockWidgetArea |
-            Qt.DockWidgetArea.RightDockWidgetArea
-        )
-        self.setMinimumWidth(280)
+        # Callbacks
+        self.on_load_model: callable = None
+        self.on_apply: callable = None
+        self.on_new_seed: callable = None
+        self.on_clear_mask: callable = None
+        self.on_mask_brush_changed: callable = None  # (size, hardness)
+        self.on_mask_eraser_toggled: callable = None  # (bool)
+        self.on_show_mask_toggled: callable = None  # (bool)
+        self.on_draw_patch_toggled: callable = None  # (bool)
+        self.on_clear_patch: callable = None
 
-        self._settings = QSettings("DiffusionEditor", "DiffusionEditor")
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        container = QWidget()
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(4, 4, 4, 4)
+        content = VStack()
+        content.spacing = 8
+        content.preferred_width = pct(100)
 
         # --- Model ---
-        model_group = QGroupBox("Model")
-        model_layout = QVBoxLayout(model_group)
+        model_group = GroupBox()
+        model_group.title = "Model"
 
-        self._load_btn = QPushButton("Load InstructPix2Pix")
-        model_layout.addWidget(self._load_btn)
+        self._load_btn = Button()
+        self._load_btn.text = "Load InstructPix2Pix"
+        self._load_btn.preferred_width = pct(100)
+        self._load_btn.on_click = lambda: (
+            self.on_load_model and self.on_load_model())
+        model_group.add_child(self._load_btn)
 
-        self._model_status = QLabel("Not loaded")
-        self._model_status.setStyleSheet("color: #888; font-size: 11px;")
-        model_layout.addWidget(self._model_status)
+        self._model_status = Label()
+        self._model_status.text = "Not loaded"
+        self._model_status.font_size = 11
+        self._model_status.color = (0.5, 0.5, 0.5, 1.0)
+        model_group.add_child(self._model_status)
 
-        _make_collapsible(model_group, self._settings, "instruct_model")
-        layout.addWidget(model_group)
+        content.add_child(model_group)
 
         # --- Instruction ---
-        instr_group = QGroupBox("Instruction")
-        instr_layout = QVBoxLayout(instr_group)
+        instr_group = GroupBox()
+        instr_group.title = "Instruction"
 
-        self._instruction = QTextEdit()
-        self._instruction.setMaximumHeight(60)
-        self._instruction.setPlaceholderText("make it snowy")
-        instr_layout.addWidget(self._instruction)
+        self._instruction = TextArea()
+        self._instruction.placeholder = "make it snowy"
+        self._instruction.preferred_width = pct(100)
+        self._instruction.preferred_height = px(50)
+        instr_group.add_child(self._instruction)
 
-        _make_collapsible(instr_group, self._settings, "instruct_instruction")
-        layout.addWidget(instr_group)
+        content.add_child(instr_group)
 
         # --- Parameters ---
-        params_group = QGroupBox("Parameters")
-        params_layout = QVBoxLayout(params_group)
+        params_group = GroupBox()
+        params_group.title = "Parameters"
 
-        # Image Guidance Scale
-        params_layout.addWidget(QLabel("Image Guidance Scale:"))
-        self._img_guidance_slider = SliderEdit(1.0, 3.0, 1.5, decimals=1, step=0.1)
-        params_layout.addWidget(self._img_guidance_slider)
+        self._img_guidance_slider = SliderEdit()
+        self._img_guidance_slider.label = "Image Guidance"
+        self._img_guidance_slider.min_value = 1.0
+        self._img_guidance_slider.max_value = 3.0
+        self._img_guidance_slider.value = 1.5
+        self._img_guidance_slider.decimals = 1
+        params_group.add_child(self._img_guidance_slider)
 
-        # CFG Scale
-        params_layout.addWidget(QLabel("CFG Scale:"))
-        self._cfg_slider = SliderEdit(1.0, 20.0, 7.0, decimals=1, step=0.5)
-        params_layout.addWidget(self._cfg_slider)
+        self._cfg_slider = SliderEdit()
+        self._cfg_slider.label = "CFG Scale"
+        self._cfg_slider.min_value = 1.0
+        self._cfg_slider.max_value = 20.0
+        self._cfg_slider.value = 7.0
+        self._cfg_slider.decimals = 1
+        params_group.add_child(self._cfg_slider)
 
-        # Steps
-        params_layout.addWidget(QLabel("Steps:"))
-        self._steps_spin = QSpinBox()
-        self._steps_spin.setRange(1, 50)
-        self._steps_spin.setValue(20)
-        params_layout.addWidget(self._steps_spin)
+        self._steps_slider = SliderEdit()
+        self._steps_slider.label = "Steps"
+        self._steps_slider.min_value = 1
+        self._steps_slider.max_value = 50
+        self._steps_slider.value = 20
+        self._steps_slider.decimals = 0
+        params_group.add_child(self._steps_slider)
 
-        # Seed
-        params_layout.addWidget(QLabel("Seed:"))
-        seed_row = QHBoxLayout()
-        self._seed_edit = QLineEdit(str(random.randint(0, 2**32 - 1)))
-        self._seed_edit.setPlaceholderText("seed")
-        self._seed_random_btn = QPushButton("Rnd")
-        self._seed_random_btn.setFixedWidth(40)
-        seed_row.addWidget(self._seed_edit)
-        seed_row.addWidget(self._seed_random_btn)
-        params_layout.addLayout(seed_row)
+        # Seed row
+        seed_row = HStack()
+        seed_row.spacing = 4
 
-        _make_collapsible(params_group, self._settings, "instruct_params")
-        layout.addWidget(params_group)
+        self._seed_edit = TextInput()
+        self._seed_edit.text = str(random.randint(0, 2**32 - 1))
+        self._seed_edit.placeholder = "seed"
+        self._seed_edit.preferred_width = px(160)
+        seed_row.add_child(self._seed_edit)
+
+        seed_rnd = Button()
+        seed_rnd.text = "Rnd"
+        seed_rnd.preferred_width = px(40)
+        seed_rnd.on_click = lambda: setattr(
+            self._seed_edit, 'text', str(random.randint(0, 2**32 - 1)))
+        seed_row.add_child(seed_rnd)
+
+        params_group.add_child(seed_row)
+        content.add_child(params_group)
 
         # --- Mask Brush ---
-        mask_group = QGroupBox("Mask Brush")
-        mask_layout = QVBoxLayout(mask_group)
+        mask_group = GroupBox()
+        mask_group.title = "Mask Brush"
 
-        mask_layout.addWidget(QLabel("Size:"))
-        self._mask_size_slider = SliderEdit(1, 500, 50, decimals=0, step=1)
-        mask_layout.addWidget(self._mask_size_slider)
+        self._mask_size_slider = SliderEdit()
+        self._mask_size_slider.label = "Size"
+        self._mask_size_slider.min_value = 1
+        self._mask_size_slider.max_value = 500
+        self._mask_size_slider.value = 50
+        self._mask_size_slider.decimals = 0
+        self._mask_size_slider.on_change = self._on_mask_brush_cb
+        mask_group.add_child(self._mask_size_slider)
 
-        mask_layout.addWidget(QLabel("Hardness:"))
-        self._mask_hardness_slider = SliderEdit(0.0, 1.0, 0.40, decimals=2, step=0.05)
-        mask_layout.addWidget(self._mask_hardness_slider)
+        self._mask_hardness_slider = SliderEdit()
+        self._mask_hardness_slider.label = "Hardness"
+        self._mask_hardness_slider.min_value = 0.0
+        self._mask_hardness_slider.max_value = 1.0
+        self._mask_hardness_slider.value = 0.40
+        self._mask_hardness_slider.decimals = 2
+        self._mask_hardness_slider.on_change = self._on_mask_brush_cb
+        mask_group.add_child(self._mask_hardness_slider)
 
-        btn_row = QHBoxLayout()
-        self._mask_eraser_btn = QPushButton("Eraser")
-        self._mask_eraser_btn.setCheckable(True)
-        self._show_mask_btn = QPushButton("Show Mask")
-        self._show_mask_btn.setCheckable(True)
-        self._show_mask_btn.setChecked(True)
-        btn_row.addWidget(self._mask_eraser_btn)
-        btn_row.addWidget(self._show_mask_btn)
-        mask_layout.addLayout(btn_row)
+        mask_btn_row = HStack()
+        mask_btn_row.spacing = 4
 
-        _make_collapsible(mask_group, self._settings, "instruct_mask_brush")
-        layout.addWidget(mask_group)
+        self._mask_eraser_cb = Checkbox()
+        self._mask_eraser_cb.text = "Eraser"
+        self._mask_eraser_cb.on_changed = lambda v: (
+            self.on_mask_eraser_toggled and self.on_mask_eraser_toggled(v))
+        mask_btn_row.add_child(self._mask_eraser_cb)
 
-        # --- Layer Info & Actions ---
-        self._layer_group = QGroupBox("Instruct Layer")
-        layer_layout = QVBoxLayout(self._layer_group)
+        self._show_mask_cb = Checkbox()
+        self._show_mask_cb.text = "Show Mask"
+        self._show_mask_cb.checked = True
+        self._show_mask_cb.on_changed = lambda v: (
+            self.on_show_mask_toggled and self.on_show_mask_toggled(v))
+        mask_btn_row.add_child(self._show_mask_cb)
 
-        self._layer_info = QLabel("No instruct layer selected")
-        self._layer_info.setWordWrap(True)
-        self._layer_info.setStyleSheet("font-size: 11px;")
-        layer_layout.addWidget(self._layer_info)
+        mask_group.add_child(mask_btn_row)
+        content.add_child(mask_group)
 
-        action_row = QHBoxLayout()
-        self._apply_btn = QPushButton("Apply Instruction")
-        self._new_seed_btn = QPushButton("New Seed")
-        action_row.addWidget(self._apply_btn)
-        action_row.addWidget(self._new_seed_btn)
-        layer_layout.addLayout(action_row)
+        # --- Instruct Layer ---
+        self._layer_group = GroupBox()
+        self._layer_group.title = "Instruct Layer"
+        self._layer_group.visible = False
 
-        self._clear_mask_btn = QPushButton("Clear Mask")
-        layer_layout.addWidget(self._clear_mask_btn)
+        self._layer_info = Label()
+        self._layer_info.text = "No instruct layer selected"
+        self._layer_info.font_size = 11
+        self._layer_info.color = (0.7, 0.7, 0.7, 1.0)
+        self._layer_group.add_child(self._layer_info)
 
-        patch_row = QHBoxLayout()
-        self._draw_patch_btn = QPushButton("Draw Patch")
-        self._draw_patch_btn.setCheckable(True)
-        self._clear_patch_btn = QPushButton("Clear Patch")
-        patch_row.addWidget(self._draw_patch_btn)
-        patch_row.addWidget(self._clear_patch_btn)
-        layer_layout.addLayout(patch_row)
+        action_row = HStack()
+        action_row.spacing = 4
 
-        _make_collapsible(self._layer_group, self._settings, "instruct_layer")
-        self._layer_group.setVisible(False)
-        layout.addWidget(self._layer_group)
+        apply_btn = Button()
+        apply_btn.text = "Apply"
+        apply_btn.preferred_width = px(80)
+        apply_btn.on_click = lambda: (self.on_apply and self.on_apply())
+        action_row.add_child(apply_btn)
 
-        layout.addStretch()
-        scroll.setWidget(container)
-        self.setWidget(scroll)
+        new_seed_btn = Button()
+        new_seed_btn.text = "New Seed"
+        new_seed_btn.preferred_width = px(80)
+        new_seed_btn.on_click = lambda: (self.on_new_seed and self.on_new_seed())
+        action_row.add_child(new_seed_btn)
 
-        # --- Connections ---
-        self._load_btn.clicked.connect(self.load_model_requested.emit)
-        self._apply_btn.clicked.connect(self.apply_requested.emit)
-        self._new_seed_btn.clicked.connect(self.new_seed_requested.emit)
-        self._seed_random_btn.clicked.connect(
-            lambda: self._seed_edit.setText(str(random.randint(0, 2**32 - 1)))
-        )
-        self._mask_size_slider.valueChanged.connect(self._on_mask_brush_changed)
-        self._mask_hardness_slider.valueChanged.connect(self._on_mask_brush_changed)
-        self._clear_mask_btn.clicked.connect(self.clear_mask_requested.emit)
-        self._draw_patch_btn.toggled.connect(self.draw_patch_toggled.emit)
-        self._clear_patch_btn.clicked.connect(self.clear_patch_requested.emit)
+        self._layer_group.add_child(action_row)
 
-    def _on_mask_brush_changed(self):
-        size = int(self._mask_size_slider.value())
-        hardness = self._mask_hardness_slider.value()
-        self.mask_brush_changed.emit(size, hardness)
+        clear_mask_btn = Button()
+        clear_mask_btn.text = "Clear Mask"
+        clear_mask_btn.preferred_width = pct(100)
+        clear_mask_btn.on_click = lambda: (self.on_clear_mask and self.on_clear_mask())
+        self._layer_group.add_child(clear_mask_btn)
+
+        patch_row = HStack()
+        patch_row.spacing = 4
+
+        self._draw_patch_cb = Checkbox()
+        self._draw_patch_cb.text = "Draw Patch"
+        self._draw_patch_cb.on_changed = lambda v: (
+            self.on_draw_patch_toggled and self.on_draw_patch_toggled(v))
+        patch_row.add_child(self._draw_patch_cb)
+
+        clear_patch_btn = Button()
+        clear_patch_btn.text = "Clear Patch"
+        clear_patch_btn.preferred_width = px(80)
+        clear_patch_btn.on_click = lambda: (self.on_clear_patch and self.on_clear_patch())
+        patch_row.add_child(clear_patch_btn)
+
+        self._layer_group.add_child(patch_row)
+        content.add_child(self._layer_group)
+
+        self.add_child(content)
+
+    def _on_mask_brush_cb(self, _value=None):
+        size = int(self._mask_size_slider.value)
+        hardness = self._mask_hardness_slider.value
+        if self.on_mask_brush_changed:
+            self.on_mask_brush_changed(size, hardness)
+
+    # ------------------------------------------------------------------
+    # Properties
+    # ------------------------------------------------------------------
 
     @property
     def instruction(self) -> str:
-        return self._instruction.toPlainText()
+        return self._instruction.text
 
     @property
     def image_guidance_scale(self) -> float:
-        return self._img_guidance_slider.value()
+        return self._img_guidance_slider.value
 
     @property
     def guidance_scale(self) -> float:
-        return self._cfg_slider.value()
+        return self._cfg_slider.value
 
     @property
     def steps(self) -> int:
-        return self._steps_spin.value()
+        return int(self._steps_slider.value)
 
     @property
     def seed(self) -> int:
         try:
-            return int(self._seed_edit.text())
+            return int(self._seed_edit.text)
         except ValueError:
             return -1
 
     def set_seed(self, seed: int):
-        self._seed_edit.setText(str(seed))
+        self._seed_edit.text = str(seed)
+
+    # ------------------------------------------------------------------
+    # External updates
+    # ------------------------------------------------------------------
 
     def on_model_loaded(self):
-        self._model_status.setText("Loaded: instruct-pix2pix")
-        self._load_btn.setEnabled(True)
+        self._model_status.text = "Loaded: instruct-pix2pix"
 
     def on_model_load_error(self, error: str):
-        self._model_status.setText(f"Error: {error[:60]}")
-        self._load_btn.setEnabled(True)
+        self._model_status.text = f"Error: {error[:60]}"
 
     def show_instruct_layer(self, layer):
-        self._layer_group.setVisible(True)
-        self._instruction.setPlainText(layer.instruction)
-        self._img_guidance_slider.setValue(layer.image_guidance_scale)
-        self._cfg_slider.setValue(layer.guidance_scale)
-        self._steps_spin.setValue(layer.steps)
-        self._seed_edit.setText(str(layer.seed))
+        self._layer_group.visible = True
+        self._instruction.text = layer.instruction
+        self._img_guidance_slider.value = layer.image_guidance_scale
+        self._cfg_slider.value = layer.guidance_scale
+        self._steps_slider.value = layer.steps
+        self._seed_edit.text = str(layer.seed)
+
         mask_status = "has mask" if layer.has_mask() else "no mask"
         if layer.manual_patch_rect:
             r = layer.manual_patch_rect
             pw, ph = r[2] - r[0], r[3] - r[1]
-            patch_info = f"manual ({r[0]},{r[1]})-({r[2]},{r[3]}) {pw}x{ph}"
+            patch_info = f"manual {pw}x{ph}"
         else:
-            patch_info = f"auto ({layer.patch_x},{layer.patch_y}) {layer.patch_w}x{layer.patch_h}"
-        info = (
+            patch_info = f"auto {layer.patch_w}x{layer.patch_h}"
+
+        self._layer_info.text = (
             f"instruction: {layer.instruction[:60]}\n"
-            f"image_guidance: {layer.image_guidance_scale:.1f}  "
-            f"cfg: {layer.guidance_scale:.1f}\n"
-            f"steps: {layer.steps}  seed: {layer.seed}\n"
-            f"patch: {patch_info}\n"
-            f"mask: {mask_status}"
+            f"patch: {patch_info}  mask: {mask_status}"
         )
-        self._layer_info.setText(info)
 
     def clear_instruct_layer(self):
-        self._layer_group.setVisible(False)
-        self._layer_info.setText("No instruct layer selected")
+        self._layer_group.visible = False
+        self._layer_info.text = "No instruct layer selected"

@@ -1,0 +1,524 @@
+"""EditorCanvas — extends tcgui Canvas with brush/mask painting and rect modes."""
+
+from __future__ import annotations
+
+import numpy as np
+
+from tcbase import Key, MouseButton, Mods
+from tcgui.widgets.canvas import Canvas
+from tcgui.widgets.events import KeyEvent
+
+from .layer import LayerStack, Layer, DiffusionLayer, LamaLayer, InstructLayer
+from .brush import Brush, composite_stroke
+
+
+class EditorCanvas(Canvas):
+    """Zoomable image canvas with brush painting, mask painting, and rect tools."""
+
+    def __init__(self, layer_stack: LayerStack):
+        super().__init__()
+        self.background_color = (0.08, 0.08, 0.10, 1.0)
+        self._layer_stack = layer_stack
+        self._composite: np.ndarray | None = None
+
+        self.brush = Brush()
+        self._brush_eraser = False
+        self._mask_brush_size = 50
+        self._mask_brush_hardness = 0.4
+        self._mask_eraser = False
+        self._show_mask = True
+
+        # Rectangle modes
+        self._ref_rect_mode = False
+        self._ref_rect_dragging = False
+        self._ref_rect_start: tuple[int, int] | None = None
+        self._ref_rect_end: tuple[int, int] | None = None
+        self._show_ref_rect = True
+
+        self._patch_rect_mode = False
+        self._patch_rect_dragging = False
+        self._patch_rect_start: tuple[int, int] | None = None
+        self._patch_rect_end: tuple[int, int] | None = None
+        self._show_patch_rect = True
+
+        # Stroke buffer (MAX blending during one stroke)
+        self._stroke_mask: np.ndarray | None = None
+        self._stroke_color: tuple | None = None
+        self._stroke_overlay: np.ndarray | None = None
+        self._stroke_is_eraser = False
+
+        self._painting = False
+        self._last_paint_pos: tuple[int, int] | None = None
+
+        # Callbacks
+        self.on_mouse_moved: callable = None
+        self.on_color_picked: callable = None
+        self.on_ref_rect_drawn: callable = None
+        self.on_patch_rect_drawn: callable = None
+
+        # Wire layer stack
+        layer_stack.on_changed = self._on_stack_changed
+
+        # Wire canvas callbacks for painting
+        self.on_canvas_mouse_down = self._handle_mouse_down
+        self.on_canvas_mouse_move = self._handle_mouse_move
+        self.on_canvas_mouse_up = self._handle_mouse_up
+        self.on_render_overlay = self._render_overlay
+
+    # ------------------------------------------------------------------
+    # Layer stack integration
+    # ------------------------------------------------------------------
+
+    def _on_stack_changed(self):
+        self._update_composite()
+
+    def _update_composite(self):
+        self._composite = np.ascontiguousarray(self._layer_stack.composite())
+        self.set_image(self._composite)
+        self._update_overlay()
+
+    def _update_overlay(self):
+        """Rebuild overlay combining stroke preview + mask."""
+        layer = self._layer_stack.active_layer
+        h, w = (self._layer_stack.height, self._layer_stack.width)
+        if h == 0 or w == 0:
+            self.set_overlay(None)
+            return
+
+        has_stroke = self._stroke_mask is not None and self._stroke_overlay is not None
+        has_mask = (self._show_mask
+                    and isinstance(layer, (DiffusionLayer, LamaLayer, InstructLayer))
+                    and layer.has_mask())
+
+        if not has_stroke and not has_mask:
+            self.set_overlay(None)
+            return
+
+        overlay = np.zeros((h, w, 4), dtype=np.uint8)
+
+        # Mask overlay (red, 40% opacity)
+        if has_mask:
+            overlay[:, :, 0] = 255
+            overlay[:, :, 1] = 50
+            overlay[:, :, 2] = 50
+            overlay[:, :, 3] = (layer.mask.astype(np.float32) * 0.4).astype(np.uint8)
+
+        # Stroke overlay on top
+        if has_stroke:
+            self._stroke_overlay[:, :, 3] = self._stroke_mask
+            sa = self._stroke_overlay[:, :, 3:4].astype(np.float32) / 255.0
+            inv = 1.0 - sa
+            overlay[:, :, :3] = (
+                self._stroke_overlay[:, :, :3].astype(np.float32) * sa
+                + overlay[:, :, :3].astype(np.float32) * inv
+            ).astype(np.uint8)
+            overlay[:, :, 3] = np.clip(
+                self._stroke_overlay[:, :, 3].astype(np.float32)
+                + overlay[:, :, 3].astype(np.float32) * (1.0 - sa[:, :, 0]),
+                0, 255
+            ).astype(np.uint8)
+
+        self.set_overlay(overlay)
+
+    def get_composite(self) -> np.ndarray | None:
+        return self._composite
+
+    def get_composite_below(self, layer: Layer) -> np.ndarray | None:
+        return np.ascontiguousarray(
+            self._layer_stack.composite(exclude_layer=layer))
+
+    def view_center_image(self) -> tuple[int, int]:
+        cx = self.x + self.width / 2
+        cy = self.y + self.height / 2
+        ix, iy = self.widget_to_image(cx, cy)
+        return int(ix), int(iy)
+
+    # ------------------------------------------------------------------
+    # Setters
+    # ------------------------------------------------------------------
+
+    def set_mask_brush(self, size: int, hardness: float):
+        self._mask_brush_size = size
+        self._mask_brush_hardness = hardness
+
+    def set_mask_eraser(self, eraser: bool):
+        self._mask_eraser = eraser
+
+    def set_brush_eraser(self, eraser: bool):
+        self._brush_eraser = eraser
+
+    def set_show_mask(self, show: bool):
+        self._show_mask = show
+        self._update_overlay()
+
+    def set_ref_rect_mode(self, on: bool):
+        self._ref_rect_mode = on
+        self.cursor = "cross" if on else ""
+        if not on:
+            self._ref_rect_dragging = False
+
+    def set_show_ref_rect(self, show: bool):
+        self._show_ref_rect = show
+
+    def set_patch_rect_mode(self, on: bool):
+        self._patch_rect_mode = on
+        self.cursor = "cross" if on else ""
+        if not on:
+            self._patch_rect_dragging = False
+
+    def set_show_patch_rect(self, show: bool):
+        self._show_patch_rect = show
+
+    # ------------------------------------------------------------------
+    # Mask painting
+    # ------------------------------------------------------------------
+
+    def _is_mask_layer_active(self) -> bool:
+        return isinstance(self._layer_stack.active_layer,
+                          (DiffusionLayer, LamaLayer, InstructLayer))
+
+    def _dab_mask(self, mask: np.ndarray, cx: int, cy: int):
+        d = self._mask_brush_size
+        if d < 1:
+            return
+        y, x = np.ogrid[-d / 2:d / 2, -d / 2:d / 2]
+        dist = np.sqrt(x * x + y * y)
+        radius = d / 2
+
+        if self._mask_brush_hardness >= 1.0:
+            alpha_mask = (dist <= radius).astype(np.float32) * 255
+        else:
+            inner = radius * self._mask_brush_hardness
+            alpha_mask = np.clip(
+                (radius - dist) / max(radius - inner, 0.001), 0, 1) * 255
+
+        sh, sw = alpha_mask.shape
+        ih, iw = mask.shape
+        x0 = cx - sw // 2
+        y0 = cy - sh // 2
+        sx0 = max(0, -x0)
+        sy0 = max(0, -y0)
+        sx1 = min(sw, iw - x0)
+        sy1 = min(sh, ih - y0)
+        dx0 = max(0, x0)
+        dy0b = max(0, y0)
+        dx1 = dx0 + (sx1 - sx0)
+        dy1 = dy0b + (sy1 - sy0)
+        if dx0 >= dx1 or dy0b >= dy1:
+            return
+        stamp_slice = alpha_mask[sy0:sy1, sx0:sx1].astype(np.uint8)
+        if self._mask_eraser:
+            mask[dy0b:dy1, dx0:dx1] = np.minimum(
+                mask[dy0b:dy1, dx0:dx1], 255 - stamp_slice)
+        else:
+            mask[dy0b:dy1, dx0:dx1] = np.maximum(
+                mask[dy0b:dy1, dx0:dx1], stamp_slice)
+
+    def _stroke_mask_line(self, mask: np.ndarray,
+                          x0: int, y0: int, x1: int, y1: int):
+        dx = x1 - x0
+        dy = y1 - y0
+        dist = max(abs(dx), abs(dy), 1)
+        spacing = max(1, self._mask_brush_size // 4)
+        steps = max(1, int(dist / spacing))
+        for i in range(steps + 1):
+            t = i / max(steps, 1)
+            x = int(x0 + dx * t)
+            y = int(y0 + dy * t)
+            self._dab_mask(mask, x, y)
+
+    # ------------------------------------------------------------------
+    # Stroke buffer for brush painting
+    # ------------------------------------------------------------------
+
+    def _begin_stroke(self):
+        h = self._layer_stack.height
+        w = self._layer_stack.width
+        if h == 0 or w == 0:
+            return
+        self._stroke_is_eraser = self._brush_eraser
+        self._stroke_color = tuple(self.brush.color)
+        if self._stroke_is_eraser:
+            self._stroke_mask = None
+            self._stroke_overlay = None
+        else:
+            self._stroke_mask = np.zeros((h, w), dtype=np.uint8)
+            self._stroke_overlay = np.zeros((h, w, 4), dtype=np.uint8)
+            r, g, b, _a = self._stroke_color
+            self._stroke_overlay[:, :, 0] = r
+            self._stroke_overlay[:, :, 1] = g
+            self._stroke_overlay[:, :, 2] = b
+
+    def _end_stroke(self):
+        layer = self._layer_stack.active_layer
+        if layer is not None and self._stroke_mask is not None:
+            composite_stroke(layer.image, self._stroke_mask, self._stroke_color)
+            if self._composite is not None:
+                composite_stroke(self._composite, self._stroke_mask, self._stroke_color)
+                self.set_image(self._composite)
+        self._stroke_mask = None
+        self._stroke_color = None
+        self._stroke_overlay = None
+        self._update_overlay()
+
+    # ------------------------------------------------------------------
+    # Eraser
+    # ------------------------------------------------------------------
+
+    def _composite_rect_below(self, target_layer, dy0, dy1, dx0, dx1):
+        rh, rw = dy1 - dy0, dx1 - dx0
+        result = np.zeros((rh, rw, 4), dtype=np.float32)
+
+        def _blend_rect(layer):
+            if layer is target_layer:
+                return True
+            if not layer.visible or layer.opacity <= 0:
+                return False
+            src = layer.image[dy0:dy1, dx0:dx1].astype(np.float32)
+            alpha = src[:, :, 3:4] / 255.0 * layer.opacity
+            inv_alpha = 1.0 - alpha
+            result[:, :, :3] = src[:, :, :3] * alpha + result[:, :, :3] * inv_alpha
+            result[:, :, 3:4] = alpha * 255.0 + result[:, :, 3:4] * inv_alpha
+            return False
+
+        for layer in reversed(self._layer_stack.layers):
+            if _blend_rect(layer):
+                break
+        return result
+
+    def _erase_dab(self, layer, cx: int, cy: int):
+        stamp = self.brush._alpha_stamp
+        sh, sw = stamp.shape[:2]
+        ih, iw = layer.image.shape[:2]
+
+        x0 = cx - sw // 2
+        y0 = cy - sh // 2
+        sx0, sy0 = max(0, -x0), max(0, -y0)
+        sx1, sy1 = min(sw, iw - x0), min(sh, ih - y0)
+        dx0, dy0b = max(0, x0), max(0, y0)
+        dx1, dy1 = dx0 + (sx1 - sx0), dy0b + (sy1 - sy0)
+        if dx0 >= dx1 or dy0b >= dy1:
+            return
+
+        erase = stamp[sy0:sy1, sx0:sx1] * (self.brush.color[3] / 255.0)
+        la = layer.image[dy0b:dy1, dx0:dx1, 3].astype(np.float32)
+        layer.image[dy0b:dy1, dx0:dx1, 3] = np.clip(
+            la * (1.0 - erase), 0, 255).astype(np.uint8)
+
+        if self._composite is not None:
+            below = self._composite_rect_below(layer, dy0b, dy1, dx0, dx1)
+            above = layer.image[dy0b:dy1, dx0:dx1].astype(np.float32)
+            sa = above[:, :, 3:4] / 255.0
+            inv_sa = 1.0 - sa
+            da = below[:, :, 3:4] / 255.0
+            out_a = sa + da * inv_sa
+            safe_a = np.maximum(out_a, 1.0 / 255.0)
+            out_rgb = (above[:, :, :3] * sa + below[:, :, :3] * da * inv_sa) / safe_a
+            self._composite[dy0b:dy1, dx0:dx1, :3] = np.clip(
+                out_rgb, 0, 255).astype(np.uint8)
+            self._composite[dy0b:dy1, dx0:dx1, 3:4] = np.clip(
+                out_a * 255.0, 0, 255).astype(np.uint8)
+
+    def _erase_stroke_line(self, layer, x0: int, y0: int, x1: int, y1: int):
+        dx = x1 - x0
+        dy = y1 - y0
+        dist = max(abs(dx), abs(dy), 1)
+        spacing = max(1, self.brush.size // 4)
+        steps = max(1, int(dist / spacing))
+        for i in range(steps + 1):
+            t = i / max(steps, 1)
+            x = int(x0 + dx * t)
+            y = int(y0 + dy * t)
+            self._erase_dab(layer, x, y)
+        self.set_image(self._composite)
+
+    # ------------------------------------------------------------------
+    # Mouse handlers (called from Canvas callbacks)
+    # ------------------------------------------------------------------
+
+    def _handle_mouse_down(self, ix: float, iy: float, button):
+        ix, iy = int(ix), int(iy)
+
+        if button == MouseButton.LEFT:
+            layer = self._layer_stack.active_layer
+            if layer is None:
+                return
+
+            # Patch rect mode
+            if self._patch_rect_mode and isinstance(
+                    layer, (DiffusionLayer, InstructLayer)):
+                self._patch_rect_dragging = True
+                self._patch_rect_start = (ix, iy)
+                self._patch_rect_end = (ix, iy)
+                return
+
+            # Ref rect mode
+            if self._ref_rect_mode and self._is_mask_layer_active():
+                self._ref_rect_dragging = True
+                self._ref_rect_start = (ix, iy)
+                self._ref_rect_end = (ix, iy)
+                return
+
+            # Painting
+            self._painting = True
+            if self._is_mask_layer_active():
+                self._dab_mask(layer.mask, ix, iy)
+                self._update_overlay()
+            else:
+                self._begin_stroke()
+                if self._stroke_is_eraser:
+                    self._erase_dab(layer, ix, iy)
+                    self.set_image(self._composite)
+                elif self._stroke_mask is not None:
+                    self.brush.dab_to_mask(self._stroke_mask, ix, iy)
+                    self._update_overlay()
+            self._last_paint_pos = (ix, iy)
+
+        elif button == MouseButton.RIGHT:
+            # Ctrl not accessible here; use right-click for eyedropper
+            self._pick_color(ix, iy)
+
+    def _handle_mouse_move(self, ix: float, iy: float):
+        ixi, iyi = int(ix), int(iy)
+
+        if self._patch_rect_dragging:
+            self._patch_rect_end = (ixi, iyi)
+            return
+
+        if self._ref_rect_dragging:
+            self._ref_rect_end = (ixi, iyi)
+            return
+
+        if self._painting:
+            layer = self._layer_stack.active_layer
+            if layer is None:
+                return
+            if self._is_mask_layer_active():
+                if self._last_paint_pos:
+                    lx, ly = self._last_paint_pos
+                    self._stroke_mask_line(layer.mask, lx, ly, ixi, iyi)
+                else:
+                    self._dab_mask(layer.mask, ixi, iyi)
+                self._update_overlay()
+            else:
+                if self._stroke_is_eraser:
+                    if self._last_paint_pos:
+                        lx, ly = self._last_paint_pos
+                        self._erase_stroke_line(layer, lx, ly, ixi, iyi)
+                    else:
+                        self._erase_dab(layer, ixi, iyi)
+                        self.set_image(self._composite)
+                elif self._stroke_mask is not None:
+                    if self._last_paint_pos:
+                        lx, ly = self._last_paint_pos
+                        self.brush.stroke_to_mask(
+                            self._stroke_mask, lx, ly, ixi, iyi)
+                    else:
+                        self.brush.dab_to_mask(self._stroke_mask, ixi, iyi)
+                    self._update_overlay()
+            self._last_paint_pos = (ixi, iyi)
+
+        if self.on_mouse_moved:
+            self.on_mouse_moved(ixi, iyi)
+
+    def _handle_mouse_up(self, ix: float, iy: float):
+        ixi, iyi = int(ix), int(iy)
+
+        if self._patch_rect_dragging:
+            sx, sy = self._patch_rect_start
+            x0, y0 = min(sx, ixi), min(sy, iyi)
+            x1, y1 = max(sx, ixi), max(sy, iyi)
+            self._patch_rect_dragging = False
+            self._patch_rect_start = None
+            self._patch_rect_end = None
+            self._patch_rect_mode = False
+            self.cursor = ""
+            if x1 - x0 > 2 and y1 - y0 > 2 and self.on_patch_rect_drawn:
+                self.on_patch_rect_drawn(x0, y0, x1, y1)
+            return
+
+        if self._ref_rect_dragging:
+            sx, sy = self._ref_rect_start
+            x0, y0 = min(sx, ixi), min(sy, iyi)
+            x1, y1 = max(sx, ixi), max(sy, iyi)
+            self._ref_rect_dragging = False
+            self._ref_rect_start = None
+            self._ref_rect_end = None
+            self._ref_rect_mode = False
+            self.cursor = ""
+            if x1 - x0 > 2 and y1 - y0 > 2 and self.on_ref_rect_drawn:
+                self.on_ref_rect_drawn(x0, y0, x1, y1)
+            return
+
+        if self._painting:
+            if self._stroke_mask is not None:
+                self._end_stroke()
+            elif self._stroke_is_eraser:
+                self.set_image(self._composite)
+            self._update_overlay()
+        self._painting = False
+        self._last_paint_pos = None
+
+    def _pick_color(self, ix: int, iy: int):
+        if self._composite is None:
+            return
+        h, w = self._composite.shape[:2]
+        if 0 <= ix < w and 0 <= iy < h:
+            r, g, b, a = self._composite[iy, ix]
+            if self.on_color_picked:
+                self.on_color_picked(int(r), int(g), int(b), int(a))
+
+    # ------------------------------------------------------------------
+    # Keyboard
+    # ------------------------------------------------------------------
+
+    def on_key_down(self, event: KeyEvent) -> bool:
+        if event.key == Key(ord(']')):
+            self.brush.set_size(self.brush.size + 5)
+            return True
+        elif event.key == Key(ord('[')):
+            self.brush.set_size(self.brush.size - 5)
+            return True
+        return super().on_key_down(event)
+
+    # ------------------------------------------------------------------
+    # Render overlay (rectangles via renderer)
+    # ------------------------------------------------------------------
+
+    def _render_overlay(self, canvas, renderer):
+        layer = self._layer_stack.active_layer
+
+        # IP-Adapter reference rectangle (blue)
+        if self._show_ref_rect and isinstance(layer, DiffusionLayer):
+            rect = None
+            if (self._ref_rect_dragging
+                    and self._ref_rect_start and self._ref_rect_end):
+                rect = self._ref_rect_start + self._ref_rect_end
+            elif layer.ip_adapter_rect:
+                rect = layer.ip_adapter_rect
+            if rect:
+                ix0, iy0, ix1, iy1 = rect
+                wx0, wy0 = canvas.image_to_widget(ix0, iy0)
+                wx1, wy1 = canvas.image_to_widget(ix1, iy1)
+                renderer.draw_rect(wx0, wy0, wx1 - wx0, wy1 - wy0,
+                                   (0.2, 0.47, 1.0, 0.15))
+                renderer.draw_rect_outline(wx0, wy0, wx1 - wx0, wy1 - wy0,
+                                           (0.2, 0.47, 1.0, 0.8), 2.0)
+
+        # Manual patch rectangle (green)
+        if self._show_patch_rect and isinstance(
+                layer, (DiffusionLayer, InstructLayer)):
+            rect = None
+            if (self._patch_rect_dragging
+                    and self._patch_rect_start and self._patch_rect_end):
+                rect = self._patch_rect_start + self._patch_rect_end
+            elif layer.manual_patch_rect:
+                rect = layer.manual_patch_rect
+            if rect:
+                ix0, iy0, ix1, iy1 = rect
+                wx0, wy0 = canvas.image_to_widget(ix0, iy0)
+                wx1, wy1 = canvas.image_to_widget(ix1, iy1)
+                renderer.draw_rect(wx0, wy0, wx1 - wx0, wy1 - wy0,
+                                   (0.2, 0.78, 0.31, 0.15))
+                renderer.draw_rect_outline(wx0, wy0, wx1 - wx0, wy1 - wy0,
+                                           (0.2, 0.78, 0.31, 0.8), 2.0)

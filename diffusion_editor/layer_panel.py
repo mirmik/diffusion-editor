@@ -1,225 +1,211 @@
-from PyQt6.QtWidgets import (
-    QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QTreeWidget, QTreeWidgetItem, QAbstractItemView,
-)
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer
+"""LayerPanel — tcgui panel with tree of layers + management buttons."""
+
+from __future__ import annotations
+
+from tcgui.widgets.vstack import VStack
+from tcgui.widgets.hstack import HStack
+from tcgui.widgets.button import Button
+from tcgui.widgets.label import Label
+from tcgui.widgets.tree import TreeNode, TreeWidget
+from tcgui.widgets.checkbox import Checkbox
+from tcgui.widgets.units import px, pct
 
 from .layer import LayerStack, Layer, DiffusionLayer, LamaLayer, InstructLayer
 
-_LAYER_ID_ROLE = Qt.ItemDataRole.UserRole
 
-# QAbstractItemView.DropIndicatorPosition
-_ON_ITEM = 0
-_ABOVE_ITEM = 1
-_BELOW_ITEM = 2
-_ON_VIEWPORT = 3
-
-
-class _DragTreeWidget(QTreeWidget):
-    """QTreeWidget where we intercept drop and handle the move ourselves."""
-    # dragged_layer_id, target_layer_id_or_None, indicator
-    drop_requested = pyqtSignal(object, object, int)
-
-    def dropEvent(self, event):
-        dragged = self.selectedItems()
-        if not dragged:
-            return
-        dragged_id = dragged[0].data(0, _LAYER_ID_ROLE)
-        target_item = self.itemAt(event.position().toPoint())
-        target_id = target_item.data(0, _LAYER_ID_ROLE) if target_item else None
-        indicator = self.dropIndicatorPosition().value
-        # Accept event but do NOT call super — we move layers in the model.
-        # Defer the signal so Qt finishes drag-drop processing before we
-        # modify the tree (otherwise Qt accesses destroyed C++ items → segfault).
-        event.accept()
-        QTimer.singleShot(0, lambda: self.drop_requested.emit(
-            dragged_id, target_id, indicator))
-
-
-class LayerPanel(QDockWidget):
-    create_diffusion_requested = pyqtSignal()
-    create_lama_requested = pyqtSignal()
-    create_instruct_requested = pyqtSignal()
-
-    def __init__(self, layer_stack: LayerStack, parent=None):
-        super().__init__("Layers", parent)
+class LayerPanel(VStack):
+    def __init__(self, layer_stack: LayerStack):
+        super().__init__()
         self._layer_stack = layer_stack
         self._id_to_layer: dict[int, Layer] = {}
-        self.setAllowedAreas(
-            Qt.DockWidgetArea.LeftDockWidgetArea |
-            Qt.DockWidgetArea.RightDockWidgetArea
-        )
-        self.setMinimumWidth(200)
-
-        container = QWidget()
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(4, 4, 4, 4)
-
-        self._tree = _DragTreeWidget()
-        self._tree.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
-        self._tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self._tree.setHeaderHidden(True)
-        self._tree.setIndentation(20)
-        self._tree.setExpandsOnDoubleClick(False)
-        layout.addWidget(self._tree)
-
-        btn_layout = QHBoxLayout()
-        self._add_btn = QPushButton("+")
-        self._add_btn.setToolTip("New Layer")
-        self._add_btn.setFixedWidth(40)
-        self._remove_btn = QPushButton("-")
-        self._remove_btn.setToolTip("Remove Layer")
-        self._remove_btn.setFixedWidth(40)
-        self._merge_btn = QPushButton("Flatten")
-        self._merge_btn.setToolTip("Flatten all layers")
-        btn_layout.addWidget(self._add_btn)
-        btn_layout.addWidget(self._remove_btn)
-        btn_layout.addStretch()
-        btn_layout.addWidget(self._merge_btn)
-        layout.addLayout(btn_layout)
-
-        self._create_diff_btn = QPushButton("Create Diffusion Layer")
-        layout.addWidget(self._create_diff_btn)
-
-        self._create_lama_btn = QPushButton("Create LaMa Layer")
-        layout.addWidget(self._create_lama_btn)
-
-        self._create_instruct_btn = QPushButton("Create Instruct Layer")
-        layout.addWidget(self._create_instruct_btn)
-
-        self.setWidget(container)
-
-        self._add_btn.clicked.connect(self._on_add)
-        self._remove_btn.clicked.connect(self._on_remove)
-        self._merge_btn.clicked.connect(self._on_flatten)
-        self._create_diff_btn.clicked.connect(self.create_diffusion_requested.emit)
-        self._create_lama_btn.clicked.connect(self.create_lama_requested.emit)
-        self._create_instruct_btn.clicked.connect(self.create_instruct_requested.emit)
-        self._tree.currentItemChanged.connect(self._on_selection_changed)
-        self._tree.itemChanged.connect(self._on_item_changed)
-        self._tree.drop_requested.connect(self._on_drop)
-        self._layer_stack.changed.connect(self._sync_from_stack)
-
+        self._layer_to_node: dict[int, TreeNode] = {}
         self._updating = False
+        self.spacing = 6
+        self.preferred_width = px(220)
 
-    def _layer_from_item(self, item: QTreeWidgetItem) -> Layer | None:
-        layer_id = item.data(0, _LAYER_ID_ROLE)
-        if layer_id is not None:
-            return self._id_to_layer.get(layer_id)
-        return None
+        # Callbacks
+        self.on_create_diffusion: callable = None
+        self.on_create_lama: callable = None
+        self.on_create_instruct: callable = None
 
-    def _create_tree_item(self, layer: Layer) -> QTreeWidgetItem:
-        if isinstance(layer, DiffusionLayer):
-            name = f"[D] {layer.name}"
-        elif isinstance(layer, LamaLayer):
-            name = f"[L] {layer.name}"
-        elif isinstance(layer, InstructLayer):
-            name = f"[I] {layer.name}"
-        else:
-            name = layer.name
-        item = QTreeWidgetItem([name])
-        item.setFlags(
-            item.flags()
-            | Qt.ItemFlag.ItemIsUserCheckable
-            | Qt.ItemFlag.ItemIsDragEnabled
-            | Qt.ItemFlag.ItemIsDropEnabled
-        )
-        item.setCheckState(0, Qt.CheckState.Checked if layer.visible else Qt.CheckState.Unchecked)
-        item.setData(0, _LAYER_ID_ROLE, id(layer))
-        self._id_to_layer[id(layer)] = layer
-        for child in layer.children:
-            item.addChild(self._create_tree_item(child))
-        return item
+        # Tree widget
+        self._tree = TreeWidget()
+        self._tree.preferred_width = pct(100)
+        self._tree.preferred_height = px(300)
+        self._tree.row_height = 24
+        self._tree.row_spacing = 1
+        self._tree.draggable = True
+        self._tree.on_select = self._on_tree_select
+        self._tree.on_drop = self._on_tree_drop
+        self.add_child(self._tree)
 
-    def _find_item_for_layer(self, layer: Layer) -> QTreeWidgetItem | None:
-        target_id = id(layer)
+        # Buttons row: + - Flatten
+        btn_row = HStack()
+        btn_row.spacing = 4
 
-        def _search(parent_item):
-            for i in range(parent_item.childCount()):
-                child = parent_item.child(i)
-                if child.data(0, _LAYER_ID_ROLE) == target_id:
-                    return child
-                result = _search(child)
-                if result is not None:
-                    return result
-            return None
+        add_btn = Button()
+        add_btn.text = "+"
+        add_btn.preferred_width = px(30)
+        add_btn.on_click = self._on_add
+        btn_row.add_child(add_btn)
 
-        for i in range(self._tree.topLevelItemCount()):
-            item = self._tree.topLevelItem(i)
-            if item.data(0, _LAYER_ID_ROLE) == target_id:
-                return item
-            result = _search(item)
-            if result is not None:
-                return result
-        return None
+        rm_btn = Button()
+        rm_btn.text = "-"
+        rm_btn.preferred_width = px(30)
+        rm_btn.on_click = self._on_remove
+        btn_row.add_child(rm_btn)
 
-    def _sync_from_stack(self):
+        flatten_btn = Button()
+        flatten_btn.text = "Flatten"
+        flatten_btn.preferred_width = px(60)
+        flatten_btn.on_click = self._on_flatten
+        btn_row.add_child(flatten_btn)
+
+        self.add_child(btn_row)
+
+        # Create special layers
+        diff_btn = Button()
+        diff_btn.text = "Diffusion"
+        diff_btn.preferred_width = pct(100)
+        diff_btn.on_click = lambda: (self.on_create_diffusion and self.on_create_diffusion())
+        self.add_child(diff_btn)
+
+        lama_btn = Button()
+        lama_btn.text = "LaMa"
+        lama_btn.preferred_width = pct(100)
+        lama_btn.on_click = lambda: (self.on_create_lama and self.on_create_lama())
+        self.add_child(lama_btn)
+
+        instruct_btn = Button()
+        instruct_btn.text = "Instruct"
+        instruct_btn.preferred_width = pct(100)
+        instruct_btn.on_click = lambda: (self.on_create_instruct and self.on_create_instruct())
+        self.add_child(instruct_btn)
+
+    # ------------------------------------------------------------------
+    # Sync from stack
+    # ------------------------------------------------------------------
+
+    def sync_from_stack(self):
         self._updating = True
         self._id_to_layer.clear()
-        self._tree.clear()
-        for layer in self._layer_stack.layers:
-            self._tree.addTopLevelItem(self._create_tree_item(layer))
-        self._tree.expandAll()
+        self._layer_to_node.clear()
 
+        # Remove all roots
+        self._tree.root_nodes.clear()
+        self._tree._dirty = True
+
+        for layer in self._layer_stack.layers:
+            node = self._create_node(layer)
+            self._tree.add_root(node)
+
+        # Select active layer
         active = self._layer_stack.active_layer
         if active is not None:
-            item = self._find_item_for_layer(active)
-            if item is not None:
-                self._tree.setCurrentItem(item)
+            node = self._layer_to_node.get(id(active))
+            if node is not None:
+                self._tree.selected_node = node
+
         self._updating = False
 
-    def _on_selection_changed(self, current, previous):
-        if self._updating or current is None:
-            return
-        layer = self._layer_from_item(current)
-        if layer is not None:
-            self._layer_stack.active_layer = layer
+    def _create_node(self, layer: Layer) -> TreeNode:
+        if isinstance(layer, DiffusionLayer):
+            prefix = "[D] "
+        elif isinstance(layer, LamaLayer):
+            prefix = "[L] "
+        elif isinstance(layer, InstructLayer):
+            prefix = "[I] "
+        else:
+            prefix = ""
 
-    def _on_item_changed(self, item, column):
+        # HStack with visibility checkbox + name label
+        row = HStack()
+        row.spacing = 4
+
+        vis_cb = Checkbox()
+        vis_cb.checked = layer.visible
+        vis_cb.text = ""
+        vis_cb.preferred_width = px(16)
+
+        def _make_vis_handler(ly):
+            def handler(checked):
+                if not self._updating:
+                    self._layer_stack.set_visibility(ly, checked)
+            return handler
+        vis_cb.on_changed = _make_vis_handler(layer)
+        row.add_child(vis_cb)
+
+        name_lbl = Label()
+        name_lbl.text = prefix + layer.name
+        name_lbl.font_size = 13
+        name_lbl.color = (0.9, 0.9, 0.9, 1.0)
+        row.add_child(name_lbl)
+
+        node = TreeNode(content=row)
+        node.expanded = True
+
+        self._id_to_layer[id(layer)] = layer
+        self._layer_to_node[id(layer)] = node
+        # Store layer ref on node for easy lookup
+        node._layer_ref = layer
+
+        for child in layer.children:
+            child_node = self._create_node(child)
+            node.add_node(child_node)
+
+        return node
+
+    def _layer_from_node(self, node: TreeNode) -> Layer | None:
+        return getattr(node, '_layer_ref', None)
+
+    # ------------------------------------------------------------------
+    # Tree callbacks
+    # ------------------------------------------------------------------
+
+    def _on_tree_select(self, node: TreeNode):
         if self._updating:
             return
-        layer = self._layer_from_item(item)
+        layer = self._layer_from_node(node)
         if layer is not None:
-            visible = item.checkState(0) == Qt.CheckState.Checked
-            self._layer_stack.set_visibility(layer, visible)
+            self._updating = True
+            self._layer_stack.active_layer = layer
+            self._updating = False
 
-    def _on_drop(self, dragged_id, target_id, indicator):
-        dragged = self._id_to_layer.get(dragged_id)
-        if dragged is None:
+    def _on_tree_drop(self, dragged: TreeNode, target: TreeNode | None,
+                      position: str):
+        dragged_layer = self._layer_from_node(dragged)
+        if dragged_layer is None:
             return
-        target = self._id_to_layer.get(target_id) if target_id is not None else None
 
-        # Can't drop on self or own descendant
-        if target is not None:
-            if target is dragged or target in dragged.all_descendants():
+        target_layer = self._layer_from_node(target) if target else None
+
+        # Prevent dropping on self or own descendants
+        if target_layer is not None:
+            if target_layer is dragged_layer:
+                return
+            if target_layer in dragged_layer.all_descendants():
                 return
 
-        if indicator == _ON_ITEM and target is not None:
-            # Drop ON item → make first child
-            self._layer_stack.move_layer(dragged, target, 0)
-
-        elif indicator == _ABOVE_ITEM and target is not None:
-            parent = target.parent
+        if position == "inside" and target_layer is not None:
+            self._layer_stack.move_layer(dragged_layer, target_layer, 0)
+        elif position == "above" and target_layer is not None:
+            parent = target_layer.parent
             siblings = parent.children if parent else self._layer_stack._layers
-            idx = siblings.index(target)
-            if dragged in siblings and siblings.index(dragged) < idx:
-                idx -= 1
-            self._layer_stack.move_layer(dragged, parent, idx)
-
-        elif indicator == _BELOW_ITEM and target is not None:
-            parent = target.parent
+            idx = siblings.index(target_layer) if target_layer in siblings else 0
+            self._layer_stack.move_layer(dragged_layer, parent, idx)
+        elif position == "below" and target_layer is not None:
+            parent = target_layer.parent
             siblings = parent.children if parent else self._layer_stack._layers
-            idx = siblings.index(target) + 1
-            if dragged in siblings and siblings.index(dragged) < idx:
-                idx -= 1
-            self._layer_stack.move_layer(dragged, parent, idx)
-
+            idx = siblings.index(target_layer) + 1 if target_layer in siblings else len(siblings)
+            self._layer_stack.move_layer(dragged_layer, parent, idx)
         else:
-            # OnViewport → move to end of root
+            # root
             n = len(self._layer_stack._layers)
-            if dragged in self._layer_stack._layers:
-                n -= 1
-            self._layer_stack.move_layer(dragged, None, n)
+            self._layer_stack.move_layer(dragged_layer, None, n)
+
+    # ------------------------------------------------------------------
+    # Button handlers
+    # ------------------------------------------------------------------
 
     def _on_add(self):
         self._layer_stack.add_layer(self._layer_stack.next_name("Layer"))
