@@ -49,6 +49,7 @@ class EditorCanvas(Canvas):
 
         self._painting = False
         self._last_paint_pos: tuple[int, int] | None = None
+        self._mask_overlay: np.ndarray | None = None
 
         # Callbacks
         self.on_mouse_moved: callable = None
@@ -75,6 +76,7 @@ class EditorCanvas(Canvas):
     def _update_composite(self):
         self._composite = np.ascontiguousarray(self._layer_stack.composite())
         self.set_image(self._composite)
+        self._mask_overlay = None
         self._update_overlay()
 
     def _update_overlay(self):
@@ -94,31 +96,70 @@ class EditorCanvas(Canvas):
             self.set_overlay(None)
             return
 
-        overlay = np.zeros((h, w, 4), dtype=np.uint8)
+        if has_stroke and not has_mask:
+            # Fast path: stroke only — just copy RGB + alpha, no compositing
+            self._stroke_overlay[:, :, 3] = self._stroke_mask
+            self.set_overlay(self._stroke_overlay.copy())
+            return
 
-        # Mask overlay (red, 40% opacity)
-        if has_mask:
+        if has_mask and not has_stroke:
+            # Fast path: mask only
+            overlay = np.empty((h, w, 4), dtype=np.uint8)
             overlay[:, :, 0] = 255
             overlay[:, :, 1] = 50
             overlay[:, :, 2] = 50
             overlay[:, :, 3] = (layer.mask.astype(np.float32) * 0.4).astype(np.uint8)
+            self.set_overlay(overlay)
+            return
 
-        # Stroke overlay on top
-        if has_stroke:
-            self._stroke_overlay[:, :, 3] = self._stroke_mask
-            sa = self._stroke_overlay[:, :, 3:4].astype(np.float32) / 255.0
-            inv = 1.0 - sa
-            overlay[:, :, :3] = (
-                self._stroke_overlay[:, :, :3].astype(np.float32) * sa
-                + overlay[:, :, :3].astype(np.float32) * inv
-            ).astype(np.uint8)
-            overlay[:, :, 3] = np.clip(
-                self._stroke_overlay[:, :, 3].astype(np.float32)
-                + overlay[:, :, 3].astype(np.float32) * (1.0 - sa[:, :, 0]),
-                0, 255
-            ).astype(np.uint8)
+        # Both mask and stroke: composite stroke over mask
+        overlay = np.empty((h, w, 4), dtype=np.uint8)
+        overlay[:, :, 0] = 255
+        overlay[:, :, 1] = 50
+        overlay[:, :, 2] = 50
+        overlay[:, :, 3] = (layer.mask.astype(np.float32) * 0.4).astype(np.uint8)
+
+        self._stroke_overlay[:, :, 3] = self._stroke_mask
+        sa = self._stroke_overlay[:, :, 3:4].astype(np.float32) / 255.0
+        inv = 1.0 - sa
+        overlay[:, :, :3] = (
+            self._stroke_overlay[:, :, :3].astype(np.float32) * sa
+            + overlay[:, :, :3].astype(np.float32) * inv
+        ).astype(np.uint8)
+        overlay[:, :, 3] = np.clip(
+            self._stroke_overlay[:, :, 3].astype(np.float32)
+            + overlay[:, :, 3].astype(np.float32) * (1.0 - sa[:, :, 0]),
+            0, 255
+        ).astype(np.uint8)
 
         self.set_overlay(overlay)
+
+    def _update_stroke_region(self, dirty):
+        """Partial overlay update for brush stroke — only copy dirty region alpha."""
+        if dirty is None or self._stroke_overlay is None or self._stroke_mask is None:
+            return
+        x0, y0, x1, y1 = dirty
+        self._stroke_overlay[y0:y1, x0:x1, 3] = self._stroke_mask[y0:y1, x0:x1]
+        self.mark_overlay_dirty(x0, y0, x1, y1)
+
+    def _update_mask_overlay_region(self, layer, dirty):
+        """Partial overlay update for mask painting — only recompute dirty region alpha."""
+        if dirty is None:
+            return
+        x0, y0, x1, y1 = dirty
+        if self._mask_overlay is None:
+            h, w = self._layer_stack.height, self._layer_stack.width
+            self._mask_overlay = np.empty((h, w, 4), dtype=np.uint8)
+            self._mask_overlay[:, :, 0] = 255
+            self._mask_overlay[:, :, 1] = 50
+            self._mask_overlay[:, :, 2] = 50
+            self._mask_overlay[:, :, 3] = (
+                layer.mask.astype(np.float32) * 0.4).astype(np.uint8)
+            self.set_overlay_ref(self._mask_overlay)
+            return
+        self._mask_overlay[y0:y1, x0:x1, 3] = (
+            layer.mask[y0:y1, x0:x1].astype(np.float32) * 0.4).astype(np.uint8)
+        self.mark_overlay_dirty(x0, y0, x1, y1)
 
     def get_composite(self) -> np.ndarray | None:
         return self._composite
@@ -149,6 +190,7 @@ class EditorCanvas(Canvas):
 
     def set_show_mask(self, show: bool):
         self._show_mask = show
+        self._mask_overlay = None
         self._update_overlay()
 
     def set_ref_rect_mode(self, on: bool):
@@ -178,9 +220,10 @@ class EditorCanvas(Canvas):
                           (DiffusionLayer, LamaLayer, InstructLayer))
 
     def _dab_mask(self, mask: np.ndarray, cx: int, cy: int):
+        """Returns dirty rect (dx0, dy0, dx1, dy1) or None."""
         d = self._mask_brush_size
         if d < 1:
-            return
+            return None
         y, x = np.ogrid[-d / 2:d / 2, -d / 2:d / 2]
         dist = np.sqrt(x * x + y * y)
         radius = d / 2
@@ -205,7 +248,7 @@ class EditorCanvas(Canvas):
         dx1 = dx0 + (sx1 - sx0)
         dy1 = dy0b + (sy1 - sy0)
         if dx0 >= dx1 or dy0b >= dy1:
-            return
+            return None
         stamp_slice = alpha_mask[sy0:sy1, sx0:sx1].astype(np.uint8)
         if self._mask_eraser:
             mask[dy0b:dy1, dx0:dx1] = np.minimum(
@@ -213,19 +256,56 @@ class EditorCanvas(Canvas):
         else:
             mask[dy0b:dy1, dx0:dx1] = np.maximum(
                 mask[dy0b:dy1, dx0:dx1], stamp_slice)
+        return (dx0, dy0b, dx1, dy1)
 
     def _stroke_mask_line(self, mask: np.ndarray,
                           x0: int, y0: int, x1: int, y1: int):
-        dx = x1 - x0
-        dy = y1 - y0
-        dist = max(abs(dx), abs(dy), 1)
-        spacing = max(1, self._mask_brush_size // 4)
-        steps = max(1, int(dist / spacing))
-        for i in range(steps + 1):
-            t = i / max(steps, 1)
-            x = int(x0 + dx * t)
-            y = int(y0 + dy * t)
-            self._dab_mask(mask, x, y)
+        """Draw smooth mask stroke segment (capsule). Returns dirty rect or None."""
+        ih, iw = mask.shape
+        d = self._mask_brush_size
+        if d < 1:
+            return None
+        radius = d / 2.0
+
+        bx0 = max(0, int(min(x0, x1) - radius))
+        by0 = max(0, int(min(y0, y1) - radius))
+        bx1 = min(iw, int(max(x0, x1) + radius) + 1)
+        by1 = min(ih, int(max(y0, y1) + radius) + 1)
+        if bx0 >= bx1 or by0 >= by1:
+            return None
+
+        sdx = float(x1 - x0)
+        sdy = float(y1 - y0)
+        seg_len_sq = sdx * sdx + sdy * sdy
+
+        if seg_len_sq < 0.5:
+            return self._dab_mask(mask, x0, y0)
+
+        yy, xx = np.mgrid[by0:by1, bx0:bx1]
+        xx = xx.astype(np.float32)
+        yy = yy.astype(np.float32)
+
+        t = ((xx - x0) * sdx + (yy - y0) * sdy) / seg_len_sq
+        np.clip(t, 0.0, 1.0, out=t)
+        cx = x0 + t * sdx
+        cy = y0 + t * sdy
+        dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+
+        if self._mask_brush_hardness >= 1.0:
+            alpha = (dist <= radius).astype(np.float32) * 255
+        else:
+            inner = radius * self._mask_brush_hardness
+            alpha = np.clip(
+                (radius - dist) / max(radius - inner, 0.001), 0, 1) * 255
+
+        stamp_u8 = alpha.astype(np.uint8)
+        if self._mask_eraser:
+            mask[by0:by1, bx0:bx1] = np.minimum(
+                mask[by0:by1, bx0:bx1], 255 - stamp_u8)
+        else:
+            mask[by0:by1, bx0:bx1] = np.maximum(
+                mask[by0:by1, bx0:bx1], stamp_u8)
+        return (bx0, by0, bx1, by1)
 
     # ------------------------------------------------------------------
     # Stroke buffer for brush painting
@@ -248,6 +328,7 @@ class EditorCanvas(Canvas):
             self._stroke_overlay[:, :, 0] = r
             self._stroke_overlay[:, :, 1] = g
             self._stroke_overlay[:, :, 2] = b
+            self.set_overlay_ref(self._stroke_overlay)
 
     def _end_stroke(self):
         layer = self._layer_stack.active_layer
@@ -259,6 +340,7 @@ class EditorCanvas(Canvas):
         self._stroke_mask = None
         self._stroke_color = None
         self._stroke_overlay = None
+        self._mask_overlay = None
         self._update_overlay()
 
     # ------------------------------------------------------------------
@@ -320,16 +402,62 @@ class EditorCanvas(Canvas):
                 out_a * 255.0, 0, 255).astype(np.uint8)
 
     def _erase_stroke_line(self, layer, x0: int, y0: int, x1: int, y1: int):
-        dx = x1 - x0
-        dy = y1 - y0
-        dist = max(abs(dx), abs(dy), 1)
-        spacing = max(1, self.brush.size // 4)
-        steps = max(1, int(dist / spacing))
-        for i in range(steps + 1):
-            t = i / max(steps, 1)
-            x = int(x0 + dx * t)
-            y = int(y0 + dy * t)
-            self._erase_dab(layer, x, y)
+        ih, iw = layer.image.shape[:2]
+        radius = self.brush.size / 2.0
+        stamp = self.brush._alpha_stamp
+
+        bx0 = max(0, int(min(x0, x1) - radius))
+        by0 = max(0, int(min(y0, y1) - radius))
+        bx1 = min(iw, int(max(x0, x1) + radius) + 1)
+        by1 = min(ih, int(max(y0, y1) + radius) + 1)
+        if bx0 >= bx1 or by0 >= by1:
+            return
+
+        sdx = float(x1 - x0)
+        sdy = float(y1 - y0)
+        seg_len_sq = sdx * sdx + sdy * sdy
+
+        if seg_len_sq < 0.5:
+            self._erase_dab(layer, x0, y0)
+            self.set_image(self._composite)
+            return
+
+        yy, xx = np.mgrid[by0:by1, bx0:bx1]
+        xx = xx.astype(np.float32)
+        yy = yy.astype(np.float32)
+
+        t = ((xx - x0) * sdx + (yy - y0) * sdy) / seg_len_sq
+        np.clip(t, 0.0, 1.0, out=t)
+        cx = x0 + t * sdx
+        cy = y0 + t * sdy
+        dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+
+        if self.brush.hardness >= 1.0:
+            erase = (dist <= radius).astype(np.float32)
+        else:
+            inner = radius * self.brush.hardness
+            erase = np.clip(
+                (radius - dist) / max(radius - inner, 0.001), 0.0, 1.0)
+
+        erase *= (self.brush.color[3] / 255.0)
+        la = layer.image[by0:by1, bx0:bx1, 3].astype(np.float32)
+        layer.image[by0:by1, bx0:bx1, 3] = np.clip(
+            la * (1.0 - erase), 0, 255).astype(np.uint8)
+
+        if self._composite is not None:
+            below = self._composite_rect_below(layer, by0, by1, bx0, bx1)
+            above = layer.image[by0:by1, bx0:bx1].astype(np.float32)
+            sa = above[:, :, 3:4] / 255.0
+            inv_sa = 1.0 - sa
+            da = below[:, :, 3:4] / 255.0
+            out_a = sa + da * inv_sa
+            safe_a = np.maximum(out_a, 1.0 / 255.0)
+            out_rgb = (above[:, :, :3] * sa + below[:, :, :3] * da * inv_sa) / safe_a
+            self._composite[by0:by1, bx0:bx1, :3] = np.clip(
+                out_rgb, 0, 255).astype(np.uint8)
+            self._composite[by0:by1, bx0:bx1, 3:4] = np.clip(
+                out_a * 255.0, 0, 255).astype(np.uint8)
+
         self.set_image(self._composite)
 
     # ------------------------------------------------------------------
@@ -362,16 +490,16 @@ class EditorCanvas(Canvas):
             # Painting
             self._painting = True
             if self._is_mask_layer_active():
-                self._dab_mask(layer.mask, ix, iy)
-                self._update_overlay()
+                dirty = self._dab_mask(layer.mask, ix, iy)
+                self._update_mask_overlay_region(layer, dirty)
             else:
                 self._begin_stroke()
                 if self._stroke_is_eraser:
                     self._erase_dab(layer, ix, iy)
                     self.set_image(self._composite)
                 elif self._stroke_mask is not None:
-                    self.brush.dab_to_mask(self._stroke_mask, ix, iy)
-                    self._update_overlay()
+                    dirty = self.brush.dab_to_mask(self._stroke_mask, ix, iy)
+                    self._update_stroke_region(dirty)
             self._last_paint_pos = (ix, iy)
 
         elif button == MouseButton.RIGHT:
@@ -396,10 +524,10 @@ class EditorCanvas(Canvas):
             if self._is_mask_layer_active():
                 if self._last_paint_pos:
                     lx, ly = self._last_paint_pos
-                    self._stroke_mask_line(layer.mask, lx, ly, ixi, iyi)
+                    dirty = self._stroke_mask_line(layer.mask, lx, ly, ixi, iyi)
                 else:
-                    self._dab_mask(layer.mask, ixi, iyi)
-                self._update_overlay()
+                    dirty = self._dab_mask(layer.mask, ixi, iyi)
+                self._update_mask_overlay_region(layer, dirty)
             else:
                 if self._stroke_is_eraser:
                     if self._last_paint_pos:
@@ -411,11 +539,12 @@ class EditorCanvas(Canvas):
                 elif self._stroke_mask is not None:
                     if self._last_paint_pos:
                         lx, ly = self._last_paint_pos
-                        self.brush.stroke_to_mask(
+                        dirty = self.brush.stroke_to_mask(
                             self._stroke_mask, lx, ly, ixi, iyi)
                     else:
-                        self.brush.dab_to_mask(self._stroke_mask, ixi, iyi)
-                    self._update_overlay()
+                        dirty = self.brush.dab_to_mask(
+                            self._stroke_mask, ixi, iyi)
+                    self._update_stroke_region(dirty)
             self._last_paint_pos = (ixi, iyi)
 
         if self.on_mouse_moved:
@@ -455,6 +584,7 @@ class EditorCanvas(Canvas):
                 self._end_stroke()
             elif self._stroke_is_eraser:
                 self.set_image(self._composite)
+            self._mask_overlay = None
             self._update_overlay()
         self._painting = False
         self._last_paint_pos = None

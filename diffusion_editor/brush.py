@@ -38,7 +38,10 @@ class Brush:
             ).astype(np.float32)
 
     def dab_to_mask(self, mask: np.ndarray, cx: int, cy: int):
-        """Apply brush dab to 2D uint8 mask using MAX blending (no buildup)."""
+        """Apply brush dab to 2D uint8 mask using MAX blending (no buildup).
+
+        Returns dirty rect (dx0, dy0, dx1, dy1) or None if nothing changed.
+        """
         stamp = self._alpha_stamp
         sh, sw = stamp.shape[:2]
         ih, iw = mask.shape[:2]
@@ -55,25 +58,65 @@ class Brush:
         dy1 = dy0 + (sy1 - sy0)
 
         if dx0 >= dx1 or dy0 >= dy1:
-            return
+            return None
 
         stamp_u8 = (stamp[sy0:sy1, sx0:sx1] * self.color[3]).astype(np.uint8)
         mask[dy0:dy1, dx0:dx1] = np.maximum(
             mask[dy0:dy1, dx0:dx1], stamp_u8)
+        return (dx0, dy0, dx1, dy1)
 
     def stroke_to_mask(self, mask: np.ndarray,
                        x0: int, y0: int, x1: int, y1: int):
-        """Draw interpolated stroke into mask using MAX blending."""
-        dx = x1 - x0
-        dy = y1 - y0
-        dist = max(abs(dx), abs(dy), 1)
-        spacing = max(1, self.size // 4)
-        steps = max(1, int(dist / spacing))
-        for i in range(steps + 1):
-            t = i / max(steps, 1)
-            x = int(x0 + dx * t)
-            y = int(y0 + dy * t)
-            self.dab_to_mask(mask, x, y)
+        """Draw smooth stroke segment (capsule shape) using distance-to-segment.
+
+        Returns dirty rect (dx0, dy0, dx1, dy1) or None.
+        """
+        ih, iw = mask.shape[:2]
+        radius = self.size / 2.0
+
+        # Bounding box of capsule
+        bx0 = max(0, int(min(x0, x1) - radius))
+        by0 = max(0, int(min(y0, y1) - radius))
+        bx1 = min(iw, int(max(x0, x1) + radius) + 1)
+        by1 = min(ih, int(max(y0, y1) + radius) + 1)
+        if bx0 >= bx1 or by0 >= by1:
+            return None
+
+        # Pixel grid inside bounding box
+        yy, xx = np.mgrid[by0:by1, bx0:bx1]
+        xx = xx.astype(np.float32)
+        yy = yy.astype(np.float32)
+
+        # Distance from each pixel to the line segment
+        sdx = float(x1 - x0)
+        sdy = float(y1 - y0)
+        seg_len_sq = sdx * sdx + sdy * sdy
+
+        if seg_len_sq < 0.5:
+            # Degenerate segment — single dab
+            return self.dab_to_mask(mask, x0, y0)
+
+        # Project onto segment, clamp t to [0,1]
+        t = ((xx - x0) * sdx + (yy - y0) * sdy) / seg_len_sq
+        np.clip(t, 0.0, 1.0, out=t)
+
+        # Closest point on segment
+        cx = x0 + t * sdx
+        cy = y0 + t * sdy
+        dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+
+        # Brush profile
+        if self.hardness >= 1.0:
+            alpha = (dist <= radius).astype(np.float32)
+        else:
+            inner = radius * self.hardness
+            alpha = np.clip(
+                (radius - dist) / max(radius - inner, 0.001), 0.0, 1.0)
+
+        stamp_u8 = (alpha * self.color[3]).astype(np.uint8)
+        mask[by0:by1, bx0:bx1] = np.maximum(
+            mask[by0:by1, bx0:bx1], stamp_u8)
+        return (bx0, by0, bx1, by1)
 
 
 def composite_stroke(layer_image: np.ndarray, stroke_mask: np.ndarray,
