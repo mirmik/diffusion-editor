@@ -189,6 +189,11 @@ def main():
         if not editor.running:
             break
 
+        # Run deferred actions (e.g. menu callbacks that may open blocking
+        # dialogs).  Running them here — after all SDL events are drained —
+        # keeps mouse/keyboard state consistent.
+        ui.process_deferred()
+
         # Poll engines
         editor.poll()
 
