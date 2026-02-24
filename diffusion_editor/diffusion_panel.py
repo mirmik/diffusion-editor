@@ -95,7 +95,7 @@ class DiffusionPanel(ScrollArea):
         self._prompt = TextArea()
         self._prompt.placeholder = "masterpiece, best quality"
         self._prompt.preferred_width = pct(100)
-        self._prompt.preferred_height = px(50)
+        self._prompt.preferred_height = px(73)
         prompt_group.add_child(self._prompt)
 
         neg_lbl = Label()
@@ -106,7 +106,7 @@ class DiffusionPanel(ScrollArea):
         self._negative_prompt = TextArea()
         self._negative_prompt.placeholder = "worst quality, blurry"
         self._negative_prompt.preferred_width = pct(100)
-        self._negative_prompt.preferred_height = px(40)
+        self._negative_prompt.preferred_height = px(73)
         prompt_group.add_child(self._negative_prompt)
 
         content.add_child(prompt_group)
