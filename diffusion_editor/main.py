@@ -164,7 +164,8 @@ def main():
             ui.mouse_move(float(ev.motion.x), float(ev.motion.y))
         elif t == sdl2.SDL_MOUSEBUTTONDOWN:
             ui.mouse_down(float(ev.button.x), float(ev.button.y),
-                          translate_button(ev.button.button))
+                          translate_button(ev.button.button),
+                          translate_mods(sdl2.SDL_GetModState()))
         elif t == sdl2.SDL_MOUSEBUTTONUP:
             ui.mouse_up(float(ev.button.x), float(ev.button.y))
         elif t == sdl2.SDL_MOUSEWHEEL:

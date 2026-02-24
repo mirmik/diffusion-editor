@@ -465,8 +465,15 @@ class EditorCanvas(Canvas):
     # Mouse handlers (called from Canvas callbacks)
     # ------------------------------------------------------------------
 
-    def _handle_mouse_down(self, ix: float, iy: float, button):
+    def _handle_mouse_down(self, ix: float, iy: float, button, mods: int = 0):
+        from tcbase import Mods
         ix, iy = int(ix), int(iy)
+
+        # Ctrl+LMB or RMB — eyedropper
+        if button == MouseButton.RIGHT or (
+                button == MouseButton.LEFT and (mods & Mods.CTRL.value)):
+            self._pick_color(ix, iy)
+            return
 
         if button == MouseButton.LEFT:
             layer = self._layer_stack.active_layer
@@ -502,10 +509,6 @@ class EditorCanvas(Canvas):
                     dirty = self.brush.dab_to_mask(self._stroke_mask, ix, iy)
                     self._update_stroke_region(dirty)
             self._last_paint_pos = (ix, iy)
-
-        elif button == MouseButton.RIGHT:
-            # Ctrl not accessible here; use right-click for eyedropper
-            self._pick_color(ix, iy)
 
     def _handle_mouse_move(self, ix: float, iy: float):
         ixi, iyi = int(ix), int(iy)
@@ -604,10 +607,10 @@ class EditorCanvas(Canvas):
     # ------------------------------------------------------------------
 
     def on_key_down(self, event: KeyEvent) -> bool:
-        if event.key == Key(ord(']')):
+        if event.key == Key.RBRACKET:
             self.brush.set_size(self.brush.size + 5)
             return True
-        elif event.key == Key(ord('[')):
+        elif event.key == Key.LBRACKET:
             self.brush.set_size(self.brush.size - 5)
             return True
         return super().on_key_down(event)
