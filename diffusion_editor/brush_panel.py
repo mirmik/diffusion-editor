@@ -68,16 +68,13 @@ class BrushPanel(GroupBox):
 
     def _pick_color(self):
         r, g, b, a = self._brush.color
-        initial = (r / 255, g / 255, b / 255, a / 255)
         ColorDialog.pick_color(
-            self, self._on_color_result, initial_color=initial)
+            self._ui, initial=(r, g, b, a),
+            on_result=self._on_color_result)
 
     def _on_color_result(self, color: tuple | None):
         if color is not None:
-            r = int(color[0] * 255)
-            g = int(color[1] * 255)
-            b = int(color[2] * 255)
-            a = int(color[3] * 255)
+            r, g, b, a = color
             self._brush.set_color(r, g, b, a)
             self._update_color_btn()
 
