@@ -104,7 +104,7 @@ class LayerPanel(VStack):
         if active is not None:
             node = self._layer_to_node.get(id(active))
             if node is not None:
-                self._tree.selected_node = node
+                self._tree._select_node(node)
 
         self._updating = False
 
@@ -132,7 +132,7 @@ class LayerPanel(VStack):
                 if not self._updating:
                     self._layer_stack.set_visibility(ly, checked)
             return handler
-        vis_cb.on_changed = _make_vis_handler(layer)
+        vis_cb.on_change = _make_vis_handler(layer)
         row.add_child(vis_cb)
 
         name_lbl = Label()
