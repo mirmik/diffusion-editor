@@ -15,7 +15,8 @@ class Settings:
             try:
                 with open(self._path, "r") as f:
                     self._data = json.load(f)
-            except (json.JSONDecodeError, OSError):
+            except (json.JSONDecodeError, OSError) as e:
+                print(f"[Settings] Failed to load {self._path}: {e}")
                 self._data = {}
 
     def get(self, key: str, default=None):

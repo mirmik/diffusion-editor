@@ -71,6 +71,7 @@ class EditorCanvas(Canvas):
     # ------------------------------------------------------------------
 
     def _on_stack_changed(self):
+        print("[EditorCanvas] _on_stack_changed called")
         self._update_composite()
 
     def _update_composite(self):

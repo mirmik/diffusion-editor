@@ -12,7 +12,8 @@ def _ensure_root():
             root = tk.Tk()
             root.withdraw()
         return root
-    except Exception:
+    except Exception as e:
+        print(f"[FileDialog] tkinter root init fallback: {e}")
         root = tk.Tk()
         root.withdraw()
         return root

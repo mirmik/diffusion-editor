@@ -132,7 +132,7 @@ class LayerPanel(VStack):
                 if not self._updating:
                     self._layer_stack.set_visibility(ly, checked)
             return handler
-        vis_cb.on_change = _make_vis_handler(layer)
+        vis_cb.on_changed = _make_vis_handler(layer)
         row.add_child(vis_cb)
 
         name_lbl = Label()

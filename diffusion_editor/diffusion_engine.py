@@ -115,7 +115,9 @@ class DiffusionEngine:
         if self._pipe is None:
             raise RuntimeError("No model loaded")
         if self._pipe_mode == mode:
+            print(f"[DiffusionEngine] _ensure_pipeline: already in {mode} mode")
             return
+        print(f"[DiffusionEngine] _ensure_pipeline: switching {self._pipe_mode} -> {mode}")
         components = dict(
             vae=self._pipe.vae,
             text_encoder=self._pipe.text_encoder,
@@ -125,6 +127,9 @@ class DiffusionEngine:
             unet=self._pipe.unet,
             scheduler=self._pipe.scheduler,
         )
+        none_components = [k for k, v in components.items() if v is None]
+        if none_components:
+            print(f"[DiffusionEngine] WARNING: None components: {none_components}")
         if self._ip_adapter_loaded:
             components["image_encoder"] = self._pipe.image_encoder
             components["feature_extractor"] = self._pipe.feature_extractor
@@ -264,9 +269,10 @@ class DiffusionEngine:
             self._pipe.set_ip_adapter_scale(ip_adapter_scale)
             kwargs["ip_adapter_image"] = ip_adapter_image
 
+        print(f"[DiffusionEngine] _inpaint: calling pipe({w8}x{h8}, steps={num_inference_steps})...")
         result = self._pipe(**kwargs).images[0]
 
-        print(f"[DiffusionEngine] inpaint done, result size: {result.size}")
+        print(f"[DiffusionEngine] _inpaint done, result size: {result.size}")
         return result, seed
 
     def _txt2img(self, prompt: str, negative_prompt: str,
@@ -344,6 +350,8 @@ class DiffusionEngine:
     def _run_inference(self, image, prompt, negative_prompt, strength, steps,
                        guidance_scale, seed, mode, mask_image, masked_content,
                        ip_adapter_image, ip_adapter_scale, width, height):
+        import traceback
+        print(f"[DiffusionEngine] _run_inference thread started, mode={mode}")
         try:
             if mode == "txt2img":
                 result_image, used_seed = self._txt2img(
@@ -362,9 +370,13 @@ class DiffusionEngine:
                     strength, steps, guidance_scale, seed,
                     ip_adapter_image, ip_adapter_scale)
             self._result = (result_image, used_seed)
+            print(f"[DiffusionEngine] _run_inference OK, result set")
         except Exception as e:
+            print(f"[DiffusionEngine] _run_inference EXCEPTION: {e}")
+            traceback.print_exc()
             self._error = str(e)
         self._busy = False
+        print(f"[DiffusionEngine] _run_inference thread done, busy=False")
 
     def submit_load_ip_adapter(self):
         if self._busy:

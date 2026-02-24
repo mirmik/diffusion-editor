@@ -923,6 +923,8 @@ class EditorWindow:
         if task_type is None:
             return
 
+        print(f"[_poll_diffusion] got task_type={task_type}, error={error}, result_type={type(result)}")
+
         if task_type == "load":
             if error:
                 self._diffusion_panel.on_model_load_error(error)
@@ -949,11 +951,13 @@ class EditorWindow:
 
         elif task_type == "inference":
             if error:
+                print(f"[_poll_diffusion] inference ERROR: {error}")
                 self._statusbar.text = f"Diffusion error: {error[:80]}"
                 self._pending_request = None
                 return
 
             result_image, used_seed = result
+            print(f"[_poll_diffusion] inference OK, seed={used_seed}, pending={type(self._pending_request).__name__}")
             if isinstance(self._pending_request, DiffusionLayer):
                 dl = self._pending_request
                 dl.image[:] = 0

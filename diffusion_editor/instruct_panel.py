@@ -126,7 +126,7 @@ class InstructPanel(ScrollArea):
         self._mask_size_slider.max_value = 500
         self._mask_size_slider.value = 50
         self._mask_size_slider.decimals = 0
-        self._mask_size_slider.on_change = self._on_mask_brush_cb
+        self._mask_size_slider.on_changed = self._on_mask_brush_cb
         mask_group.add_child(self._mask_size_slider)
 
         self._mask_hardness_slider = SliderEdit()
@@ -135,7 +135,7 @@ class InstructPanel(ScrollArea):
         self._mask_hardness_slider.max_value = 1.0
         self._mask_hardness_slider.value = 0.40
         self._mask_hardness_slider.decimals = 2
-        self._mask_hardness_slider.on_change = self._on_mask_brush_cb
+        self._mask_hardness_slider.on_changed = self._on_mask_brush_cb
         mask_group.add_child(self._mask_hardness_slider)
 
         mask_btn_row = HStack()
