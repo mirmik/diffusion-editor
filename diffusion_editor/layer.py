@@ -466,6 +466,10 @@ class LayerStack:
         self._width = 0
         self._height = 0
         self.on_changed: callable = None
+        # Prefix sum compositing caches (uint8 RGBA).
+        # prefix[k] = composite of bottom k+1 layers in compositing order.
+        self._prefix_caches: list[np.ndarray | None] = []
+        self._prefix_dirty: list[bool] = []
 
     # --- Tree traversal ---
 
@@ -518,6 +522,7 @@ class LayerStack:
         layer = Layer("Background", w, h, image)
         self._layers.append(layer)
         self._active_layer = layer
+        self._rebuild_prefix_list()
         if self.on_changed:
             self.on_changed()
 
@@ -539,6 +544,7 @@ class LayerStack:
             return
         layer = Layer(name, self._width, self._height, image)
         self._insert_near_active(layer)
+        self._rebuild_prefix_list()
         if self.on_changed:
             self.on_changed()
 
@@ -546,6 +552,7 @@ class LayerStack:
         if self._width == 0 or self._height == 0:
             return
         self._insert_near_active(layer)
+        self._rebuild_prefix_list()
         if self.on_changed:
             self.on_changed()
 
@@ -570,6 +577,7 @@ class LayerStack:
                 self._active_layer = self._layers[min(idx, len(self._layers) - 1)]
             else:
                 self._active_layer = None
+        self._rebuild_prefix_list()
         if self.on_changed:
             self.on_changed()
 
@@ -586,11 +594,13 @@ class LayerStack:
         else:
             self._layers.insert(index, layer)
         self._active_layer = layer
+        self._rebuild_prefix_list()
         if self.on_changed:
             self.on_changed()
 
     def set_visibility(self, layer: Layer, visible: bool):
         layer.visible = visible
+        self.mark_layer_dirty(layer)
         if self.on_changed:
             self.on_changed()
 
@@ -600,6 +610,80 @@ class LayerStack:
         layer = Layer("Background", self._width, self._height, result)
         self._layers.append(layer)
         self._active_layer = layer
+        self._rebuild_prefix_list()
+        if self.on_changed:
+            self.on_changed()
+
+    # --- Prefix cache management ---
+
+    def _rebuild_prefix_list(self):
+        """Reset all prefix caches (after structural changes)."""
+        n = len(self._layers)
+        self._prefix_caches = [None] * n
+        self._prefix_dirty = [True] * n
+
+    def _invalidate_from(self, comp_index: int):
+        """Mark prefix[comp_index:] as dirty."""
+        for i in range(comp_index, len(self._prefix_dirty)):
+            self._prefix_dirty[i] = True
+            self._prefix_caches[i] = None
+
+    def _root_comp_index(self, layer: Layer) -> int:
+        """Compositing-order index (0=bottom) of the root layer containing `layer`."""
+        root = layer
+        while root.parent is not None:
+            root = root.parent
+        # _layers[0]=top, _layers[-1]=bottom; comp order reverses this
+        return len(self._layers) - 1 - self._layers.index(root)
+
+    def mark_layer_dirty(self, layer: Layer):
+        """Public: call when a layer's content/visibility/opacity changed."""
+        if len(self._prefix_caches) != len(self._layers):
+            self._rebuild_prefix_list()
+            return
+        try:
+            idx = self._root_comp_index(layer)
+            self._invalidate_from(idx)
+        except ValueError:
+            self._rebuild_prefix_list()
+
+    def _ensure_prefix_up_to(self, index: int):
+        """Ensure prefix_caches[0..index] are up to date."""
+        ordered = list(reversed(self._layers))
+        for i in range(index + 1):
+            if not self._prefix_dirty[i]:
+                continue
+            if i > 0 and self._prefix_caches[i - 1] is not None:
+                result = self._prefix_caches[i - 1].astype(np.float32)
+            else:
+                result = np.zeros(
+                    (self._height, self._width, 4), dtype=np.float32)
+            self._composite_subtree(ordered[i], result)
+            self._prefix_caches[i] = np.clip(result, 0, 255).astype(np.uint8)
+            self._prefix_dirty[i] = False
+
+    def get_prefix_below(self, layer: Layer) -> np.ndarray | None:
+        """Return cached prefix composite of layers below `layer` (uint8), or None."""
+        if len(self._prefix_caches) != len(self._layers):
+            return None
+        root = layer
+        while root.parent is not None:
+            root = root.parent
+        try:
+            comp_idx = len(self._layers) - 1 - self._layers.index(root)
+        except ValueError:
+            return None
+        if layer.parent is not None:
+            return None  # layer inside group — prefix doesn't apply directly
+        if comp_idx == 0:
+            return None
+        self._ensure_prefix_up_to(comp_idx - 1)
+        return self._prefix_caches[comp_idx - 1]
+
+    def set_opacity(self, layer: Layer, opacity: float):
+        """Set layer opacity with prefix invalidation."""
+        layer.opacity = opacity
+        self.mark_layer_dirty(layer)
         if self.on_changed:
             self.on_changed()
 
@@ -663,23 +747,60 @@ class LayerStack:
             return False
 
     def composite(self, exclude_layer: Layer | None = None) -> np.ndarray:
-        """Composite visible layers in the tree.
+        """Composite visible layers using prefix-sum caches.
 
         If exclude_layer is set, composites only what renders below that layer.
         """
         if not self._layers or self._width == 0:
             return np.zeros((1, 1, 4), dtype=np.uint8)
 
-        result = np.zeros((self._height, self._width, 4), dtype=np.float32)
-        if exclude_layer is None:
+        # Sync cache size with layer list
+        if len(self._prefix_caches) != len(self._layers):
+            self._rebuild_prefix_list()
+
+        if exclude_layer is not None:
+            return self._composite_excluding(exclude_layer)
+
+        # Rebuild dirty prefix entries (bottom to top)
+        self._ensure_prefix_up_to(len(self._layers) - 1)
+
+        last = self._prefix_caches[-1]
+        if last is not None:
+            return last.copy()
+        return np.zeros((self._height, self._width, 4), dtype=np.uint8)
+
+    def _composite_excluding(self, exclude_layer: Layer) -> np.ndarray:
+        """Composite everything below exclude_layer using prefix caches."""
+        root = exclude_layer
+        while root.parent is not None:
+            root = root.parent
+
+        try:
+            comp_idx = len(self._layers) - 1 - self._layers.index(root)
+        except ValueError:
+            return np.zeros((self._height, self._width, 4), dtype=np.uint8)
+
+        # Layer inside a group — fall back to full traversal
+        if exclude_layer.parent is not None:
+            result = np.zeros(
+                (self._height, self._width, 4), dtype=np.float32)
             for layer in reversed(self._layers):
-                self._composite_subtree(layer, result)
-        else:
-            for layer in reversed(self._layers):  # bottom to top
-                found = self._composite_subtree_until(layer, result, exclude_layer)
+                found = self._composite_subtree_until(
+                    layer, result, exclude_layer)
                 if found:
                     break
-        return np.clip(result, 0, 255).astype(np.uint8)
+            return np.clip(result, 0, 255).astype(np.uint8)
+
+        # Root layer — use prefix cache
+        if comp_idx == 0:
+            return np.zeros(
+                (self._height, self._width, 4), dtype=np.uint8)
+
+        self._ensure_prefix_up_to(comp_idx - 1)
+        cache = self._prefix_caches[comp_idx - 1]
+        if cache is not None:
+            return cache.copy()
+        return np.zeros((self._height, self._width, 4), dtype=np.uint8)
 
     # --- Serialization ---
 
@@ -761,5 +882,6 @@ class LayerStack:
 
         if self._active_layer is None and self._layers:
             self._active_layer = self._layers[0]
+        self._rebuild_prefix_list()
         if self.on_changed:
             self.on_changed()

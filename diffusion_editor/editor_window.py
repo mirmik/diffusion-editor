@@ -869,6 +869,7 @@ class EditorWindow:
                 paste_result(layer.image, result_image,
                              layer.patch_x, layer.patch_y,
                              layer.patch_w, layer.patch_h, mask=mask_arg)
+                self._layer_stack.mark_layer_dirty(layer)
                 if self._layer_stack.on_changed:
                     self._layer_stack.on_changed()
                 self._lama_panel.show_lama_layer(layer)
@@ -912,6 +913,7 @@ class EditorWindow:
                 paste_result(layer.image, result_image,
                              layer.patch_x, layer.patch_y,
                              layer.patch_w, layer.patch_h, mask=mask_arg)
+                self._layer_stack.mark_layer_dirty(layer)
                 if self._layer_stack.on_changed:
                     self._layer_stack.on_changed()
                 self._instruct_panel.show_instruct_layer(layer)
@@ -972,6 +974,7 @@ class EditorWindow:
                 paste_result(dl.image, result_image,
                              dl.patch_x, dl.patch_y,
                              dl.patch_w, dl.patch_h, mask=mask_arg)
+                self._layer_stack.mark_layer_dirty(dl)
                 if self._layer_stack.on_changed:
                     self._layer_stack.on_changed()
                 self._diffusion_panel.show_diffusion_layer(dl)

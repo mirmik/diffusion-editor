@@ -335,9 +335,10 @@ class EditorCanvas(Canvas):
         layer = self._layer_stack.active_layer
         if layer is not None and self._stroke_mask is not None:
             composite_stroke(layer.image, self._stroke_mask, self._stroke_color)
-            if self._composite is not None:
-                composite_stroke(self._composite, self._stroke_mask, self._stroke_color)
-                self.set_image(self._composite)
+            self._layer_stack.mark_layer_dirty(layer)
+            self._composite = np.ascontiguousarray(
+                self._layer_stack.composite())
+            self.set_image(self._composite)
         self._stroke_mask = None
         self._stroke_color = None
         self._stroke_overlay = None
@@ -349,6 +350,12 @@ class EditorCanvas(Canvas):
     # ------------------------------------------------------------------
 
     def _composite_rect_below(self, target_layer, dy0, dy1, dx0, dx1):
+        # Try prefix cache first (O(1) for root layers)
+        cache = self._layer_stack.get_prefix_below(target_layer)
+        if cache is not None:
+            return cache[dy0:dy1, dx0:dx1].astype(np.float32)
+
+        # Fallback: iterate layers (for group children or missing cache)
         rh, rw = dy1 - dy0, dx1 - dx0
         result = np.zeros((rh, rw, 4), dtype=np.float32)
 
@@ -587,6 +594,11 @@ class EditorCanvas(Canvas):
             if self._stroke_mask is not None:
                 self._end_stroke()
             elif self._stroke_is_eraser:
+                # Mark prefix caches dirty since layer.image was modified
+                # incrementally during eraser dabs
+                layer = self._layer_stack.active_layer
+                if layer is not None:
+                    self._layer_stack.mark_layer_dirty(layer)
                 self.set_image(self._composite)
             self._mask_overlay = None
             self._update_overlay()
