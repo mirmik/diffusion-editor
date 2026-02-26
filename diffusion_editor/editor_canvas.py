@@ -350,31 +350,11 @@ class EditorCanvas(Canvas):
     # ------------------------------------------------------------------
 
     def _composite_rect_below(self, target_layer, dy0, dy1, dx0, dx1):
-        # Try prefix cache first (O(1) for root layers)
         cache = self._layer_stack.get_prefix_below(target_layer)
         if cache is not None:
             return cache[dy0:dy1, dx0:dx1].astype(np.float32)
-
-        # Fallback: iterate layers (for group children or missing cache)
         rh, rw = dy1 - dy0, dx1 - dx0
-        result = np.zeros((rh, rw, 4), dtype=np.float32)
-
-        def _blend_rect(layer):
-            if layer is target_layer:
-                return True
-            if not layer.visible or layer.opacity <= 0:
-                return False
-            src = layer.image[dy0:dy1, dx0:dx1].astype(np.float32)
-            alpha = src[:, :, 3:4] / 255.0 * layer.opacity
-            inv_alpha = 1.0 - alpha
-            result[:, :, :3] = src[:, :, :3] * alpha + result[:, :, :3] * inv_alpha
-            result[:, :, 3:4] = alpha * 255.0 + result[:, :, 3:4] * inv_alpha
-            return False
-
-        for layer in reversed(self._layer_stack.layers):
-            if _blend_rect(layer):
-                break
-        return result
+        return np.zeros((rh, rw, 4), dtype=np.float32)
 
     def _erase_dab(self, layer, cx: int, cy: int):
         stamp = self.brush._alpha_stamp
