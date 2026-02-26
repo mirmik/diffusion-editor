@@ -17,7 +17,9 @@ class LayerStack:
         # Per-layer prefix cache (uint8 RGBA), lazy.
         # prefix(L) = Прошлый + Вложенный = всё что ниже L, без L.
         self._prefix: dict[Layer, np.ndarray | None] = {}
+        self._nested: dict[Layer, np.ndarray | None] = {}
         self._dirty: set[Layer] = set()
+        self._nested_dirty: set[Layer] = set()
 
     # --- Tree traversal ---
 
@@ -171,10 +173,14 @@ class LayerStack:
     def _rebuild_caches(self):
         """Reset all prefix caches (after structural changes)."""
         self._prefix.clear()
+        self._nested.clear()
         self._dirty.clear()
+        self._nested_dirty.clear()
         for layer in self._all_layers_flat():
             self._prefix[layer] = None
+            self._nested[layer] = None
             self._dirty.add(layer)
+            self._nested_dirty.add(layer)
 
     def _siblings_of(self, layer: Layer) -> list[Layer]:
         """Return the siblings list containing layer (root list or parent.children)."""
@@ -189,7 +195,21 @@ class LayerStack:
     def _invalidate(self, layer: Layer):
         """Mark a single layer as dirty and clear its cache."""
         self._dirty.add(layer)
+        self._nested_dirty.add(layer)
         self._prefix[layer] = None
+        self._nested[layer] = None
+
+    def _ensure_nested(self, layer: Layer):
+        """Compute nested(L) = composite(top child), cached separately."""
+        if layer not in self._nested_dirty:
+            return
+        if layer.children:
+            top_child = layer.children[0]  # children[0] = topmost
+            nested = self._composite_of(top_child)
+        else:
+            nested = None
+        self._nested[layer] = nested
+        self._nested_dirty.discard(layer)
 
     def mark_layer_dirty(self, layer: Layer):
         """Public: call when a layer's content/visibility/opacity changed."""
@@ -248,11 +268,8 @@ class LayerStack:
             previous = None
 
         # Вложенный: composite верхнего ребёнка (или пусто если нет детей)
-        if layer.children:
-            top_child = layer.children[0]  # children[0] = topmost
-            nested = self._composite_of(top_child)
-        else:
-            nested = None
+        self._ensure_nested(layer)
+        nested = self._nested.get(layer)
 
         # prefix = Прошлый + Вложенный
         result = np.zeros((self._height, self._width, 4), dtype=np.float32)
@@ -297,7 +314,8 @@ class LayerStack:
         siblings = self._comp_order_siblings(layer)
         idx = siblings.index(layer)
         previous = self._composite_of(siblings[idx - 1]) if idx > 0 else None
-        nested = self._composite_of(layer.children[0]) if layer.children else None
+        self._ensure_nested(layer)
+        nested = self._nested.get(layer)
 
         # subtree = Вложенный + own_image
         subtree = np.zeros((self._height, self._width, 4), dtype=np.float32)

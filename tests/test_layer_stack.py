@@ -68,8 +68,10 @@ class TestPrefixCache:
         stack = _make_stack()
         all_layers = stack._all_layers_flat()
         assert all(layer in stack._dirty for layer in all_layers)
+        assert all(layer in stack._nested_dirty for layer in all_layers)
         stack.composite()
         assert len(stack._dirty) == 0
+        assert len(stack._nested_dirty) == 0
 
     def test_cached_composite_returns_equal(self):
         stack = _make_stack()
@@ -366,6 +368,17 @@ class TestNestedLayerCaching:
         # Should not be transparent (has visible layers)
         assert result[0, 0, 3] > 0
 
+    def test_nested_cache_is_saved_explicitly(self):
+        stack, A, B, C, D, E = self._make_tree_stack()
+        stack.composite()
+
+        assert hasattr(stack, "_nested")
+        assert stack._nested[C] is not None  # C has children -> nested cache stored
+        assert stack._nested[A] is not None  # A has child C -> nested cache stored
+        assert stack._nested[B] is None  # no children
+        assert stack._nested[D] is None  # no children
+        assert stack._nested[E] is None  # no children
+
 
 class TestNestedDirtyPropagation:
     def _make_simple_tree(self):
@@ -386,12 +399,16 @@ class TestNestedDirtyPropagation:
         stack, A, B, C = self._make_simple_tree()
         stack.composite()
         assert len(stack._dirty) == 0
+        assert len(stack._nested_dirty) == 0
         stack.mark_layer_dirty(C)
         # C, A should be dirty (C is child of A)
         assert C in stack._dirty
         assert A in stack._dirty
+        assert C in stack._nested_dirty
+        assert A in stack._nested_dirty
         # B should remain clean
         assert B not in stack._dirty
+        assert B not in stack._nested_dirty
 
     def test_dirty_child_recomputes_correctly(self):
         stack, A, B, C = self._make_simple_tree()
@@ -402,6 +419,16 @@ class TestNestedDirtyPropagation:
         after = stack.composite()
         # Result should change
         assert not np.array_equal(before, after)
+
+    def test_dirty_child_clears_parent_nested_cache(self):
+        stack, A, B, C = self._make_simple_tree()
+        stack.composite()
+        assert stack._nested[A] is not None
+
+        stack.mark_layer_dirty(C)
+
+        assert stack._nested[C] is None
+        assert stack._nested[A] is None
 
 
 class TestSubtreeOpacity:
