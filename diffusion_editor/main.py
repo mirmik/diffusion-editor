@@ -126,10 +126,16 @@ def _set_sdl_cursor(name: str):
 # --- Main ---
 
 def main():
+    import faulthandler
+    faulthandler.enable()
+
     window, gl_ctx = create_window("Diffusion Editor", 1280, 800)
+    print("[main] Window created", flush=True)
 
     graphics = OpenGLGraphicsBackend.get_instance()
+    print("[main] Got graphics backend", flush=True)
     graphics.ensure_ready()
+    print("[main] Graphics ready", flush=True)
 
     editor = EditorWindow(graphics)
     ui = editor.ui
@@ -208,4 +214,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        import traceback
+        traceback.print_exc()
