@@ -5,21 +5,18 @@ import zipfile
 import numpy as np
 
 from .layer import Layer, _layer_from_dict
+from .layer_renderer import LayerRenderer
 
 
 class LayerStack:
-    def __init__(self):
+    def __init__(self, tile_size: int = 256):
         self._layers: list[Layer] = []  # root-level layers
         self._active_layer: Layer | None = None
         self._width = 0
         self._height = 0
+        self._tile_size = tile_size
         self.on_changed: callable = None
-        # Per-layer prefix cache (uint8 RGBA), lazy.
-        # prefix(L) = Прошлый + Вложенный = всё что ниже L, без L.
-        self._prefix: dict[Layer, np.ndarray | None] = {}
-        self._nested: dict[Layer, np.ndarray | None] = {}
-        self._dirty: set[Layer] = set()
-        self._nested_dirty: set[Layer] = set()
+        self._renderer = LayerRenderer(self)
 
     # --- Tree traversal ---
 
@@ -49,6 +46,33 @@ class LayerStack:
         return self._height
 
     @property
+    def tile_size(self):
+        return self._tile_size
+
+    @property
+    def tiles_x(self) -> int:
+        if self._width == 0:
+            return 0
+        return (self._width + self._tile_size - 1) // self._tile_size
+
+    @property
+    def tiles_y(self) -> int:
+        if self._height == 0:
+            return 0
+        return (self._height + self._tile_size - 1) // self._tile_size
+
+    def tile_bounds(self, tx: int, ty: int) -> tuple[int, int, int, int]:
+        x0 = tx * self._tile_size
+        y0 = ty * self._tile_size
+        x1 = min(self._width, x0 + self._tile_size)
+        y1 = min(self._height, y0 + self._tile_size)
+        return x0, y0, x1, y1
+
+    def tile_shape(self, tx: int, ty: int) -> tuple[int, int]:
+        x0, y0, x1, y1 = self.tile_bounds(tx, ty)
+        return (y1 - y0, x1 - x0)
+
+    @property
     def layers(self):
         return self._layers
 
@@ -68,7 +92,7 @@ class LayerStack:
         h, w = image.shape[:2]
         self._width = w
         self._height = h
-        layer = Layer("Background", w, h, image)
+        layer = Layer("Background", w, h, image, tile_size=self._tile_size)
         self._layers.append(layer)
         self._active_layer = layer
         self._rebuild_caches()
@@ -77,6 +101,7 @@ class LayerStack:
 
     def _insert_near_active(self, layer: Layer):
         """Insert layer as a sibling above the active layer."""
+        self._apply_tile_size(layer)
         if self._active_layer is not None and self._active_layer.parent is not None:
             parent = self._active_layer.parent
             idx = parent.children.index(self._active_layer)
@@ -88,10 +113,16 @@ class LayerStack:
             self._layers.insert(0, layer)
         self._active_layer = layer
 
+    def _apply_tile_size(self, layer: Layer):
+        if hasattr(layer, "content"):
+            layer.content.tile_size = self._tile_size
+        for child in layer.children:
+            self._apply_tile_size(child)
+
     def add_layer(self, name: str, image: np.ndarray = None):
         if self._width == 0 or self._height == 0:
             return
-        layer = Layer(name, self._width, self._height, image)
+        layer = Layer(name, self._width, self._height, image, tile_size=self._tile_size)
         self._insert_near_active(layer)
         self._rebuild_caches()
         if self.on_changed:
@@ -161,7 +192,7 @@ class LayerStack:
     def flatten(self):
         result = self.composite()
         self._layers.clear()
-        layer = Layer("Background", self._width, self._height, result)
+        layer = Layer("Background", self._width, self._height, result, tile_size=self._tile_size)
         self._layers.append(layer)
         self._active_layer = layer
         self._rebuild_caches()
@@ -171,16 +202,8 @@ class LayerStack:
     # --- Prefix cache management ---
 
     def _rebuild_caches(self):
-        """Reset all prefix caches (after structural changes)."""
-        self._prefix.clear()
-        self._nested.clear()
-        self._dirty.clear()
-        self._nested_dirty.clear()
-        for layer in self._all_layers_flat():
-            self._prefix[layer] = None
-            self._nested[layer] = None
-            self._dirty.add(layer)
-            self._nested_dirty.add(layer)
+        """Reset all renderer caches (after structural changes)."""
+        self._renderer.reset_cache()
 
     def _siblings_of(self, layer: Layer) -> list[Layer]:
         """Return the siblings list containing layer (root list or parent.children)."""
@@ -192,40 +215,49 @@ class LayerStack:
         """Siblings in compositing order (bottom to top = reversed list order)."""
         return list(reversed(self._siblings_of(layer)))
 
+    def comp_order_siblings(self, layer: Layer) -> list[Layer]:
+        """Public wrapper used by renderer."""
+        return self._comp_order_siblings(layer)
+
     def _invalidate(self, layer: Layer):
         """Mark a single layer as dirty and clear its cache."""
-        self._dirty.add(layer)
-        self._nested_dirty.add(layer)
-        self._prefix[layer] = None
-        self._nested[layer] = None
+        self._renderer.invalidate_tiles({layer}, tiles=None)
 
-    def _ensure_nested(self, layer: Layer):
-        """Compute nested(L) = composite(top child), cached separately."""
-        if layer not in self._nested_dirty:
-            return
-        if layer.children:
-            top_child = layer.children[0]  # children[0] = topmost
-            nested = self._composite_of(top_child)
-        else:
-            nested = None
-        self._nested[layer] = nested
-        self._nested_dirty.discard(layer)
-
-    def mark_layer_dirty(self, layer: Layer):
+    def mark_layer_dirty(self, layer: Layer, rect: tuple[int, int, int, int] | None = None):
         """Public: call when a layer's content/visibility/opacity changed."""
-        if layer not in self._prefix:
+        affected = self._collect_affected_layers(layer)
+        if not affected:
             self._rebuild_caches()
             return
-        # Invalidate layer and all siblings above it
-        siblings = self._comp_order_siblings(layer)
+        tiles = self._tiles_for_rect(rect)
+        self._renderer.invalidate_tiles(affected, tiles)
+
+    def _tiles_for_rect(self, rect: tuple[int, int, int, int] | None
+                        ) -> set[tuple[int, int]] | None:
+        if rect is None:
+            return None
+        x0, y0, x1, y1 = rect
+        if x1 <= x0 or y1 <= y0:
+            return set()
+        tx0 = max(0, x0 // self._tile_size)
+        ty0 = max(0, y0 // self._tile_size)
+        tx1 = min(self.tiles_x - 1, (x1 - 1) // self._tile_size)
+        ty1 = min(self.tiles_y - 1, (y1 - 1) // self._tile_size)
+        tiles: set[tuple[int, int]] = set()
+        for ty in range(ty0, ty1 + 1):
+            for tx in range(tx0, tx1 + 1):
+                tiles.add((tx, ty))
+        return tiles
+
+    def _collect_affected_layers(self, layer: Layer) -> set[Layer]:
+        affected: set[Layer] = set()
         try:
+            siblings = self._comp_order_siblings(layer)
             idx = siblings.index(layer)
         except ValueError:
-            self._rebuild_caches()
-            return
+            return affected
         for i in range(idx, len(siblings)):
-            self._invalidate(siblings[i])
-        # Propagate up to parent
+            affected.add(siblings[i])
         cur = layer.parent
         while cur is not None:
             parent_siblings = self._comp_order_siblings(cur)
@@ -234,9 +266,8 @@ class LayerStack:
             except ValueError:
                 break
             for i in range(pidx, len(parent_siblings)):
-                self._invalidate(parent_siblings[i])
+                affected.add(parent_siblings[i])
             cur = cur.parent
-        # Invalidate root level if layer is nested
         if layer.parent is not None:
             root = layer
             while root.parent is not None:
@@ -245,159 +276,12 @@ class LayerStack:
             try:
                 ridx = root_siblings.index(root)
             except ValueError:
-                return
+                return affected
             for i in range(ridx, len(root_siblings)):
-                self._invalidate(root_siblings[i])
-
-    def _ensure_prefix(self, layer: Layer):
-        """Вычислить prefix(L) = Прошлый + Вложенный.
-
-        Первый sibling получает пустой Прошлый (без наследования от родителя,
-        чтобы избежать циклической зависимости).
-        """
-        if layer not in self._dirty:
-            return
-
-        siblings = self._comp_order_siblings(layer)
-        idx = siblings.index(layer)
-
-        # Прошлый: composite предыдущего sibling (или пусто для первого)
-        if idx > 0:
-            previous = self._composite_of(siblings[idx - 1])
-        else:
-            previous = None
-
-        # Вложенный: composite верхнего ребёнка (или пусто если нет детей)
-        self._ensure_nested(layer)
-        nested = self._nested.get(layer)
-
-        # prefix = Прошлый + Вложенный
-        result = np.zeros((self._height, self._width, 4), dtype=np.float32)
-        if previous is not None:
-            result = previous.astype(np.float32)
-        if nested is not None:
-            self._blend_buffer(nested, 1.0, result)
-
-        self._prefix[layer] = np.clip(result, 0, 255).astype(np.uint8)
-        self._dirty.discard(layer)
-
-    def _composite_of(self, layer: Layer) -> np.ndarray | None:
-        """composite(L) = Прошлый + blend(Вложенный + L.image, L.opacity).
-
-        Opacity применяется к собственному изображению и вложенным как к единому целому.
-        Возвращает uint8. Не включает внешний контекст от родителя.
-        """
-        self._ensure_prefix(layer)
-
-        if not layer.visible or layer.opacity <= 0:
-            # Скрыт/opacity=0: собственное и вложенные не рисуются.
-            # Возвращаем только Прошлый (composite предыдущего sibling).
-            siblings = self._comp_order_siblings(layer)
-            idx = siblings.index(layer)
-            if idx > 0:
-                return self._composite_of(siblings[idx - 1])
-            return None
-
-        prefix = self._prefix.get(layer)
-
-        if layer.opacity >= 1.0:
-            # Быстрый путь: prefix + image.
-            # При opacity=1.0: Прошлый + blend(Вложенный + image, 1.0)
-            #                 = Прошлый + Вложенный + image = prefix + image
-            result = np.zeros((self._height, self._width, 4), dtype=np.float32)
-            if prefix is not None:
-                result = prefix.astype(np.float32)
-            self._blend_image(layer.image, 1.0, result)
-            return np.clip(result, 0, 255).astype(np.uint8)
-
-        # Дробный opacity: нужны Прошлый и Вложенный отдельно.
-        siblings = self._comp_order_siblings(layer)
-        idx = siblings.index(layer)
-        previous = self._composite_of(siblings[idx - 1]) if idx > 0 else None
-        self._ensure_nested(layer)
-        nested = self._nested.get(layer)
-
-        # subtree = Вложенный + own_image
-        subtree = np.zeros((self._height, self._width, 4), dtype=np.float32)
-        if nested is not None:
-            subtree = nested.astype(np.float32)
-        self._blend_image(layer.image, 1.0, subtree)
-        subtree_u8 = np.clip(subtree, 0, 255).astype(np.uint8)
-
-        # composite = Прошлый + blend(subtree, opacity)
-        result = np.zeros((self._height, self._width, 4), dtype=np.float32)
-        if previous is not None:
-            result = previous.astype(np.float32)
-        self._blend_buffer(subtree_u8, layer.opacity, result)
-        return np.clip(result, 0, 255).astype(np.uint8)
-
-    def _external_context(self, layer: Layer) -> np.ndarray | None:
-        """External context = everything from outside the sibling list.
-
-        For root layers: None.
-        For children of P: external_context(P) + Прошлый(P).
-        """
-        if layer.parent is None:
-            return None
-        parent = layer.parent
-        parent_ext = self._external_context(parent)
-        # Прошлый of parent = composite of siblings before parent
-        siblings = self._comp_order_siblings(parent)
-        idx = siblings.index(parent)
-        if idx > 0:
-            prev_composite = self._composite_of(siblings[idx - 1])
-        else:
-            prev_composite = None
-
-        if parent_ext is None and prev_composite is None:
-            return None
-        result = np.zeros((self._height, self._width, 4), dtype=np.float32)
-        if parent_ext is not None:
-            result = parent_ext.astype(np.float32)
-        if prev_composite is not None:
-            self._blend_buffer(prev_composite, 1.0, result)
-        return np.clip(result, 0, 255).astype(np.uint8)
-
-    def _full_prefix(self, layer: Layer) -> np.ndarray | None:
-        """Полный prefix = external_context + prefix (для вложенных слоёв)."""
-        self._ensure_prefix(layer)
-        local = self._prefix.get(layer)
-        ext = self._external_context(layer)
-
-        if ext is None:
-            return local
-        if local is None:
-            return ext
-
-        result = ext.astype(np.float32)
-        self._blend_buffer(local, 1.0, result)
-        return np.clip(result, 0, 255).astype(np.uint8)
-
-    def get_prefix_below(self, layer: Layer) -> np.ndarray | None:
-        """Return full prefix: everything below layer's own image (uint8)."""
-        if layer not in self._prefix:
-            return None
-        result = self._full_prefix(layer)
-        if result is None:
-            return np.zeros((self._height, self._width, 4), dtype=np.uint8)
-        return result
+                affected.add(root_siblings[i])
+        return affected
 
     # --- Compositing ---
-
-    @staticmethod
-    def _blend_image(image: np.ndarray, opacity: float, result: np.ndarray):
-        src = image.astype(np.float32)
-        alpha = src[:, :, 3:4] / 255.0 * opacity
-        inv_alpha = 1.0 - alpha
-        result[:, :, :3] = src[:, :, :3] * alpha + result[:, :, :3] * inv_alpha
-        result[:, :, 3:4] = alpha * 255.0 + result[:, :, 3:4] * inv_alpha
-
-    @staticmethod
-    def _blend_buffer(src_buf: np.ndarray, opacity: float, result: np.ndarray):
-        alpha = src_buf[:, :, 3:4] / 255.0 * opacity
-        inv_alpha = 1.0 - alpha
-        result[:, :, :3] = src_buf[:, :, :3] * alpha + result[:, :, :3] * inv_alpha
-        result[:, :, 3:4] = alpha * 255.0 + result[:, :, 3:4] * inv_alpha
 
     def composite(self, exclude_layer: Layer | None = None) -> np.ndarray:
         """Composite visible layers.
@@ -408,22 +292,16 @@ class LayerStack:
             return np.zeros((1, 1, 4), dtype=np.uint8)
 
         if exclude_layer is not None:
-            result = self.get_prefix_below(exclude_layer)
-            if result is not None:
-                return result.copy()
-            return np.zeros((self._height, self._width, 4), dtype=np.uint8)
+            return self.get_prefix_below(exclude_layer).copy()
 
-        # Полный composite = composite(top_root).
-        # Для корневых слоёв внешний контекст отсутствует.
-        top_root = self._layers[0]  # _layers[0] = topmost
-        result = self._composite_of(top_root)
-        if result is not None:
-            return result
-        return np.zeros((self._height, self._width, 4), dtype=np.uint8)
+        return self._renderer.composite_full()
+
+    def get_prefix_below(self, layer: Layer) -> np.ndarray:
+        return self._renderer.prefix_full(layer)
 
     # --- Serialization ---
 
-    FORMAT_VERSION = 3
+    FORMAT_VERSION = 4
 
     def _find_layer_path(self, target: Layer | None) -> str | None:
         if target is None:
@@ -458,6 +336,7 @@ class LayerStack:
             "format_version": self.FORMAT_VERSION,
             "canvas_width": self._width,
             "canvas_height": self._height,
+            "tile_size": self._tile_size,
             "active_layer_path": self._find_layer_path(self._active_layer),
             "layers": [],
         }
@@ -478,13 +357,16 @@ class LayerStack:
                     f"Project version {version} is newer than "
                     f"supported version {self.FORMAT_VERSION}")
 
+            self._tile_size = manifest.get("tile_size", self._tile_size)
             new_layers = []
             for layer_dict in manifest["layers"]:
-                layer = _layer_from_dict(layer_dict, zf)
+                layer = _layer_from_dict(layer_dict, zf, tile_size=self._tile_size)
                 new_layers.append(layer)
 
         self._layers.clear()
         self._layers.extend(new_layers)
+        for layer in self._layers:
+            self._apply_tile_size(layer)
         self._width = manifest["canvas_width"]
         self._height = manifest["canvas_height"]
 

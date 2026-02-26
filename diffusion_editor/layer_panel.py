@@ -10,7 +10,8 @@ from tcgui.widgets.tree import TreeNode, TreeWidget
 from tcgui.widgets.checkbox import Checkbox
 from tcgui.widgets.units import px, pct
 
-from .layer import LayerStack, Layer, DiffusionLayer, LamaLayer, InstructLayer
+from .layer_stack import LayerStack
+from .layer import Layer, DiffusionLayer, LamaLayer, InstructLayer
 
 
 class LayerPanel(VStack):

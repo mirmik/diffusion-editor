@@ -5,18 +5,24 @@ import zipfile
 import numpy as np
 from PIL import Image
 
+from .tiles import DenseTileGrid
+
 
 class Layer:
-    def __init__(self, name: str, width: int, height: int, image: np.ndarray = None):
+    def __init__(self, name: str, width: int, height: int,
+                 image: np.ndarray = None, tile_size: int = 256):
         self.name = name
         self.visible = True
         self.opacity = 1.0
         self.children: list['Layer'] = []
         self.parent: 'Layer | None' = None
         if image is not None:
-            self.image = np.ascontiguousarray(image.astype(np.uint8))
+            arr = np.ascontiguousarray(image.astype(np.uint8))
         else:
-            self.image = np.zeros((height, width, 4), dtype=np.uint8)
+            arr = np.zeros((height, width, 4), dtype=np.uint8)
+        self.content = DenseTileGrid.from_array(arr, tile_size=tile_size)
+        # Keep .image for compatibility with existing tools (dense view)
+        self.image = self.content.array
 
     def add_child(self, child: 'Layer', index: int | None = None):
         if child.parent is not None:
@@ -41,10 +47,14 @@ class Layer:
 
     @property
     def width(self):
+        if hasattr(self, "content"):
+            return self.content.width
         return self.image.shape[1]
 
     @property
     def height(self):
+        if hasattr(self, "content"):
+            return self.content.height
         return self.image.shape[0]
 
     def to_dict(self, path: str) -> dict:
@@ -72,7 +82,7 @@ class Layer:
             child.save_images_to_zip(zf, f"{path}/{i}")
 
     @classmethod
-    def from_dict(cls, d: dict, zf: zipfile.ZipFile) -> "Layer":
+    def from_dict(cls, d: dict, zf: zipfile.ZipFile, tile_size: int = 256) -> "Layer":
         image_data = zf.read(d["image_file"])
         img = Image.open(io.BytesIO(image_data)).convert("RGBA")
         arr = np.array(img, dtype=np.uint8)
@@ -80,11 +90,12 @@ class Layer:
         layer.name = d["name"]
         layer.visible = d["visible"]
         layer.opacity = d["opacity"]
-        layer.image = np.ascontiguousarray(arr)
+        layer.content = DenseTileGrid.from_array(arr, tile_size=tile_size)
+        layer.image = layer.content.array
         layer.children = []
         layer.parent = None
         for child_dict in d.get("children", []):
-            child = _layer_from_dict(child_dict, zf)
+            child = _layer_from_dict(child_dict, zf, tile_size=tile_size)
             child.parent = layer
             layer.children.append(child)
         return layer
@@ -98,8 +109,9 @@ class DiffusionLayer(Layer):
                  strength: float, guidance_scale: float, steps: int,
                  seed: int,
                  model_path: str = "", prediction_type: str = "",
-                 mode: str = "inpaint"):
-        super().__init__(name, width, height)
+                 mode: str = "inpaint",
+                 tile_size: int = 256):
+        super().__init__(name, width, height, tile_size=tile_size)
         self.mode = mode
         self.source_patch = source_patch
         self.patch_x = patch_x
@@ -183,7 +195,7 @@ class DiffusionLayer(Layer):
             zf.writestr(f"layers/{file_key}_source.png", buf.getvalue())
 
     @classmethod
-    def from_dict(cls, d: dict, zf: zipfile.ZipFile) -> "DiffusionLayer":
+    def from_dict(cls, d: dict, zf: zipfile.ZipFile, tile_size: int = 256) -> "DiffusionLayer":
         image_data = zf.read(d["image_file"])
         img = Image.open(io.BytesIO(image_data)).convert("RGBA")
         arr = np.array(img, dtype=np.uint8)
@@ -202,7 +214,8 @@ class DiffusionLayer(Layer):
         layer.name = d["name"]
         layer.visible = d["visible"]
         layer.opacity = d["opacity"]
-        layer.image = np.ascontiguousarray(arr)
+        layer.content = DenseTileGrid.from_array(arr, tile_size=tile_size)
+        layer.image = layer.content.array
         layer.children = []
         layer.parent = None
         layer.mask = np.ascontiguousarray(mask_arr)
@@ -228,7 +241,7 @@ class DiffusionLayer(Layer):
         layer.manual_patch_rect = tuple(mpr) if mpr else None
         layer.resize_to_model_resolution = d.get("resize_to_model_resolution", False)
         for child_dict in d.get("children", []):
-            child = _layer_from_dict(child_dict, zf)
+            child = _layer_from_dict(child_dict, zf, tile_size=tile_size)
             child.parent = layer
             layer.children.append(child)
         return layer
@@ -237,8 +250,9 @@ class DiffusionLayer(Layer):
 class LamaLayer(Layer):
     def __init__(self, name: str, width: int, height: int,
                  source_patch: Image.Image | None,
-                 patch_x: int, patch_y: int, patch_w: int, patch_h: int):
-        super().__init__(name, width, height)
+                 patch_x: int, patch_y: int, patch_w: int, patch_h: int,
+                 tile_size: int = 256):
+        super().__init__(name, width, height, tile_size=tile_size)
         self.source_patch = source_patch
         self.patch_x = patch_x
         self.patch_y = patch_y
@@ -293,7 +307,7 @@ class LamaLayer(Layer):
             zf.writestr(f"layers/{file_key}_source.png", buf.getvalue())
 
     @classmethod
-    def from_dict(cls, d: dict, zf: zipfile.ZipFile) -> "LamaLayer":
+    def from_dict(cls, d: dict, zf: zipfile.ZipFile, tile_size: int = 256) -> "LamaLayer":
         image_data = zf.read(d["image_file"])
         img = Image.open(io.BytesIO(image_data)).convert("RGBA")
         arr = np.array(img, dtype=np.uint8)
@@ -312,7 +326,8 @@ class LamaLayer(Layer):
         layer.name = d["name"]
         layer.visible = d["visible"]
         layer.opacity = d["opacity"]
-        layer.image = np.ascontiguousarray(arr)
+        layer.content = DenseTileGrid.from_array(arr, tile_size=tile_size)
+        layer.image = layer.content.array
         layer.children = []
         layer.parent = None
         layer.mask = np.ascontiguousarray(mask_arr)
@@ -322,7 +337,7 @@ class LamaLayer(Layer):
         layer.patch_w = d["patch_w"]
         layer.patch_h = d["patch_h"]
         for child_dict in d.get("children", []):
-            child = _layer_from_dict(child_dict, zf)
+            child = _layer_from_dict(child_dict, zf, tile_size=tile_size)
             child.parent = layer
             layer.children.append(child)
         return layer
@@ -336,8 +351,9 @@ class InstructLayer(Layer):
                  image_guidance_scale: float = 1.5,
                  guidance_scale: float = 7.0,
                  steps: int = 20,
-                 seed: int = -1):
-        super().__init__(name, width, height)
+                 seed: int = -1,
+                 tile_size: int = 256):
+        super().__init__(name, width, height, tile_size=tile_size)
         self.source_patch = source_patch
         self.patch_x = patch_x
         self.patch_y = patch_y
@@ -404,7 +420,7 @@ class InstructLayer(Layer):
             zf.writestr(f"layers/{file_key}_source.png", buf.getvalue())
 
     @classmethod
-    def from_dict(cls, d: dict, zf: zipfile.ZipFile) -> "InstructLayer":
+    def from_dict(cls, d: dict, zf: zipfile.ZipFile, tile_size: int = 256) -> "InstructLayer":
         image_data = zf.read(d["image_file"])
         img = Image.open(io.BytesIO(image_data)).convert("RGBA")
         arr = np.array(img, dtype=np.uint8)
@@ -425,7 +441,8 @@ class InstructLayer(Layer):
         layer.name = d["name"]
         layer.visible = d["visible"]
         layer.opacity = d["opacity"]
-        layer.image = np.ascontiguousarray(arr)
+        layer.content = DenseTileGrid.from_array(arr, tile_size=tile_size)
+        layer.image = layer.content.array
         layer.children = []
         layer.parent = None
         layer.mask = np.ascontiguousarray(mask_arr)
@@ -442,21 +459,18 @@ class InstructLayer(Layer):
         mpr = d.get("manual_patch_rect")
         layer.manual_patch_rect = tuple(mpr) if mpr else None
         for child_dict in d.get("children", []):
-            child = _layer_from_dict(child_dict, zf)
+            child = _layer_from_dict(child_dict, zf, tile_size=tile_size)
             child.parent = layer
             layer.children.append(child)
         return layer
 
 
-def _layer_from_dict(d: dict, zf: zipfile.ZipFile) -> Layer:
+def _layer_from_dict(d: dict, zf: zipfile.ZipFile, tile_size: int = 256) -> Layer:
     """Dispatch layer deserialization by type."""
     if d.get("type") == "diffusion":
-        return DiffusionLayer.from_dict(d, zf)
+        return DiffusionLayer.from_dict(d, zf, tile_size=tile_size)
     if d.get("type") == "lama":
-        return LamaLayer.from_dict(d, zf)
+        return LamaLayer.from_dict(d, zf, tile_size=tile_size)
     if d.get("type") == "instruct":
-        return InstructLayer.from_dict(d, zf)
-    return Layer.from_dict(d, zf)
-
-
-from .layer_stack import LayerStack  # noqa: F401
+        return InstructLayer.from_dict(d, zf, tile_size=tile_size)
+    return Layer.from_dict(d, zf, tile_size=tile_size)

@@ -8,7 +8,8 @@ from tcbase import Key, MouseButton, Mods
 from tcgui.widgets.canvas import Canvas
 from tcgui.widgets.events import KeyEvent
 
-from .layer import LayerStack, Layer, DiffusionLayer, LamaLayer, InstructLayer
+from .layer_stack import LayerStack
+from .layer import Layer, DiffusionLayer, LamaLayer, InstructLayer
 from .brush import Brush, composite_stroke
 
 

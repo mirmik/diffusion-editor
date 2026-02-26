@@ -20,7 +20,8 @@ from tcgui.widgets.status_bar import StatusBar
 from tcgui.widgets.units import px, pct
 from tcgui.widgets.splitter import Splitter
 
-from .layer import LayerStack, Layer, DiffusionLayer, LamaLayer, InstructLayer
+from .layer_stack import LayerStack
+from .layer import Layer, DiffusionLayer, LamaLayer, InstructLayer
 from .editor_canvas import EditorCanvas
 from .layer_panel import LayerPanel
 from .brush_panel import BrushPanel
@@ -444,6 +445,7 @@ class EditorWindow:
             model_path=self._engine.model_path or "",
             prediction_type=self._diffusion_panel.prediction_type,
             mode=mode,
+            tile_size=self._layer_stack.tile_size,
         )
         self._layer_stack.insert_layer(dl)
 
@@ -640,6 +642,7 @@ class EditorWindow:
             height=self._layer_stack.height,
             source_patch=patch_pil,
             patch_x=ppx, patch_y=ppy, patch_w=pw, patch_h=ph,
+            tile_size=self._layer_stack.tile_size,
         )
         self._layer_stack.insert_layer(ll)
 
@@ -716,6 +719,7 @@ class EditorWindow:
             guidance_scale=self._instruct_panel.guidance_scale,
             steps=self._instruct_panel.steps,
             seed=seed,
+            tile_size=self._layer_stack.tile_size,
         )
         self._layer_stack.insert_layer(il)
 

@@ -3,7 +3,8 @@ from PyQt6.QtWidgets import QWidget
 from PyQt6.QtCore import Qt, QPointF, pyqtSignal
 from PyQt6.QtGui import QPainter, QImage, QPen, QColor
 
-from .layer import LayerStack, Layer, DiffusionLayer, LamaLayer, InstructLayer
+from .layer_stack import LayerStack
+from .layer import Layer, DiffusionLayer, LamaLayer, InstructLayer
 from .brush import Brush, composite_stroke, erase_stroke
 
 
