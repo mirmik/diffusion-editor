@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import random
 
@@ -35,6 +36,8 @@ from .segmentation import SegmentationEngine
 from .diffusion_brush import extract_patch, extract_mask_patch, paste_result
 from .file_dialog import open_file_dialog, save_file_dialog
 from .settings import Settings
+
+logger = logging.getLogger(__name__)
 
 
 class EditorWindow:
@@ -322,6 +325,7 @@ class EditorWindow:
             self._project_path = path
             self._statusbar.text = f"Opened: {os.path.basename(path)}"
         except Exception as e:
+            logger.exception("Open project failed: %s", path)
             self._statusbar.text = f"Open error: {e}"
 
     def import_image(self):
@@ -355,6 +359,7 @@ class EditorWindow:
                 self._layer_stack.save_project(self._project_path)
                 self._statusbar.text = f"Saved: {self._project_path}"
             except Exception as e:
+                logger.exception("Save project failed: %s", self._project_path)
                 self._statusbar.text = f"Save error: {e}"
         else:
             self.save_file_as()
@@ -374,6 +379,7 @@ class EditorWindow:
             self._project_path = path
             self._statusbar.text = f"Saved: {os.path.basename(path)}"
         except Exception as e:
+            logger.exception("Save project failed: %s", path)
             self._statusbar.text = f"Save error: {e}"
 
     def export_image(self):
@@ -854,6 +860,7 @@ class EditorWindow:
                     self._layer_stack.on_changed()
             self._statusbar.text = "Background mask applied"
         elif seg_error is not None:
+            logger.error("Segmentation error: %s", seg_error)
             self._statusbar.text = f"Segmentation error: {seg_error[:80]}"
 
     def _poll_lama(self):
@@ -880,6 +887,7 @@ class EditorWindow:
                 self._statusbar.text = "Objects removed (LaMa)"
             self._pending_lama_layer = None
         elif lama_error is not None:
+            logger.error("LaMa error: %s", lama_error)
             self._statusbar.text = f"LaMa error: {lama_error[:80]}"
             self._pending_lama_layer = None
 
@@ -889,6 +897,7 @@ class EditorWindow:
             return
         if task_type == "load":
             if error:
+                logger.error("InstructPix2Pix load error: %s", error)
                 self._instruct_panel.on_model_load_error(error)
                 self._statusbar.text = f"InstructPix2Pix load error: {error[:80]}"
                 self._pending_instruct_layer = None
@@ -899,6 +908,7 @@ class EditorWindow:
                     self._on_instruct_apply()
         elif task_type == "inference":
             if error:
+                logger.error("InstructPix2Pix inference error: %s", error)
                 self._statusbar.text = f"InstructPix2Pix error: {error[:80]}"
                 self._pending_instruct_layer = None
                 return
@@ -933,6 +943,7 @@ class EditorWindow:
 
         if task_type == "load":
             if error:
+                logger.error("Diffusion model load error: %s", error)
                 self._diffusion_panel.on_model_load_error(error)
                 self._statusbar.text = f"Model load error: {error[:80]}"
                 self._pending_request = None
@@ -945,6 +956,7 @@ class EditorWindow:
 
         elif task_type == "load_ip_adapter":
             if error:
+                logger.error("IP-Adapter load error: %s", error)
                 self._diffusion_panel.on_ip_adapter_load_error(error)
                 self._statusbar.text = f"IP-Adapter error: {error[:80]}"
                 self._pending_request = None
@@ -957,6 +969,7 @@ class EditorWindow:
 
         elif task_type == "inference":
             if error:
+                logger.error("Diffusion inference error: %s", error)
                 print(f"[_poll_diffusion] inference ERROR: {error}")
                 self._statusbar.text = f"Diffusion error: {error[:80]}"
                 self._pending_request = None
