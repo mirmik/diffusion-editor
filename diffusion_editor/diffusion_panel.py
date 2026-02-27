@@ -33,7 +33,7 @@ class DiffusionPanel(ScrollArea):
         self.on_regenerate: callable = None
         self.on_new_seed: callable = None
         self.on_clear_mask: callable = None
-        self.on_mask_brush_changed: callable = None  # (size, hardness)
+        self.on_mask_brush_changed: callable = None  # (size, hardness, flow)
         self.on_load_ip_adapter: callable = None
         self.on_draw_rect_toggled: callable = None  # (bool)
         self.on_show_rect_toggled: callable = None  # (bool)
@@ -216,6 +216,15 @@ class DiffusionPanel(ScrollArea):
         self._mask_hardness_slider.on_changed = self._on_mask_brush_cb
         mask_group.add_child(self._mask_hardness_slider)
 
+        self._mask_flow_slider = SliderEdit()
+        self._mask_flow_slider.label = "Flow"
+        self._mask_flow_slider.min_value = 0.0
+        self._mask_flow_slider.max_value = 1.0
+        self._mask_flow_slider.value = 1.0
+        self._mask_flow_slider.decimals = 2
+        self._mask_flow_slider.on_changed = self._on_mask_brush_cb
+        mask_group.add_child(self._mask_flow_slider)
+
         mask_btn_row = HStack()
         mask_btn_row.spacing = 4
 
@@ -379,8 +388,9 @@ class DiffusionPanel(ScrollArea):
     def _on_mask_brush_cb(self, _value=None):
         size = int(self._mask_size_slider.value)
         hardness = self._mask_hardness_slider.value
+        flow = self._mask_flow_slider.value
         if self.on_mask_brush_changed:
-            self.on_mask_brush_changed(size, hardness)
+            self.on_mask_brush_changed(size, hardness, flow)
 
     # ------------------------------------------------------------------
     # Properties

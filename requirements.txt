@@ -1,4 +1,3 @@
-PyQt6
 Pillow
 numpy
 simple-lama-inpainting

@@ -8,6 +8,10 @@ from tcgui.widgets.button import Button
 from tcgui.widgets.label import Label
 from tcgui.widgets.tree import TreeNode, TreeWidget
 from tcgui.widgets.checkbox import Checkbox
+from tcgui.widgets.menu import Menu, MenuItem
+from tcgui.widgets.dialog import Dialog
+from tcgui.widgets.text_input import TextInput
+from tcgui.widgets.message_box import MessageBox, Buttons
 from tcgui.widgets.units import px, pct
 
 from .layer_stack import LayerStack
@@ -38,6 +42,7 @@ class LayerPanel(VStack):
         self._tree.draggable = True
         self._tree.on_select = self._on_tree_select
         self._tree.on_drop = self._on_tree_drop
+        self._tree.context_menu = self._build_context_menu()
         self.add_child(self._tree)
 
         # Buttons row: + - Flatten
@@ -159,6 +164,25 @@ class LayerPanel(VStack):
     def _layer_from_node(self, node: TreeNode) -> Layer | None:
         return getattr(node, '_layer_ref', None)
 
+    def _build_context_menu(self) -> Menu:
+        panel = self
+        tree = self._tree
+
+        class _LayerContextMenu(Menu):
+            def show(self, ui, x: float, y: float):
+                node = tree._node_at_y(y)
+                if node is not None:
+                    tree._select_node(node)
+                    panel._on_tree_select(node)
+                super().show(ui, x, y)
+
+        menu = _LayerContextMenu()
+        menu.items = [
+            MenuItem("Rename", on_click=self._on_rename),
+            MenuItem("Delete", on_click=self._on_remove),
+        ]
+        return menu
+
     # ------------------------------------------------------------------
     # Tree callbacks
     # ------------------------------------------------------------------
@@ -214,7 +238,64 @@ class LayerPanel(VStack):
     def _on_remove(self):
         layer = self._layer_stack.active_layer
         if layer is not None:
-            self._layer_stack.remove_layer(layer)
+            self._confirm_remove(layer)
 
     def _on_flatten(self):
         self._layer_stack.flatten()
+
+    # ------------------------------------------------------------------
+    # Context actions
+    # ------------------------------------------------------------------
+
+    def _on_rename(self):
+        layer = self._layer_stack.active_layer
+        if layer is None:
+            return
+        self._show_rename_dialog(layer)
+
+    def _show_rename_dialog(self, layer: Layer):
+        if self._ui is None:
+            return
+
+        dlg = Dialog()
+        dlg.title = "Rename Layer"
+        dlg.buttons = ["OK", "Cancel"]
+        dlg.default_button = "OK"
+        dlg.cancel_button = "Cancel"
+
+        input_box = TextInput()
+        input_box.text = layer.name
+        input_box.cursor_pos = len(layer.name)
+        input_box.preferred_width = px(240)
+        input_box.on_submit = lambda _text: dlg._on_button_click("OK")
+        dlg.content = input_box
+
+        def _apply(result: str):
+            if result != "OK":
+                return
+            new_name = input_box.text.strip()
+            if not new_name:
+                return
+            layer.name = new_name
+            if self._layer_stack.on_changed:
+                self._layer_stack.on_changed()
+
+        dlg.on_result = _apply
+        dlg.show(self._ui)
+        self._ui.set_focus(input_box)
+
+    def _confirm_remove(self, layer: Layer):
+        if self._ui is None:
+            return
+
+        def _on_result(btn: str):
+            if btn == "Yes":
+                self._layer_stack.remove_layer(layer)
+
+        MessageBox.question(
+            self._ui,
+            "Delete Layer",
+            f"Delete layer \"{layer.name}\"?",
+            buttons=Buttons.YES_NO,
+            on_result=_on_result,
+        )

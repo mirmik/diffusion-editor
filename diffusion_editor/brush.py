@@ -6,6 +6,7 @@ class Brush:
         self.size = 20
         self.color = (255, 255, 255, 255)
         self.hardness = 0.4  # 0.0 = fully soft, 1.0 = hard edge
+        self.flow = 1.0  # 0.0 = no effect, 1.0 = full strength
         self._alpha_stamp = None  # 2D (d, d) float32, 0.0-1.0
         self._rebuild_stamp()
 
@@ -19,6 +20,9 @@ class Brush:
     def set_hardness(self, hardness):
         self.hardness = max(0.0, min(hardness, 1.0))
         self._rebuild_stamp()
+
+    def set_flow(self, flow):
+        self.flow = max(0.0, min(flow, 1.0))
 
     def _rebuild_stamp(self):
         d = self.size
@@ -60,7 +64,7 @@ class Brush:
         if dx0 >= dx1 or dy0 >= dy1:
             return None
 
-        stamp_u8 = (stamp[sy0:sy1, sx0:sx1] * self.color[3]).astype(np.uint8)
+        stamp_u8 = (stamp[sy0:sy1, sx0:sx1] * self.color[3] * self.flow).astype(np.uint8)
         mask[dy0:dy1, dx0:dx1] = np.maximum(
             mask[dy0:dy1, dx0:dx1], stamp_u8)
         return (dx0, dy0, dx1, dy1)
@@ -113,7 +117,7 @@ class Brush:
             alpha = np.clip(
                 (radius - dist) / max(radius - inner, 0.001), 0.0, 1.0)
 
-        stamp_u8 = (alpha * self.color[3]).astype(np.uint8)
+        stamp_u8 = (alpha * self.color[3] * self.flow).astype(np.uint8)
         mask[by0:by1, bx0:bx1] = np.maximum(
             mask[by0:by1, bx0:bx1], stamp_u8)
         return (bx0, by0, bx1, by1)

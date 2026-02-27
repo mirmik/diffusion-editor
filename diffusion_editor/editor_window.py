@@ -17,6 +17,7 @@ from tcgui.widgets.menu_bar import MenuBar
 from tcgui.widgets.menu import MenuItem, Menu
 from tcgui.widgets.tool_bar import ToolBar
 from tcgui.widgets.status_bar import StatusBar
+from tcgui.widgets.message_box import MessageBox, Buttons
 from tcgui.widgets.units import px, pct
 from tcgui.widgets.splitter import Splitter
 
@@ -346,8 +347,20 @@ class EditorWindow:
 
     def _remove_layer(self):
         layer = self._layer_stack.active_layer
-        if layer is not None:
-            self._layer_stack.remove_layer(layer)
+        if layer is None:
+            return
+
+        def _on_result(btn: str):
+            if btn == "Yes":
+                self._layer_stack.remove_layer(layer)
+
+        MessageBox.question(
+            self.ui,
+            "Delete Layer",
+            f"Delete layer \"{layer.name}\"?",
+            buttons=Buttons.YES_NO,
+            on_result=_on_result,
+        )
 
     def save_file(self):
         if self._project_path:

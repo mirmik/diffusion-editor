@@ -299,6 +299,44 @@ class LayerStack:
     def get_prefix_below(self, layer: Layer) -> np.ndarray:
         return self._renderer.prefix_full(layer)
 
+    def get_prefix_below_rect(self, layer: Layer, x0: int, y0: int,
+                              x1: int, y1: int) -> np.ndarray:
+        """Return prefix buffer for a rect (uint8 RGBA)."""
+        if self._width == 0 or self._height == 0:
+            return np.zeros((1, 1, 4), dtype=np.uint8)
+        x0 = max(0, x0)
+        y0 = max(0, y0)
+        x1 = min(self._width, x1)
+        y1 = min(self._height, y1)
+        if x1 <= x0 or y1 <= y0:
+            return np.zeros((0, 0, 4), dtype=np.uint8)
+
+        out = np.zeros((y1 - y0, x1 - x0, 4), dtype=np.uint8)
+        tiles = self._tiles_for_rect((x0, y0, x1, y1))
+        if not tiles:
+            return out
+        for tx, ty in tiles:
+            tile = self._renderer.full_prefix_tile(layer, tx, ty)
+            if tile is None:
+                continue
+            bx0, by0, bx1, by1 = self.tile_bounds(tx, ty)
+            ox0 = max(x0, bx0)
+            oy0 = max(y0, by0)
+            ox1 = min(x1, bx1)
+            oy1 = min(y1, by1)
+            if ox1 <= ox0 or oy1 <= oy0:
+                continue
+            src_x0 = ox0 - bx0
+            src_y0 = oy0 - by0
+            src_x1 = src_x0 + (ox1 - ox0)
+            src_y1 = src_y0 + (oy1 - oy0)
+            dst_x0 = ox0 - x0
+            dst_y0 = oy0 - y0
+            dst_x1 = dst_x0 + (ox1 - ox0)
+            dst_y1 = dst_y0 + (oy1 - oy0)
+            out[dst_y0:dst_y1, dst_x0:dst_x1] = tile[src_y0:src_y1, src_x0:src_x1]
+        return out
+
     # --- Serialization ---
 
     FORMAT_VERSION = 4

@@ -62,6 +62,16 @@ class BrushPanel(GroupBox):
         self._hard_slider.on_changed = self._on_hard_changed
         self.add_child(self._hard_slider)
 
+        # Flow slider
+        self._flow_slider = SliderEdit()
+        self._flow_slider.label = "Flow"
+        self._flow_slider.min_value = 0.0
+        self._flow_slider.max_value = 1.0
+        self._flow_slider.value = brush.flow
+        self._flow_slider.decimals = 2
+        self._flow_slider.on_changed = self._on_flow_changed
+        self.add_child(self._flow_slider)
+
     def _update_color_btn(self):
         r, g, b, _ = self._brush.color
         self._color_btn.background_color = (r / 255, g / 255, b / 255, 1.0)
@@ -88,7 +98,11 @@ class BrushPanel(GroupBox):
     def _on_hard_changed(self, value: float):
         self._brush.set_hardness(value)
 
+    def _on_flow_changed(self, value: float):
+        self._brush.set_flow(value)
+
     def sync_from_brush(self):
         self._size_slider.value = self._brush.size
         self._hard_slider.value = self._brush.hardness
+        self._flow_slider.value = self._brush.flow
         self._update_color_btn()
