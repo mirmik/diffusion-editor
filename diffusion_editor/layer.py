@@ -1,11 +1,48 @@
 import io
 import json
+import logging
 import zipfile
 
 import numpy as np
 from PIL import Image
 
 from .tiles import DenseTileGrid
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Serialization helpers: raw numpy (.npy) with PNG fallback for old projects
+# ---------------------------------------------------------------------------
+
+def _save_array_to_zip(zf: zipfile.ZipFile, path: str, arr: np.ndarray):
+    """Save numpy array into zip as .npy."""
+    buf = io.BytesIO()
+    np.save(buf, arr)
+    zf.writestr(path, buf.getvalue())
+
+
+def _load_array_from_zip(zf: zipfile.ZipFile, path: str,
+                          mode: str | None = None) -> np.ndarray:
+    """Load numpy array from zip. Supports .npy and legacy .png."""
+    data = zf.read(path)
+    if path.endswith('.npy'):
+        return np.load(io.BytesIO(data))
+    # Legacy PNG format
+    img = Image.open(io.BytesIO(data))
+    if mode:
+        img = img.convert(mode)
+    return np.array(img, dtype=np.uint8)
+
+
+def _load_pil_from_zip(zf: zipfile.ZipFile, path: str,
+                        mode: str = "RGB") -> Image.Image:
+    """Load PIL Image from zip. Supports .npy and legacy .png."""
+    data = zf.read(path)
+    if path.endswith('.npy'):
+        arr = np.load(io.BytesIO(data))
+        return Image.fromarray(arr).convert(mode)
+    return Image.open(io.BytesIO(data)).convert(mode)
 
 
 class Layer:
@@ -47,15 +84,11 @@ class Layer:
 
     @property
     def width(self):
-        if hasattr(self, "content"):
-            return self.content.width
-        return self.image.shape[1]
+        return self.content.width
 
     @property
     def height(self):
-        if hasattr(self, "content"):
-            return self.content.height
-        return self.image.shape[0]
+        return self.content.height
 
     def to_dict(self, path: str) -> dict:
         file_key = path.replace("/", "_")
@@ -65,7 +98,7 @@ class Layer:
             "name": self.name,
             "visible": self.visible,
             "opacity": self.opacity,
-            "image_file": f"layers/{file_key}_image.png",
+            "image_file": f"layers/{file_key}_image.npy",
             "children": [],
         }
         for i, child in enumerate(self.children):
@@ -74,18 +107,13 @@ class Layer:
 
     def save_images_to_zip(self, zf: zipfile.ZipFile, path: str):
         file_key = path.replace("/", "_")
-        img = Image.fromarray(self.image, "RGBA")
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        zf.writestr(f"layers/{file_key}_image.png", buf.getvalue())
+        _save_array_to_zip(zf, f"layers/{file_key}_image.npy", self.image)
         for i, child in enumerate(self.children):
             child.save_images_to_zip(zf, f"{path}/{i}")
 
     @classmethod
     def from_dict(cls, d: dict, zf: zipfile.ZipFile, tile_size: int = 256) -> "Layer":
-        image_data = zf.read(d["image_file"])
-        img = Image.open(io.BytesIO(image_data)).convert("RGBA")
-        arr = np.array(img, dtype=np.uint8)
+        arr = _load_array_from_zip(zf, d["image_file"], mode="RGBA")
         layer = cls.__new__(cls)
         layer.name = d["name"]
         layer.visible = d["visible"]
@@ -161,8 +189,8 @@ class DiffusionLayer(Layer):
         file_key = path.replace("/", "_")
         d["type"] = "diffusion"
         d["mode"] = self.mode
-        d["mask_file"] = f"layers/{file_key}_mask.png"
-        d["source_file"] = f"layers/{file_key}_source.png" if self.source_patch is not None else None
+        d["mask_file"] = f"layers/{file_key}_mask.npy"
+        d["source_file"] = f"layers/{file_key}_source.npy" if self.source_patch is not None else None
         d["patch_x"] = self.patch_x
         d["patch_y"] = self.patch_y
         d["patch_w"] = self.patch_w
@@ -185,30 +213,21 @@ class DiffusionLayer(Layer):
     def save_images_to_zip(self, zf: zipfile.ZipFile, path: str):
         super().save_images_to_zip(zf, path)
         file_key = path.replace("/", "_")
-        mask_img = Image.fromarray(self.mask, "L")
-        buf = io.BytesIO()
-        mask_img.save(buf, format="PNG")
-        zf.writestr(f"layers/{file_key}_mask.png", buf.getvalue())
+        _save_array_to_zip(zf, f"layers/{file_key}_mask.npy", self.mask)
         if self.source_patch is not None:
-            buf = io.BytesIO()
-            self.source_patch.save(buf, format="PNG")
-            zf.writestr(f"layers/{file_key}_source.png", buf.getvalue())
+            _save_array_to_zip(zf, f"layers/{file_key}_source.npy",
+                               np.array(self.source_patch))
 
     @classmethod
     def from_dict(cls, d: dict, zf: zipfile.ZipFile, tile_size: int = 256) -> "DiffusionLayer":
-        image_data = zf.read(d["image_file"])
-        img = Image.open(io.BytesIO(image_data)).convert("RGBA")
-        arr = np.array(img, dtype=np.uint8)
+        arr = _load_array_from_zip(zf, d["image_file"], mode="RGBA")
         h, w = arr.shape[:2]
 
-        mask_data = zf.read(d["mask_file"])
-        mask_img = Image.open(io.BytesIO(mask_data)).convert("L")
-        mask_arr = np.array(mask_img, dtype=np.uint8)
+        mask_arr = _load_array_from_zip(zf, d["mask_file"], mode="L")
 
         source_patch = None
         if d.get("source_file") and d["source_file"] in zf.namelist():
-            source_data = zf.read(d["source_file"])
-            source_patch = Image.open(io.BytesIO(source_data)).convert("RGB")
+            source_patch = _load_pil_from_zip(zf, d["source_file"], mode="RGB")
 
         layer = cls.__new__(cls)
         layer.name = d["name"]
@@ -286,8 +305,8 @@ class LamaLayer(Layer):
         d = super().to_dict(path)
         file_key = path.replace("/", "_")
         d["type"] = "lama"
-        d["mask_file"] = f"layers/{file_key}_mask.png"
-        d["source_file"] = f"layers/{file_key}_source.png" if self.source_patch is not None else None
+        d["mask_file"] = f"layers/{file_key}_mask.npy"
+        d["source_file"] = f"layers/{file_key}_source.npy" if self.source_patch is not None else None
         d["patch_x"] = self.patch_x
         d["patch_y"] = self.patch_y
         d["patch_w"] = self.patch_w
@@ -297,30 +316,21 @@ class LamaLayer(Layer):
     def save_images_to_zip(self, zf: zipfile.ZipFile, path: str):
         super().save_images_to_zip(zf, path)
         file_key = path.replace("/", "_")
-        mask_img = Image.fromarray(self.mask, "L")
-        buf = io.BytesIO()
-        mask_img.save(buf, format="PNG")
-        zf.writestr(f"layers/{file_key}_mask.png", buf.getvalue())
+        _save_array_to_zip(zf, f"layers/{file_key}_mask.npy", self.mask)
         if self.source_patch is not None:
-            buf = io.BytesIO()
-            self.source_patch.save(buf, format="PNG")
-            zf.writestr(f"layers/{file_key}_source.png", buf.getvalue())
+            _save_array_to_zip(zf, f"layers/{file_key}_source.npy",
+                               np.array(self.source_patch))
 
     @classmethod
     def from_dict(cls, d: dict, zf: zipfile.ZipFile, tile_size: int = 256) -> "LamaLayer":
-        image_data = zf.read(d["image_file"])
-        img = Image.open(io.BytesIO(image_data)).convert("RGBA")
-        arr = np.array(img, dtype=np.uint8)
+        arr = _load_array_from_zip(zf, d["image_file"], mode="RGBA")
         h, w = arr.shape[:2]
 
-        mask_data = zf.read(d["mask_file"])
-        mask_img = Image.open(io.BytesIO(mask_data)).convert("L")
-        mask_arr = np.array(mask_img, dtype=np.uint8)
+        mask_arr = _load_array_from_zip(zf, d["mask_file"], mode="L")
 
         source_patch = None
         if d.get("source_file") and d["source_file"] in zf.namelist():
-            source_data = zf.read(d["source_file"])
-            source_patch = Image.open(io.BytesIO(source_data)).convert("RGB")
+            source_patch = _load_pil_from_zip(zf, d["source_file"], mode="RGB")
 
         layer = cls.__new__(cls)
         layer.name = d["name"]
@@ -393,8 +403,8 @@ class InstructLayer(Layer):
         d = super().to_dict(path)
         file_key = path.replace("/", "_")
         d["type"] = "instruct"
-        d["mask_file"] = f"layers/{file_key}_mask.png"
-        d["source_file"] = f"layers/{file_key}_source.png" if self.source_patch is not None else None
+        d["mask_file"] = f"layers/{file_key}_mask.npy"
+        d["source_file"] = f"layers/{file_key}_source.npy" if self.source_patch is not None else None
         d["patch_x"] = self.patch_x
         d["patch_y"] = self.patch_y
         d["patch_w"] = self.patch_w
@@ -410,32 +420,23 @@ class InstructLayer(Layer):
     def save_images_to_zip(self, zf: zipfile.ZipFile, path: str):
         super().save_images_to_zip(zf, path)
         file_key = path.replace("/", "_")
-        mask_img = Image.fromarray(self.mask, "L")
-        buf = io.BytesIO()
-        mask_img.save(buf, format="PNG")
-        zf.writestr(f"layers/{file_key}_mask.png", buf.getvalue())
+        _save_array_to_zip(zf, f"layers/{file_key}_mask.npy", self.mask)
         if self.source_patch is not None:
-            buf = io.BytesIO()
-            self.source_patch.save(buf, format="PNG")
-            zf.writestr(f"layers/{file_key}_source.png", buf.getvalue())
+            _save_array_to_zip(zf, f"layers/{file_key}_source.npy",
+                               np.array(self.source_patch))
 
     @classmethod
     def from_dict(cls, d: dict, zf: zipfile.ZipFile, tile_size: int = 256) -> "InstructLayer":
-        image_data = zf.read(d["image_file"])
-        img = Image.open(io.BytesIO(image_data)).convert("RGBA")
-        arr = np.array(img, dtype=np.uint8)
+        arr = _load_array_from_zip(zf, d["image_file"], mode="RGBA")
         h, w = arr.shape[:2]
 
         mask_arr = np.zeros((h, w), dtype=np.uint8)
         if d.get("mask_file") and d["mask_file"] in zf.namelist():
-            mask_data = zf.read(d["mask_file"])
-            mask_img = Image.open(io.BytesIO(mask_data)).convert("L")
-            mask_arr = np.array(mask_img, dtype=np.uint8)
+            mask_arr = _load_array_from_zip(zf, d["mask_file"], mode="L")
 
         source_patch = None
         if d.get("source_file") and d["source_file"] in zf.namelist():
-            source_data = zf.read(d["source_file"])
-            source_patch = Image.open(io.BytesIO(source_data)).convert("RGB")
+            source_patch = _load_pil_from_zip(zf, d["source_file"], mode="RGB")
 
         layer = cls.__new__(cls)
         layer.name = d["name"]
@@ -474,3 +475,4 @@ def _layer_from_dict(d: dict, zf: zipfile.ZipFile, tile_size: int = 256) -> Laye
     if d.get("type") == "instruct":
         return InstructLayer.from_dict(d, zf, tile_size=tile_size)
     return Layer.from_dict(d, zf, tile_size=tile_size)
+

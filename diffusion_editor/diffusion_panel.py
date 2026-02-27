@@ -187,8 +187,7 @@ class DiffusionPanel(ScrollArea):
         seed_rnd = Button()
         seed_rnd.text = "Rnd"
         seed_rnd.preferred_width = px(40)
-        seed_rnd.on_click = lambda: setattr(
-            self._seed_edit, 'text', str(random.randint(0, 2**32 - 1)))
+        seed_rnd.on_click = lambda: self._set_random_seed()
         seed_row.add_child(seed_rnd)
 
         seed_group.add_child(seed_row)
@@ -391,6 +390,9 @@ class DiffusionPanel(ScrollArea):
         flow = self._mask_flow_slider.value
         if self.on_mask_brush_changed:
             self.on_mask_brush_changed(size, hardness, flow)
+
+    def _set_random_seed(self):
+        self._seed_edit.text = str(random.randint(0, 2**32 - 1))
 
     # ------------------------------------------------------------------
     # Properties

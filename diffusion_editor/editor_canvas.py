@@ -54,12 +54,18 @@ class EditorCanvas(Canvas):
         self._mask_overlay: np.ndarray | None = None
         self._mask_erase_stroke: np.ndarray | None = None
         self._mask_erase_dirty: tuple[int, int, int, int] | None = None
+        self._stroke_dirty_rect: tuple[int, int, int, int] | None = None
+        self._edit_label: str | None = None
+        self._edit_target: str | None = None  # "image" | "mask"
+        self._edit_layer: Layer | None = None
 
         # Callbacks
         self.on_mouse_moved: callable = None
         self.on_color_picked: callable = None
         self.on_ref_rect_drawn: callable = None
         self.on_patch_rect_drawn: callable = None
+        self.on_edit_begin: callable = None  # (label: str, layer: Layer, target: str)
+        self.on_edit_end: callable = None  # (layer: Layer, target: str, dirty_rect)
 
         # Wire layer stack
         layer_stack.on_changed = self._on_stack_changed
@@ -464,7 +470,7 @@ class EditorCanvas(Canvas):
         dx0, dy0b = max(0, x0), max(0, y0)
         dx1, dy1 = dx0 + (sx1 - sx0), dy0b + (sy1 - sy0)
         if dx0 >= dx1 or dy0b >= dy1:
-            return
+            return None
 
         erase = (stamp[sy0:sy1, sx0:sx1]
                  * (self.brush.color[3] / 255.0)
@@ -486,6 +492,7 @@ class EditorCanvas(Canvas):
                 out_rgb, 0, 255).astype(np.uint8)
             self._composite[dy0b:dy1, dx0:dx1, 3:4] = np.clip(
                 out_a * 255.0, 0, 255).astype(np.uint8)
+        return (dx0, dy0b, dx1, dy1)
 
     def _erase_stroke_line(self, layer, x0: int, y0: int, x1: int, y1: int):
         ih, iw = layer.image.shape[:2]
@@ -497,16 +504,16 @@ class EditorCanvas(Canvas):
         bx1 = min(iw, int(max(x0, x1) + radius) + 1)
         by1 = min(ih, int(max(y0, y1) + radius) + 1)
         if bx0 >= bx1 or by0 >= by1:
-            return
+            return None
 
         sdx = float(x1 - x0)
         sdy = float(y1 - y0)
         seg_len_sq = sdx * sdx + sdy * sdy
 
         if seg_len_sq < 0.5:
-            self._erase_dab(layer, x0, y0)
+            dirty = self._erase_dab(layer, x0, y0)
             self.set_image(self._composite)
-            return
+            return dirty
 
         yy, xx = np.mgrid[by0:by1, bx0:bx1]
         xx = xx.astype(np.float32)
@@ -545,6 +552,7 @@ class EditorCanvas(Canvas):
                 out_a * 255.0, 0, 255).astype(np.uint8)
 
         self.set_image(self._composite)
+        return (bx0, by0, bx1, by1)
 
     # ------------------------------------------------------------------
     # Mouse handlers (called from Canvas callbacks)
@@ -582,6 +590,23 @@ class EditorCanvas(Canvas):
 
             # Painting
             self._painting = True
+            self._stroke_dirty_rect = None
+            self._edit_layer = layer
+            if self._is_mask_layer_active():
+                self._edit_label = "Mask Stroke"
+                self._edit_target = "mask"
+                if self.on_edit_begin:
+                    self.on_edit_begin(self._edit_label, layer, self._edit_target)
+            elif self._brush_eraser:
+                self._edit_label = "Erase Stroke"
+                self._edit_target = "image"
+                if self.on_edit_begin:
+                    self.on_edit_begin(self._edit_label, layer, self._edit_target)
+            else:
+                self._edit_label = "Paint Stroke"
+                self._edit_target = "image"
+                if self.on_edit_begin:
+                    self.on_edit_begin(self._edit_label, layer, self._edit_target)
             if self._is_mask_layer_active():
                 if self._mask_eraser:
                     if self._mask_erase_stroke is None:
@@ -589,6 +614,7 @@ class EditorCanvas(Canvas):
                     dirty, stamp = self._dab_mask(
                         self._mask_erase_stroke, ix, iy, erase=False)
                     self._mask_erase_dirty = self._union_rect(self._mask_erase_dirty, dirty)
+                    self._stroke_dirty_rect = self._union_rect(self._stroke_dirty_rect, dirty)
                     if dirty is not None:
                         if self._show_mask:
                             x0, y0, x1, y1 = dirty
@@ -599,14 +625,17 @@ class EditorCanvas(Canvas):
                         self._preview_mask_erase_region(layer, dirty)
                 else:
                     dirty, _stamp = self._dab_mask(layer.mask, ix, iy)
+                    self._stroke_dirty_rect = self._union_rect(self._stroke_dirty_rect, dirty)
                     self._update_mask_overlay_region(layer, dirty)
             else:
                 self._begin_stroke()
                 if self._stroke_is_eraser:
-                    self._erase_dab(layer, ix, iy)
+                    dirty = self._erase_dab(layer, ix, iy)
+                    self._stroke_dirty_rect = self._union_rect(self._stroke_dirty_rect, dirty)
                     self.set_image(self._composite)
                 elif self._stroke_mask is not None:
                     dirty = self.brush.dab_to_mask(self._stroke_mask, ix, iy)
+                    self._stroke_dirty_rect = self._union_rect(self._stroke_dirty_rect, dirty)
                     self._update_stroke_region(dirty)
             self._last_paint_pos = (ix, iy)
 
@@ -651,15 +680,17 @@ class EditorCanvas(Canvas):
                         dirty, _stamp = self._stroke_mask_line(layer.mask, lx, ly, ixi, iyi)
                     else:
                         dirty, _stamp = self._dab_mask(layer.mask, ixi, iyi)
+                    self._stroke_dirty_rect = self._union_rect(self._stroke_dirty_rect, dirty)
                     self._update_mask_overlay_region(layer, dirty)
             else:
                 if self._stroke_is_eraser:
                     if self._last_paint_pos:
                         lx, ly = self._last_paint_pos
-                        self._erase_stroke_line(layer, lx, ly, ixi, iyi)
+                        dirty = self._erase_stroke_line(layer, lx, ly, ixi, iyi)
                     else:
-                        self._erase_dab(layer, ixi, iyi)
+                        dirty = self._erase_dab(layer, ixi, iyi)
                         self.set_image(self._composite)
+                    self._stroke_dirty_rect = self._union_rect(self._stroke_dirty_rect, dirty)
                 elif self._stroke_mask is not None:
                     if self._last_paint_pos:
                         lx, ly = self._last_paint_pos
@@ -668,6 +699,7 @@ class EditorCanvas(Canvas):
                     else:
                         dirty = self.brush.dab_to_mask(
                             self._stroke_mask, ixi, iyi)
+                    self._stroke_dirty_rect = self._union_rect(self._stroke_dirty_rect, dirty)
                     self._update_stroke_region(dirty)
             self._last_paint_pos = (ixi, iyi)
 
@@ -728,6 +760,12 @@ class EditorCanvas(Canvas):
                 self.set_image(self._composite)
             self._mask_overlay = None
             self._update_overlay()
+            if self.on_edit_end:
+                self.on_edit_end(self._edit_layer, self._edit_target, self._stroke_dirty_rect)
+            self._stroke_dirty_rect = None
+            self._edit_label = None
+            self._edit_target = None
+            self._edit_layer = None
         self._painting = False
         self._last_paint_pos = None
 

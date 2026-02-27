@@ -61,6 +61,30 @@ class LayerRenderer:
                 result[y0:y1, x0:x1] = tile
         return result
 
+    def _composite_siblings_direct(self, siblings: list[Layer],
+                                   h: int, w: int) -> np.ndarray:
+        """Composite sibling list on full images (fast, no tiles)."""
+        result = np.zeros((h, w, 4), dtype=np.float32)
+        # Scratch buffers reused across layers to avoid repeated allocation
+        tmp = np.empty((h, w, 4), dtype=np.float32)
+        for layer in reversed(siblings):  # bottom to top
+            if not layer.visible or layer.opacity <= 0:
+                continue
+            if layer.opacity >= 1.0 and not layer.children:
+                self._blend_image(layer.image, 1.0, result)
+            else:
+                subtree = np.zeros((h, w, 4), dtype=np.float32)
+                if layer.children:
+                    child_comp = self._composite_siblings_direct(
+                        layer.children, h, w)
+                    subtree[:] = child_comp
+                self._blend_image(layer.image, 1.0, subtree)
+                np.clip(subtree, 0, 255, out=tmp)
+                subtree_u8 = tmp.astype(np.uint8)
+                self._blend_buffer(subtree_u8, layer.opacity, result)
+        np.clip(result, 0, 255, out=result)
+        return result.astype(np.uint8)
+
     def prefix_full(self, layer: Layer) -> np.ndarray:
         h, w = self._stack.height, self._stack.width
         result = np.zeros((h, w, 4), dtype=np.uint8)
@@ -223,24 +247,21 @@ class LayerRenderer:
 
     @staticmethod
     def _blend_image(image: np.ndarray, opacity: float, result: np.ndarray) -> None:
-        # Blend straight-alpha image into premultiplied result buffer.
-        src = image.astype(np.float32)
-        alpha = src[:, :, 3:4] / 255.0
-        if opacity != 1.0:
-            alpha = alpha * opacity
-        src_rgb = src[:, :, :3] * alpha
+        """Blend straight-alpha image onto float32 result buffer."""
+        alpha = image[:, :, 3:4].astype(np.float32) * (opacity / 255.0)
         inv_alpha = 1.0 - alpha
-        result[:, :, :3] = src_rgb + result[:, :, :3] * inv_alpha
+        src_rgb = image[:, :, :3].astype(np.float32)
+        result[:, :, :3] = src_rgb * alpha + result[:, :, :3] * inv_alpha
         result[:, :, 3:4] = alpha * 255.0 + result[:, :, 3:4] * inv_alpha
 
     @staticmethod
     def _blend_buffer(src_buf: np.ndarray, opacity: float, result: np.ndarray) -> None:
-        # Blend premultiplied src buffer into premultiplied result.
-        src = src_buf.astype(np.float32)
-        alpha = src[:, :, 3:4] / 255.0
-        if opacity != 1.0:
-            alpha = alpha * opacity
-            src = src * opacity
+        """Blend uint8 composited buffer onto float32 result buffer."""
+        alpha = src_buf[:, :, 3:4].astype(np.float32) * (opacity / 255.0)
         inv_alpha = 1.0 - alpha
-        result[:, :, :3] = src[:, :, :3] + result[:, :, :3] * inv_alpha
+        if opacity != 1.0:
+            src_rgb = src_buf[:, :, :3].astype(np.float32) * opacity
+        else:
+            src_rgb = src_buf[:, :, :3].astype(np.float32)
+        result[:, :, :3] = src_rgb + result[:, :, :3] * inv_alpha
         result[:, :, 3:4] = alpha * 255.0 + result[:, :, 3:4] * inv_alpha

@@ -1,5 +1,6 @@
 import os
 import threading
+import logging
 import torch
 from PIL import Image
 from diffusers import (
@@ -11,6 +12,7 @@ from diffusers import (
 
 # Filename hints for v-prediction models
 _VPRED_HINTS = ("vpred", "v-pred", "v_pred", "vprediction", "v-prediction", "v_prediction")
+logger = logging.getLogger(__name__)
 
 
 def _guess_prediction_type(path: str) -> str | None:
@@ -350,7 +352,6 @@ class DiffusionEngine:
     def _run_inference(self, image, prompt, negative_prompt, strength, steps,
                        guidance_scale, seed, mode, mask_image, masked_content,
                        ip_adapter_image, ip_adapter_scale, width, height):
-        import traceback
         print(f"[DiffusionEngine] _run_inference thread started, mode={mode}")
         try:
             if mode == "txt2img":
@@ -372,8 +373,7 @@ class DiffusionEngine:
             self._result = (result_image, used_seed)
             print(f"[DiffusionEngine] _run_inference OK, result set")
         except Exception as e:
-            print(f"[DiffusionEngine] _run_inference EXCEPTION: {e}")
-            traceback.print_exc()
+            logger.exception("Diffusion inference failed (mode=%s)", mode)
             self._error = str(e)
         self._busy = False
         print(f"[DiffusionEngine] _run_inference thread done, busy=False")
@@ -399,6 +399,7 @@ class DiffusionEngine:
             self.load_ip_adapter()
             self._result = True
         except Exception as e:
+            logger.exception("IP-Adapter load failed")
             self._error = str(e)
         self._busy = False
 
@@ -421,6 +422,7 @@ class DiffusionEngine:
             self.load_model(path, prediction_type)
             self._result = path
         except Exception as e:
+            logger.exception("Model load failed: %s", path)
             self._error = str(e)
         self._busy = False
 

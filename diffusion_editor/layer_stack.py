@@ -1,4 +1,5 @@
 import json
+import io
 import re
 import zipfile
 
@@ -114,8 +115,7 @@ class LayerStack:
         self._active_layer = layer
 
     def _apply_tile_size(self, layer: Layer):
-        if hasattr(layer, "content"):
-            layer.content.tile_size = self._tile_size
+        layer.content.tile_size = self._tile_size
         for child in layer.children:
             self._apply_tile_size(child)
 
@@ -339,37 +339,9 @@ class LayerStack:
 
     # --- Serialization ---
 
-    FORMAT_VERSION = 4
+    FORMAT_VERSION = 5
 
-    def _find_layer_path(self, target: Layer | None) -> str | None:
-        if target is None:
-            return None
-        def _search(layers, prefix):
-            for i, layer in enumerate(layers):
-                path = f"{prefix}/{i}" if prefix else str(i)
-                if layer is target:
-                    return path
-                result = _search(layer.children, path)
-                if result is not None:
-                    return result
-            return None
-        return _search(self._layers, "")
-
-    def _find_layer_by_path(self, path: str) -> Layer | None:
-        if not path:
-            return None
-        parts = [int(p) for p in path.split("/")]
-        layers = self._layers
-        layer = None
-        for idx in parts:
-            if 0 <= idx < len(layers):
-                layer = layers[idx]
-                layers = layer.children
-            else:
-                return None
-        return layer
-
-    def save_project(self, path: str):
+    def _serialize_manifest_and_layers(self, zf: zipfile.ZipFile):
         manifest = {
             "format_version": self.FORMAT_VERSION,
             "canvas_width": self._width,
@@ -378,28 +350,26 @@ class LayerStack:
             "active_layer_path": self._find_layer_path(self._active_layer),
             "layers": [],
         }
-        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for i, layer in enumerate(self._layers):
-                layer_path = str(i)
-                manifest["layers"].append(layer.to_dict(layer_path))
-                layer.save_images_to_zip(zf, layer_path)
-            zf.writestr("manifest.json",
-                        json.dumps(manifest, indent=2, ensure_ascii=False))
+        for i, layer in enumerate(self._layers):
+            layer_path = str(i)
+            manifest["layers"].append(layer.to_dict(layer_path))
+            layer.save_images_to_zip(zf, layer_path)
+        zf.writestr("manifest.json",
+                    json.dumps(manifest, indent=2, ensure_ascii=False))
 
-    def load_project(self, path: str):
-        with zipfile.ZipFile(path, "r") as zf:
-            manifest = json.loads(zf.read("manifest.json"))
-            version = manifest.get("format_version", 0)
-            if version > self.FORMAT_VERSION:
-                raise ValueError(
-                    f"Project version {version} is newer than "
-                    f"supported version {self.FORMAT_VERSION}")
+    def _load_from_zip(self, zf: zipfile.ZipFile):
+        manifest = json.loads(zf.read("manifest.json"))
+        version = manifest.get("format_version", 0)
+        if version > self.FORMAT_VERSION:
+            raise ValueError(
+                f"Project version {version} is newer than "
+                f"supported version {self.FORMAT_VERSION}")
 
-            self._tile_size = manifest.get("tile_size", self._tile_size)
-            new_layers = []
-            for layer_dict in manifest["layers"]:
-                layer = _layer_from_dict(layer_dict, zf, tile_size=self._tile_size)
-                new_layers.append(layer)
+        self._tile_size = manifest.get("tile_size", self._tile_size)
+        new_layers = []
+        for layer_dict in manifest["layers"]:
+            layer = _layer_from_dict(layer_dict, zf, tile_size=self._tile_size)
+            new_layers.append(layer)
 
         self._layers.clear()
         self._layers.extend(new_layers)
@@ -424,3 +394,56 @@ class LayerStack:
         self._rebuild_caches()
         if self.on_changed:
             self.on_changed()
+
+    def serialize_state(self) -> bytes:
+        """Fast snapshot for undo: ZIP_STORED, no compression."""
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+            self._serialize_manifest_and_layers(zf)
+        return buf.getvalue()
+
+    def load_state(self, state: bytes):
+        with zipfile.ZipFile(io.BytesIO(state), "r") as zf:
+            self._load_from_zip(zf)
+
+    def _find_layer_path(self, target: Layer | None) -> str | None:
+        if target is None:
+            return None
+        def _search(layers, prefix):
+            for i, layer in enumerate(layers):
+                path = f"{prefix}/{i}" if prefix else str(i)
+                if layer is target:
+                    return path
+                result = _search(layer.children, path)
+                if result is not None:
+                    return result
+            return None
+        return _search(self._layers, "")
+
+    def get_layer_path(self, target: Layer | None) -> str | None:
+        return self._find_layer_path(target)
+
+    def _find_layer_by_path(self, path: str) -> Layer | None:
+        if not path:
+            return None
+        parts = [int(p) for p in path.split("/")]
+        layers = self._layers
+        layer = None
+        for idx in parts:
+            if 0 <= idx < len(layers):
+                layer = layers[idx]
+                layers = layer.children
+            else:
+                return None
+        return layer
+
+    def get_layer_by_path(self, path: str) -> Layer | None:
+        return self._find_layer_by_path(path)
+
+    def save_project(self, path: str):
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+            self._serialize_manifest_and_layers(zf)
+
+    def load_project(self, path: str):
+        with zipfile.ZipFile(path, "r") as zf:
+            self._load_from_zip(zf)

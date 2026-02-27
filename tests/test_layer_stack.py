@@ -3,7 +3,8 @@
 import numpy as np
 import pytest
 
-from diffusion_editor.layer import Layer, LayerStack
+from diffusion_editor.layer import Layer
+from diffusion_editor.layer_stack import LayerStack
 
 
 def _solid_image(w, h, r, g, b, a):
@@ -43,7 +44,7 @@ class TestCompositeCorrectness:
         stack.init_from_image(_solid_image(8, 8, 255, 0, 0, 255))
         stack.add_layer("top", _solid_image(8, 8, 0, 255, 0, 255))
         result = stack.composite()
-        # Opaque green on top of red → green
+        # Opaque green on top of red -> green
         assert result[0, 0, 0] == 0
         assert result[0, 0, 1] == 255
         assert result[0, 0, 3] == 255
@@ -64,69 +65,41 @@ class TestCompositeCorrectness:
 
 
 class TestPrefixCache:
-    def test_cache_built_on_first_composite(self):
-        stack = _make_stack()
-        all_layers = stack._all_layers_flat()
-        assert all(layer in stack._dirty for layer in all_layers)
-        assert all(layer in stack._nested_dirty for layer in all_layers)
-        stack.composite()
-        assert len(stack._dirty) == 0
-        assert len(stack._nested_dirty) == 0
-
     def test_cached_composite_returns_equal(self):
         stack = _make_stack()
         first = stack.composite()
         second = stack.composite()
         np.testing.assert_array_equal(first, second)
 
-    def test_mark_top_layer_dirty(self):
-        stack = _make_stack(5)
-        stack.composite()
-        stack.mark_layer_dirty(stack.layers[0])
-        # Only top layer (layers[0]) should be dirty
-        assert stack.layers[0] in stack._dirty
-        # Bottom layer should remain clean
-        assert stack.layers[-1] not in stack._dirty
-
-    def test_mark_bottom_layer_dirty(self):
-        stack = _make_stack(5)
-        stack.composite()
-        stack.mark_layer_dirty(stack.layers[-1])
-        # All layers should be dirty
-        for layer in stack.layers:
-            assert layer in stack._dirty
-
-    def test_mark_middle_layer_dirty(self):
-        stack = _make_stack(5)
-        stack.composite()
-        stack.mark_layer_dirty(stack.layers[2])
-        # layers[2] and all above (layers[0], layers[1]) should be dirty
-        for layer in stack.layers[:3]:
-            assert layer in stack._dirty
-        # layers below (layers[3], layers[4]) should be clean
-        for layer in stack.layers[3:]:
-            assert layer not in stack._dirty
-
-    def test_structural_change_rebuilds_caches(self):
+    def test_mark_dirty_recomputes_correctly(self):
         stack = _make_stack(3)
-        stack.composite()
-        assert len(stack._dirty) == 0
-        stack.add_layer("new")
-        all_layers = stack._all_layers_flat()
-        assert all(layer in stack._dirty for layer in all_layers)
-        assert len(stack._prefix) == len(all_layers)
+        before = stack.composite().copy()
+        # Modify the top layer image
+        stack.layers[0].image[:] = _solid_image(64, 64, 255, 255, 0, 255)
+        stack.mark_layer_dirty(stack.layers[0])
+        after = stack.composite()
+        assert not np.array_equal(before, after)
+
+    def test_mark_bottom_dirty_recomputes(self):
+        stack = _make_stack(3)
+        before = stack.composite().copy()
+        stack.layers[-1].image[:] = _solid_image(64, 64, 0, 0, 255, 255)
+        stack.mark_layer_dirty(stack.layers[-1])
+        after = stack.composite()
+        assert not np.array_equal(before, after)
+
+    def test_structural_change_recomputes(self):
+        stack = _make_stack(3)
+        before = stack.composite().copy()
+        stack.add_layer("new", _solid_image(64, 64, 255, 255, 0, 128))
+        after = stack.composite()
+        assert not np.array_equal(before, after)
 
 
 # ---------- visibility ----------
 
 
 class TestVisibility:
-    def test_toggle_visibility_invalidates(self):
-        stack = _make_stack(3)
-        stack.composite()
-        stack.set_visibility(stack.layers[0], False)
-        assert len(stack._dirty) > 0
-
     def test_hidden_layer_not_blended(self):
         stack = LayerStack()
         stack.on_changed = lambda: None
@@ -134,7 +107,7 @@ class TestVisibility:
         stack.add_layer("green", _solid_image(8, 8, 0, 255, 0, 255))
         stack.set_visibility(stack.layers[0], False)
         result = stack.composite()
-        # Green hidden → red background
+        # Green hidden -> red background
         assert result[0, 0, 0] == 255
         assert result[0, 0, 1] == 0
 
@@ -147,17 +120,18 @@ class TestVisibility:
         after = stack.composite()
         np.testing.assert_array_equal(before, after)
 
+    def test_visibility_invalidates_composite(self):
+        stack = _make_stack(3)
+        before = stack.composite().copy()
+        stack.set_visibility(stack.layers[0], False)
+        after = stack.composite()
+        assert not np.array_equal(before, after)
+
 
 # ---------- opacity ----------
 
 
 class TestOpacity:
-    def test_set_opacity_invalidates(self):
-        stack = _make_stack(3)
-        stack.composite()
-        stack.set_opacity(stack.layers[0], 0.5)
-        assert len(stack._dirty) > 0
-
     def test_zero_opacity_equals_hidden(self):
         stack = LayerStack()
         stack.on_changed = lambda: None
@@ -172,6 +146,13 @@ class TestOpacity:
         r2 = stack.composite()
 
         np.testing.assert_array_equal(r1, r2)
+
+    def test_opacity_invalidates_composite(self):
+        stack = _make_stack(3)
+        before = stack.composite().copy()
+        stack.set_opacity(stack.layers[0], 0.5)
+        after = stack.composite()
+        assert not np.array_equal(before, after)
 
 
 # ---------- exclude_layer (composite_below) ----------
@@ -193,7 +174,7 @@ class TestCompositeExcluding:
         stack.on_changed = lambda: None
         stack.init_from_image(_solid_image(8, 8, 255, 0, 0, 255))
         below = stack.composite(exclude_layer=stack.layers[0])
-        # Nothing below the only layer → black/transparent
+        # Nothing below the only layer -> black/transparent
         assert below[0, 0, 3] == 0
 
     def test_get_prefix_below(self):
@@ -213,17 +194,14 @@ class TestStructuralOps:
     def test_add_layer(self):
         stack = _make_stack(3)
         stack.composite()
-        stack.add_layer("extra")
-        all_layers = stack._all_layers_flat()
-        assert len(stack._prefix) == len(all_layers)
-        assert all(layer in stack._dirty for layer in all_layers)
+        stack.add_layer("extra", _solid_image(64, 64, 255, 0, 255, 128))
+        result = stack.composite()
+        assert result.shape == (64, 64, 4)
 
     def test_remove_layer(self):
         stack = _make_stack(4)
         stack.composite()
         stack.remove_layer(stack.layers[0])
-        all_layers = stack._all_layers_flat()
-        assert len(stack._prefix) == len(all_layers)
         result = stack.composite()
         assert result.shape[0] == 64
 
@@ -249,10 +227,9 @@ class TestStructuralOps:
         stack.composite()
         new_img = _solid_image(32, 32, 0, 0, 255, 255)
         stack.init_from_image(new_img)
-        assert len(stack._prefix) == 1
-        assert len(stack._dirty) == 1
         result = stack.composite()
         assert result.shape == (32, 32, 4)
+        assert result[0, 0, 2] == 255
 
 
 # ---------- mark_layer_dirty edge cases ----------
@@ -263,10 +240,10 @@ class TestMarkDirtyEdgeCases:
         stack = _make_stack(3)
         stack.composite()
         orphan = Layer("orphan", 64, 64)
-        # Should not crash, rebuilds all caches
+        # Should not crash
         stack.mark_layer_dirty(orphan)
-        all_layers = stack._all_layers_flat()
-        assert all(layer in stack._dirty for layer in all_layers)
+        result = stack.composite()
+        assert result.dtype == np.uint8
 
     def test_mark_dirty_before_first_composite(self):
         stack = _make_stack(3)
@@ -283,12 +260,12 @@ class TestNestedLayerCaching:
     """Test prefix caching with nested (child) layers per architecture example."""
 
     def _make_tree_stack(self):
-        """Build the architecture example tree:
+        r"""Build the architecture example tree:
         A      (B,E,D,C)
         |-C    (B,E,D)
         |.|-D  (E)
         |.\-E  ()
-        \\-B    ()
+        \-B    ()
         """
         stack = LayerStack()
         stack.on_changed = lambda: None
@@ -342,14 +319,14 @@ class TestNestedLayerCaching:
 
     def test_prefix_below_second_child(self):
         stack, A, B, C, D, E = self._make_tree_stack()
-        # prefix(D) = (E) — should contain E's contribution
+        # prefix(D) = (E) -- should contain E's contribution
         prefix_D = stack.get_prefix_below(D)
         assert prefix_D is not None
         assert prefix_D[0, 0, 3] > 0  # not empty
 
     def test_prefix_below_parent_includes_external(self):
         stack, A, B, C, D, E = self._make_tree_stack()
-        # prefix(C) = (B, E, D) — includes B (external) + children
+        # prefix(C) = (B, E, D) -- includes B (external) + children
         prefix_C = stack.get_prefix_below(C)
         assert prefix_C is not None
         # Should include red from B
@@ -368,17 +345,6 @@ class TestNestedLayerCaching:
         # Should not be transparent (has visible layers)
         assert result[0, 0, 3] > 0
 
-    def test_nested_cache_is_saved_explicitly(self):
-        stack, A, B, C, D, E = self._make_tree_stack()
-        stack.composite()
-
-        assert hasattr(stack, "_nested")
-        assert stack._nested[C] is not None  # C has children -> nested cache stored
-        assert stack._nested[A] is not None  # A has child C -> nested cache stored
-        assert stack._nested[B] is None  # no children
-        assert stack._nested[D] is None  # no children
-        assert stack._nested[E] is None  # no children
-
 
 class TestNestedDirtyPropagation:
     def _make_simple_tree(self):
@@ -395,21 +361,6 @@ class TestNestedDirtyPropagation:
         stack._rebuild_caches()
         return stack, A, B, C
 
-    def test_dirty_child_propagates_to_parent(self):
-        stack, A, B, C = self._make_simple_tree()
-        stack.composite()
-        assert len(stack._dirty) == 0
-        assert len(stack._nested_dirty) == 0
-        stack.mark_layer_dirty(C)
-        # C, A should be dirty (C is child of A)
-        assert C in stack._dirty
-        assert A in stack._dirty
-        assert C in stack._nested_dirty
-        assert A in stack._nested_dirty
-        # B should remain clean
-        assert B not in stack._dirty
-        assert B not in stack._nested_dirty
-
     def test_dirty_child_recomputes_correctly(self):
         stack, A, B, C = self._make_simple_tree()
         before = stack.composite().copy()
@@ -420,15 +371,22 @@ class TestNestedDirtyPropagation:
         # Result should change
         assert not np.array_equal(before, after)
 
-    def test_dirty_child_clears_parent_nested_cache(self):
+    def test_dirty_parent_recomputes(self):
         stack, A, B, C = self._make_simple_tree()
-        stack.composite()
-        assert stack._nested[A] is not None
+        before = stack.composite().copy()
+        A.image[:] = _solid_image(4, 4, 255, 0, 255, 255)
+        stack.mark_layer_dirty(A)
+        after = stack.composite()
+        assert not np.array_equal(before, after)
 
-        stack.mark_layer_dirty(C)
-
-        assert stack._nested[C] is None
-        assert stack._nested[A] is None
+    def test_dirty_bottom_does_not_affect_nothing_below(self):
+        stack, A, B, C = self._make_simple_tree()
+        before = stack.composite().copy()
+        # Modify B and mark dirty
+        B.image[:] = _solid_image(4, 4, 0, 0, 255, 255)
+        stack.mark_layer_dirty(B)
+        after = stack.composite()
+        assert not np.array_equal(before, after)
 
 
 class TestSubtreeOpacity:
@@ -448,7 +406,7 @@ class TestSubtreeOpacity:
         # With A.opacity = 1.0
         r1 = stack.composite().copy()
 
-        # With A.opacity = 0.0 — children should also disappear
+        # With A.opacity = 0.0 -- children should also disappear
         stack.set_opacity(A, 0.0)
         r2 = stack.composite()
         assert r2[0, 0, 3] == 0  # fully transparent
@@ -473,7 +431,7 @@ class TestDeepNesting:
         assert result[0, 0, 3] > 0
 
         # prefix(leaf) = external context only (no previous, no children).
-        # External context = root's Прошлый = None (root is first root layer).
+        # External context = root's previous = None (root is first root layer).
         # So prefix(leaf) is empty.
         prefix_leaf = stack.get_prefix_below(leaf)
         assert prefix_leaf is not None
@@ -484,3 +442,27 @@ class TestDeepNesting:
         prefix_mid = stack.get_prefix_below(mid)
         assert prefix_mid is not None
         assert prefix_mid[0, 0, 3] > 0  # includes leaf
+
+
+# ---------- get_prefix_below_rect ----------
+
+
+class TestPrefixBelowRect:
+    def test_rect_matches_full_prefix(self):
+        stack = _make_stack(3, w=64, h=64)
+        top = stack.layers[0]
+        full = stack.get_prefix_below(top)
+        rect = stack.get_prefix_below_rect(top, 10, 10, 50, 50)
+        np.testing.assert_array_equal(rect, full[10:50, 10:50])
+
+    def test_rect_empty_region(self):
+        stack = _make_stack(3, w=64, h=64)
+        top = stack.layers[0]
+        rect = stack.get_prefix_below_rect(top, 30, 30, 30, 30)
+        assert rect.shape[0] == 0
+
+    def test_rect_clamped_to_bounds(self):
+        stack = _make_stack(3, w=64, h=64)
+        top = stack.layers[0]
+        rect = stack.get_prefix_below_rect(top, -10, -10, 70, 70)
+        assert rect.shape == (64, 64, 4)
