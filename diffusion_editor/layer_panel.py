@@ -20,6 +20,7 @@ class LayerPanel(VStack):
         self._layer_stack = layer_stack
         self._id_to_layer: dict[int, Layer] = {}
         self._layer_to_node: dict[int, TreeNode] = {}
+        self._node_to_layer: dict[int, Layer] = {}
         self._updating = False
         self.spacing = 6
         self.preferred_width = px(220)
@@ -28,6 +29,11 @@ class LayerPanel(VStack):
         self.on_create_diffusion: callable = None
         self.on_create_lama: callable = None
         self.on_create_instruct: callable = None
+        self.on_add_layer: callable = None
+        self.on_remove_layer: callable = None
+        self.on_flatten_layers: callable = None
+        self.on_move_layer: callable = None  # (layer, new_parent, index)
+        self.on_toggle_visibility: callable = None  # (layer, visible)
 
         # Tree widget (stretch to fill remaining space)
         self._tree = TreeWidget()
@@ -91,6 +97,7 @@ class LayerPanel(VStack):
         self._updating = True
         self._id_to_layer.clear()
         self._layer_to_node.clear()
+        self._node_to_layer.clear()
 
         # Remove all roots
         self._tree.root_nodes.clear()
@@ -131,7 +138,10 @@ class LayerPanel(VStack):
         def _make_vis_handler(ly):
             def handler(checked):
                 if not self._updating:
-                    self._layer_stack.set_visibility(ly, checked)
+                    if self.on_toggle_visibility:
+                        self.on_toggle_visibility(ly, checked)
+                    else:
+                        self._layer_stack.set_visibility(ly, checked)
             return handler
         vis_cb.on_changed = _make_vis_handler(layer)
         row.add_child(vis_cb)
@@ -147,8 +157,7 @@ class LayerPanel(VStack):
 
         self._id_to_layer[id(layer)] = layer
         self._layer_to_node[id(layer)] = node
-        # Store layer ref on node for easy lookup
-        node._layer_ref = layer
+        self._node_to_layer[id(node)] = layer
 
         for child in layer.children:
             child_node = self._create_node(child)
@@ -157,7 +166,7 @@ class LayerPanel(VStack):
         return node
 
     def _layer_from_node(self, node: TreeNode) -> Layer | None:
-        return getattr(node, '_layer_ref', None)
+        return self._node_to_layer.get(id(node))
 
     # ------------------------------------------------------------------
     # Tree callbacks
@@ -188,33 +197,54 @@ class LayerPanel(VStack):
                 return
 
         if position == "inside" and target_layer is not None:
-            self._layer_stack.move_layer(dragged_layer, target_layer, 0)
+            if self.on_move_layer:
+                self.on_move_layer(dragged_layer, target_layer, 0)
+            else:
+                self._layer_stack.move_layer(dragged_layer, target_layer, 0)
         elif position == "above" and target_layer is not None:
             parent = target_layer.parent
             siblings = parent.children if parent else self._layer_stack._layers
             idx = siblings.index(target_layer) if target_layer in siblings else 0
-            self._layer_stack.move_layer(dragged_layer, parent, idx)
+            if self.on_move_layer:
+                self.on_move_layer(dragged_layer, parent, idx)
+            else:
+                self._layer_stack.move_layer(dragged_layer, parent, idx)
         elif position == "below" and target_layer is not None:
             parent = target_layer.parent
             siblings = parent.children if parent else self._layer_stack._layers
             idx = siblings.index(target_layer) + 1 if target_layer in siblings else len(siblings)
-            self._layer_stack.move_layer(dragged_layer, parent, idx)
+            if self.on_move_layer:
+                self.on_move_layer(dragged_layer, parent, idx)
+            else:
+                self._layer_stack.move_layer(dragged_layer, parent, idx)
         else:
             # root
             n = len(self._layer_stack._layers)
-            self._layer_stack.move_layer(dragged_layer, None, n)
+            if self.on_move_layer:
+                self.on_move_layer(dragged_layer, None, n)
+            else:
+                self._layer_stack.move_layer(dragged_layer, None, n)
 
     # ------------------------------------------------------------------
     # Button handlers
     # ------------------------------------------------------------------
 
     def _on_add(self):
-        self._layer_stack.add_layer(self._layer_stack.next_name("Layer"))
+        if self.on_add_layer:
+            self.on_add_layer()
+        else:
+            self._layer_stack.add_layer(self._layer_stack.next_name("Layer"))
 
     def _on_remove(self):
         layer = self._layer_stack.active_layer
         if layer is not None:
-            self._layer_stack.remove_layer(layer)
+            if self.on_remove_layer:
+                self.on_remove_layer(layer)
+            else:
+                self._layer_stack.remove_layer(layer)
 
     def _on_flatten(self):
-        self._layer_stack.flatten()
+        if self.on_flatten_layers:
+            self.on_flatten_layers()
+        else:
+            self._layer_stack.flatten()

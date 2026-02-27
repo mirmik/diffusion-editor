@@ -47,15 +47,11 @@ class Layer:
 
     @property
     def width(self):
-        if hasattr(self, "content"):
-            return self.content.width
-        return self.image.shape[1]
+        return self.content.width
 
     @property
     def height(self):
-        if hasattr(self, "content"):
-            return self.content.height
-        return self.image.shape[0]
+        return self.content.height
 
     def to_dict(self, path: str) -> dict:
         file_key = path.replace("/", "_")
