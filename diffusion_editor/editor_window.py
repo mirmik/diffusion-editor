@@ -130,7 +130,7 @@ class EditorWindow:
         main_area.add_child(Splitter(target=self._left_container, side="left"))
 
         # Canvas (center, stretches to fill remaining space)
-        self._canvas = EditorCanvas(self._layer_stack)
+        self._canvas = EditorCanvas(self._layer_stack, graphics=graphics)
         self._canvas.stretch = True
         # Give brush reference now
         self._brush_panel._brush = self._canvas.brush
