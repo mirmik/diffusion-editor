@@ -41,6 +41,11 @@ from .diffusion_brush import extract_patch, extract_mask_patch, paste_result
 from .file_dialog import open_file_dialog, save_file_dialog
 from .settings import Settings
 from .history import HistoryManager
+from .document_service import (
+    DocumentService, AddLayerCommand, InsertLayerCommand,
+    RemoveLayerCommand, MoveLayerCommand, SetLayerVisibilityCommand,
+    SetLayerOpacityCommand, FlattenLayersCommand, SnapshotCallbackCommand,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +89,11 @@ class EditorWindow:
         self._history = HistoryManager(
             self._apply_snapshot,
             max_memory_bytes=self._history_memory_limit_bytes,
+        )
+        self._document = DocumentService(
+            self._layer_stack,
+            self._history,
+            self._apply_snapshot,
         )
 
         # Build UI
@@ -331,7 +341,7 @@ class EditorWindow:
     def _set_history_memory_limit_bytes(self, limit_bytes: int) -> None:
         limit_bytes = max(int(limit_bytes), int(_MIN_HISTORY_MEMORY_LIMIT_GIB * _BYTES_PER_GIB))
         self._history_memory_limit_bytes = limit_bytes
-        self._history.set_max_memory_bytes(limit_bytes)
+        self._document.set_history_memory_limit_bytes(limit_bytes)
         self._settings.set("history_memory_limit_bytes", limit_bytes)
 
     def _show_settings_dialog(self):
@@ -378,7 +388,7 @@ class EditorWindow:
         self.ui.set_focus(limit_input)
 
     def _memory_status(self) -> str:
-        hist = self._history.memory_bytes()
+        hist = self._document.memory_bytes()
         cache = self._layer_stack._renderer.cache_memory_bytes()
         return f"Hist:{self._fmt_bytes(hist)} Cache:{self._fmt_bytes(cache)}"
 
@@ -411,26 +421,17 @@ class EditorWindow:
             self._history_replaying = False
             self._external_edit_ctx = None
 
-    def _record_action(self, label: str, action):
-        if self._history_replaying:
-            action()
-            return
-        before = self._layer_stack.serialize_state()
-        action()
-        after = self._layer_stack.serialize_state()
-        self._history.push(label, before, after)
-
     def _clear_history(self):
-        self._history.clear()
+        self._document.clear_history()
         self._external_edit_ctx = None
 
     def undo(self):
-        label = self._history.undo()
+        label = self._document.undo()
         if label is not None:
             self._statusbar.text = f"Undo: {label}"
 
     def redo(self):
-        label = self._history.redo()
+        label = self._document.redo()
         if label is not None:
             self._statusbar.text = f"Redo: {label}"
 
@@ -505,7 +506,7 @@ class EditorWindow:
             return
         rect = (x0, y0, x1, y1)
         label = ctx.label
-        self._history.push_callbacks(
+        self._document.push_callbacks(
             label=label,
             undo_fn=lambda: self._apply_layer_patch(layer_path, target, rect, before_patch),
             redo_fn=lambda: self._apply_layer_patch(layer_path, target, rect, after_patch),
@@ -579,10 +580,9 @@ class EditorWindow:
         self._project_path = None
 
     def _new_layer(self):
-        self._record_action(
-            "New Layer",
-            lambda: self._layer_stack.add_layer(self._layer_stack.next_name("Layer")),
-        )
+        self._document.execute(AddLayerCommand(
+            name=self._layer_stack.next_name("Layer"),
+        ))
 
     def _remove_layer(self, layer=None):
         if layer is None:
@@ -592,7 +592,7 @@ class EditorWindow:
 
         def _on_result(btn: str):
             if btn == "Yes":
-                self._record_action("Remove Layer", lambda: self._layer_stack.remove_layer(layer))
+                self._document.execute(RemoveLayerCommand(layer=layer))
 
         MessageBox.question(
             self.ui,
@@ -603,25 +603,26 @@ class EditorWindow:
         )
 
     def _flatten_layers(self):
-        self._record_action("Flatten Layers", self._layer_stack.flatten)
+        self._document.execute(FlattenLayersCommand())
 
     def _move_layer(self, layer: Layer, new_parent: Layer | None, index: int):
-        self._record_action(
-            "Move Layer",
-            lambda: self._layer_stack.move_layer(layer, new_parent, index),
-        )
+        self._document.execute(MoveLayerCommand(
+            layer=layer,
+            new_parent=new_parent,
+            index=index,
+        ))
 
     def _set_layer_visibility(self, layer: Layer, visible: bool):
-        self._record_action(
-            "Toggle Visibility",
-            lambda: self._layer_stack.set_visibility(layer, visible),
-        )
+        self._document.execute(SetLayerVisibilityCommand(
+            layer=layer,
+            visible=visible,
+        ))
 
     def _set_layer_opacity(self, layer: Layer, opacity: float):
-        self._record_action(
-            "Set Opacity",
-            lambda: self._layer_stack.set_opacity(layer, opacity),
-        )
+        self._document.execute(SetLayerOpacityCommand(
+            layer=layer,
+            opacity=opacity,
+        ))
 
     def save_file(self):
         if self._project_path:
@@ -723,12 +724,18 @@ class EditorWindow:
             mode=mode,
             tile_size=self._layer_stack.tile_size,
         )
-        self._record_action("Create Diffusion Layer", lambda: self._layer_stack.insert_layer(dl))
+        self._document.execute(InsertLayerCommand(
+            layer=dl,
+            label="Create Diffusion Layer",
+        ))
 
     def _on_clear_mask(self):
         layer = self._layer_stack.active_layer
         if isinstance(layer, DiffusionLayer):
-            self._record_action("Clear Diffusion Mask", lambda: self._clear_layer_mask(layer))
+            self._document.execute(SnapshotCallbackCommand(
+                label="Clear Diffusion Mask",
+                apply_fn=lambda _stack: self._clear_layer_mask(layer),
+            ))
 
     def _sync_panel_to_layer(self, layer: DiffusionLayer):
         layer.prompt = self._diffusion_panel.prompt
@@ -877,7 +884,10 @@ class EditorWindow:
             def _action():
                 layer.ip_adapter_rect = (x0, y0, x1, y1)
                 self._diffusion_panel.show_diffusion_layer(layer)
-            self._record_action("Set IP-Adapter Rect", _action)
+            self._document.execute(SnapshotCallbackCommand(
+                label="Set IP-Adapter Rect",
+                apply_fn=lambda _stack: _action(),
+            ))
 
     def _on_clear_ref_rect(self):
         layer = self._layer_stack.active_layer
@@ -885,7 +895,10 @@ class EditorWindow:
             def _action():
                 layer.ip_adapter_rect = None
                 self._diffusion_panel.show_diffusion_layer(layer)
-            self._record_action("Clear IP-Adapter Rect", _action)
+            self._document.execute(SnapshotCallbackCommand(
+                label="Clear IP-Adapter Rect",
+                apply_fn=lambda _stack: _action(),
+            ))
 
     def _on_patch_rect_drawn(self, x0, y0, x1, y1):
         layer = self._layer_stack.active_layer
@@ -894,13 +907,19 @@ class EditorWindow:
                 layer.manual_patch_rect = (x0, y0, x1, y1)
                 self._diffusion_panel._draw_patch_cb.checked = False
                 self._diffusion_panel.show_diffusion_layer(layer)
-            self._record_action("Set Diffusion Patch Rect", _action)
+            self._document.execute(SnapshotCallbackCommand(
+                label="Set Diffusion Patch Rect",
+                apply_fn=lambda _stack: _action(),
+            ))
         elif isinstance(layer, InstructLayer):
             def _action():
                 layer.manual_patch_rect = (x0, y0, x1, y1)
                 self._instruct_panel._draw_patch_cb.checked = False
                 self._instruct_panel.show_instruct_layer(layer)
-            self._record_action("Set Instruct Patch Rect", _action)
+            self._document.execute(SnapshotCallbackCommand(
+                label="Set Instruct Patch Rect",
+                apply_fn=lambda _stack: _action(),
+            ))
 
     def _on_clear_patch_rect(self):
         layer = self._layer_stack.active_layer
@@ -908,7 +927,10 @@ class EditorWindow:
             def _action():
                 layer.manual_patch_rect = None
                 self._diffusion_panel.show_diffusion_layer(layer)
-            self._record_action("Clear Diffusion Patch Rect", _action)
+            self._document.execute(SnapshotCallbackCommand(
+                label="Clear Diffusion Patch Rect",
+                apply_fn=lambda _stack: _action(),
+            ))
 
     # ------------------------------------------------------------------
     # LaMa
@@ -928,7 +950,10 @@ class EditorWindow:
             patch_x=ppx, patch_y=ppy, patch_w=pw, patch_h=ph,
             tile_size=self._layer_stack.tile_size,
         )
-        self._record_action("Create LaMa Layer", lambda: self._layer_stack.insert_layer(ll))
+        self._document.execute(InsertLayerCommand(
+            layer=ll,
+            label="Create LaMa Layer",
+        ))
 
     def _on_lama_remove(self):
         layer = self._layer_stack.active_layer
@@ -962,7 +987,10 @@ class EditorWindow:
     def _on_lama_clear_mask(self):
         layer = self._layer_stack.active_layer
         if isinstance(layer, LamaLayer):
-            self._record_action("Clear LaMa Mask", lambda: self._clear_layer_mask(layer))
+            self._document.execute(SnapshotCallbackCommand(
+                label="Clear LaMa Mask",
+                apply_fn=lambda _stack: self._clear_layer_mask(layer),
+            ))
 
     def _on_lama_select_background(self):
         layer = self._layer_stack.active_layer
@@ -1003,7 +1031,10 @@ class EditorWindow:
             seed=seed,
             tile_size=self._layer_stack.tile_size,
         )
-        self._record_action("Create Instruct Layer", lambda: self._layer_stack.insert_layer(il))
+        self._document.execute(InsertLayerCommand(
+            layer=il,
+            label="Create Instruct Layer",
+        ))
 
     def _on_instruct_load_model(self):
         if self._instruct_engine.is_busy:
@@ -1090,7 +1121,10 @@ class EditorWindow:
     def _on_instruct_clear_mask(self):
         layer = self._layer_stack.active_layer
         if isinstance(layer, InstructLayer):
-            self._record_action("Clear Instruct Mask", lambda: self._clear_layer_mask(layer))
+            self._document.execute(SnapshotCallbackCommand(
+                label="Clear Instruct Mask",
+                apply_fn=lambda _stack: self._clear_layer_mask(layer),
+            ))
 
     def _on_instruct_clear_patch_rect(self):
         layer = self._layer_stack.active_layer
@@ -1098,7 +1132,10 @@ class EditorWindow:
             def _action():
                 layer.manual_patch_rect = None
                 self._instruct_panel.show_instruct_layer(layer)
-            self._record_action("Clear Instruct Patch Rect", _action)
+            self._document.execute(SnapshotCallbackCommand(
+                label="Clear Instruct Patch Rect",
+                apply_fn=lambda _stack: _action(),
+            ))
 
     # ------------------------------------------------------------------
     # Segmentation
@@ -1135,7 +1172,10 @@ class EditorWindow:
                     layer.mask = seg_mask.copy()
                     if self._layer_stack.on_changed:
                         self._layer_stack.on_changed()
-                self._record_action("Apply Segmentation Mask", _action)
+                self._document.execute(SnapshotCallbackCommand(
+                    label="Apply Segmentation Mask",
+                    apply_fn=lambda _stack: _action(),
+                ))
             self._statusbar.text = "Background mask applied"
         elif seg_error is not None:
             logger.error("Segmentation error: %s", seg_error)
@@ -1163,7 +1203,10 @@ class EditorWindow:
                     if self._layer_stack.on_changed:
                         self._layer_stack.on_changed()
                     self._lama_panel.show_lama_layer(layer)
-                self._record_action("Apply LaMa Result", _action)
+                self._document.execute(SnapshotCallbackCommand(
+                    label="Apply LaMa Result",
+                    apply_fn=lambda _stack: _action(),
+                ))
                 self._statusbar.text = "Objects removed (LaMa)"
             self._pending_lama_layer = None
         elif lama_error is not None:
@@ -1212,7 +1255,10 @@ class EditorWindow:
                     if self._layer_stack.on_changed:
                         self._layer_stack.on_changed()
                     self._instruct_panel.show_instruct_layer(layer)
-                self._record_action("Apply Instruct Result", _action)
+                self._document.execute(SnapshotCallbackCommand(
+                    label="Apply Instruct Result",
+                    apply_fn=lambda _stack: _action(),
+                ))
                 self._statusbar.text = f"Instruction applied (seed={used_seed})"
             self._pending_instruct_layer = None
 
@@ -1278,7 +1324,10 @@ class EditorWindow:
                     if self._layer_stack.on_changed:
                         self._layer_stack.on_changed()
                     self._diffusion_panel.show_diffusion_layer(dl)
-                self._record_action("Apply Diffusion Result", _action)
+                self._document.execute(SnapshotCallbackCommand(
+                    label="Apply Diffusion Result",
+                    apply_fn=lambda _stack: _action(),
+                ))
                 self._statusbar.text = f"Regenerated (seed={used_seed})"
             self._pending_request = None
 
