@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import logging
-
 import numpy as np
+from tcbase import log
 
 from .layer_stack import LayerStack
 from .layer import Layer
-
-logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # GLSL sources
@@ -159,7 +156,7 @@ class GPUCompositor:
 
         float_data = self._graphics.read_color_buffer_float(self._display_fbo)
         if float_data is None:
-            logger.error("GPUCompositor.readback: read_color_buffer_float returned None")
+            log.error("GPUCompositor.readback: read_color_buffer_float returned None")
             h, w = self._fbo_h, self._fbo_w
             return np.zeros((h, w, 4), dtype=np.uint8)
 

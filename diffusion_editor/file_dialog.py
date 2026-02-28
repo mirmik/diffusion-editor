@@ -2,6 +2,7 @@
 
 import tkinter as tk
 from tkinter import filedialog
+from tcbase import log
 
 
 def _ensure_root():
@@ -13,7 +14,7 @@ def _ensure_root():
             root.withdraw()
         return root
     except Exception as e:
-        print(f"[FileDialog] tkinter root init fallback: {e}")
+        log.warn(f"[FileDialog] tkinter root init fallback: {e}")
         root = tk.Tk()
         root.withdraw()
         return root
