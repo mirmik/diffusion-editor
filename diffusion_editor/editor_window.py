@@ -302,10 +302,10 @@ class EditorWindow:
         self.ui.add_shortcut_from_string("Ctrl+N", self.new_project)
         self.ui.add_shortcut_from_string("Ctrl+S", self.save_file)
         self.ui.add_shortcut_from_string("Ctrl+Q", self._quit)
-        self.ui.add_shortcut_from_string("Ctrl+O", lambda: self.ui.defer(self.open_file))
-        self.ui.add_shortcut_from_string("Ctrl+Shift+S", lambda: self.ui.defer(self.save_file_as))
-        self.ui.add_shortcut_from_string("Ctrl+I", lambda: self.ui.defer(self.import_image))
-        self.ui.add_shortcut_from_string("Ctrl+E", lambda: self.ui.defer(self.export_image))
+        self.ui.add_shortcut_from_string("Ctrl+O", self.open_file)
+        self.ui.add_shortcut_from_string("Ctrl+Shift+S", self.save_file_as)
+        self.ui.add_shortcut_from_string("Ctrl+I", self.import_image)
+        self.ui.add_shortcut_from_string("Ctrl+E", self.export_image)
 
         # Edit shortcuts
         self.ui.add_shortcut_from_string("Ctrl+Z", self.undo)

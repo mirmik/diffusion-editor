@@ -72,7 +72,31 @@ _KEY_MAP = {
 def translate_key(scancode: int) -> int:
     if scancode in _KEY_MAP:
         return _KEY_MAP[scancode]
+
+    # Letters: SDL scancodes are layout-independent; map directly to A..Z.
+    if sdl2.SDL_SCANCODE_A <= scancode <= sdl2.SDL_SCANCODE_Z:
+        return Key(Key.A + (scancode - sdl2.SDL_SCANCODE_A))
+
+    # Digits row.
+    digit_map = {
+        sdl2.SDL_SCANCODE_0: Key.KEY_0,
+        sdl2.SDL_SCANCODE_1: Key.KEY_1,
+        sdl2.SDL_SCANCODE_2: Key.KEY_2,
+        sdl2.SDL_SCANCODE_3: Key.KEY_3,
+        sdl2.SDL_SCANCODE_4: Key.KEY_4,
+        sdl2.SDL_SCANCODE_5: Key.KEY_5,
+        sdl2.SDL_SCANCODE_6: Key.KEY_6,
+        sdl2.SDL_SCANCODE_7: Key.KEY_7,
+        sdl2.SDL_SCANCODE_8: Key.KEY_8,
+        sdl2.SDL_SCANCODE_9: Key.KEY_9,
+    }
+    if scancode in digit_map:
+        return digit_map[scancode]
+
     keycode = sdl2.SDL_GetKeyFromScancode(scancode)
+    # SDL keycodes for letters are lowercase ASCII; normalize to uppercase.
+    if 97 <= keycode <= 122:
+        keycode -= 32
     if 0 <= keycode < 128:
         try:
             return Key(keycode)
@@ -194,6 +218,8 @@ def main():
                 dispatch(event)
                 while sdl2.SDL_PollEvent(ctypes.byref(event)) != 0:
                     dispatch(event)
+
+            ui.process_deferred()
 
             if not editor.running:
                 break
