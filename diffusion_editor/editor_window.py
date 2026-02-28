@@ -110,6 +110,7 @@ class EditorWindow:
 
         # Wire callbacks
         self._wire_callbacks()
+        self._register_shortcuts()
 
     # ------------------------------------------------------------------
     # UI Construction
@@ -292,6 +293,27 @@ class EditorWindow:
         self._instruct_panel.on_show_mask_toggled = self._canvas.set_show_mask
         self._instruct_panel.on_draw_patch_toggled = self._canvas.set_patch_rect_mode
         self._instruct_panel.on_clear_patch = self._on_instruct_clear_patch_rect
+
+    def _register_shortcuts(self):
+        if self.ui is None:
+            return
+
+        # File shortcuts
+        self.ui.add_shortcut_from_string("Ctrl+N", self.new_project)
+        self.ui.add_shortcut_from_string("Ctrl+S", self.save_file)
+        self.ui.add_shortcut_from_string("Ctrl+Q", self._quit)
+        self.ui.add_shortcut_from_string("Ctrl+O", lambda: self.ui.defer(self.open_file))
+        self.ui.add_shortcut_from_string("Ctrl+Shift+S", lambda: self.ui.defer(self.save_file_as))
+        self.ui.add_shortcut_from_string("Ctrl+I", lambda: self.ui.defer(self.import_image))
+        self.ui.add_shortcut_from_string("Ctrl+E", lambda: self.ui.defer(self.export_image))
+
+        # Edit shortcuts
+        self.ui.add_shortcut_from_string("Ctrl+Z", self.undo)
+        self.ui.add_shortcut_from_string("Ctrl+Shift+Z", self.redo)
+        self.ui.add_shortcut_from_string("Ctrl+Y", self.redo)
+
+        # Layer shortcuts
+        self.ui.add_shortcut_from_string("Ctrl+Shift+N", self._new_layer)
 
     # ------------------------------------------------------------------
     # Panel switching
