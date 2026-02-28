@@ -102,6 +102,13 @@ class EditorCanvas(Canvas):
         if self._gpu_compositing and self._gpu_compositor:
             self._gpu_compositor.composite()
             self._composite_stale = True
+            # Keep Canvas.image_size in sync for fit/zoom math in GPU path.
+            w, h = self._layer_stack.width, self._layer_stack.height
+            if w > 0 and h > 0:
+                if self._image_data is None or self._image_data.shape[:2] != (h, w):
+                    self._image_data = np.empty((h, w, 4), dtype=np.uint8)
+            else:
+                self._image_data = None
         else:
             self._composite = np.ascontiguousarray(
                 self._layer_stack.composite())
@@ -847,11 +854,12 @@ class EditorCanvas(Canvas):
                     self._image_texture = gpu_tex
                     self._image_dirty = False
                     # Provide image_size info for Canvas.render() viewport math
-                    if self._image_data is None:
-                        w, h = self._layer_stack.width, self._layer_stack.height
-                        if w > 0 and h > 0:
-                            self._image_data = np.empty(
-                                (h, w, 4), dtype=np.uint8)
+                    w, h = self._layer_stack.width, self._layer_stack.height
+                    if w > 0 and h > 0:
+                        if self._image_data is None or self._image_data.shape[:2] != (h, w):
+                            self._image_data = np.empty((h, w, 4), dtype=np.uint8)
+                    else:
+                        self._image_data = None
         super().render(renderer)
 
     # ------------------------------------------------------------------

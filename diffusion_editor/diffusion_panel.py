@@ -18,7 +18,7 @@ from tcgui.widgets.text_input import TextInput
 from tcgui.widgets.slider_edit import SliderEdit
 from tcgui.widgets.units import px, pct
 
-MODELS_DIR = os.path.expanduser(
+DEFAULT_MODELS_DIR = os.path.expanduser(
     "~/soft/stable-diffusion-webui-forge/models/Stable-diffusion/"
 )
 
@@ -27,6 +27,7 @@ class DiffusionPanel(ScrollArea):
     def __init__(self):
         super().__init__()
         self.preferred_width = px(280)
+        self._models_dir = DEFAULT_MODELS_DIR
 
         # Callbacks
         self.on_load_model: callable = None       # (path, prediction_type)
@@ -360,16 +361,39 @@ class DiffusionPanel(ScrollArea):
     # Model scanning
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def default_models_dir() -> str:
+        return DEFAULT_MODELS_DIR
+
+    @property
+    def models_dir(self) -> str:
+        return self._models_dir
+
+    def set_models_dir(self, models_dir: str):
+        self._models_dir = os.path.expanduser(models_dir.strip())
+        self._scan_models()
+
     def _scan_models(self):
+        prev_path = None
+        idx = self._model_combo.selected_index
+        if hasattr(self, "_model_paths") and 0 <= idx < len(self._model_paths):
+            prev_path = self._model_paths[idx]
+
         self._model_paths: list[str] = []
         names = []
-        if os.path.isdir(MODELS_DIR):
-            for f in sorted(os.listdir(MODELS_DIR)):
+        if os.path.isdir(self._models_dir):
+            for f in sorted(os.listdir(self._models_dir)):
                 if f.endswith(".safetensors") and "flux" not in f.lower():
                     names.append(f)
-                    self._model_paths.append(os.path.join(MODELS_DIR, f))
+                    self._model_paths.append(os.path.join(self._models_dir, f))
         self._model_combo.items = names
-        if names:
+        if not names:
+            self._model_combo.selected_index = -1
+            return
+
+        if prev_path and prev_path in self._model_paths:
+            self._model_combo.selected_index = self._model_paths.index(prev_path)
+        else:
             self._model_combo.selected_index = 0
 
     def _on_load(self):

@@ -54,3 +54,14 @@ def save_file_dialog(title: str = "Save", directory: str = "",
         filetypes=_parse_filters(filter_str),
     )
     return path if path else None
+
+
+def open_directory_dialog(title: str = "Select Directory",
+                          directory: str = "") -> str | None:
+    _ensure_root()
+    path = filedialog.askdirectory(
+        title=title,
+        initialdir=directory or None,
+        mustexist=True,
+    )
+    return path if path else None

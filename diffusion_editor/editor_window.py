@@ -15,6 +15,7 @@ from tcgui.widgets.vstack import VStack
 from tcgui.widgets.hstack import HStack
 from tcgui.widgets.panel import Panel
 from tcgui.widgets.label import Label
+from tcgui.widgets.button import Button
 from tcgui.widgets.menu_bar import MenuBar
 from tcgui.widgets.menu import MenuItem, Menu
 from tcgui.widgets.tool_bar import ToolBar
@@ -22,6 +23,7 @@ from tcgui.widgets.status_bar import StatusBar
 from tcgui.widgets.message_box import MessageBox, Buttons
 from tcgui.widgets.dialog import Dialog
 from tcgui.widgets.spin_box import SpinBox
+from tcgui.widgets.text_input import TextInput
 from tcgui.widgets.units import px, pct
 from tcgui.widgets.splitter import Splitter
 
@@ -38,7 +40,7 @@ from .lama_engine import LamaEngine
 from .instruct_engine import InstructEngine
 from .segmentation import SegmentationEngine
 from .diffusion_brush import extract_patch, extract_mask_patch
-from .file_dialog import open_file_dialog, save_file_dialog
+from .file_dialog import open_file_dialog, save_file_dialog, open_directory_dialog
 from .settings import Settings
 from .history import HistoryManager
 from .document_service import DocumentService
@@ -78,6 +80,7 @@ class EditorWindow:
         self._project_path: str | None = None
         self._last_dir: str = self._settings.get("last_dir", "")
         self._history_memory_limit_bytes = self._load_history_memory_limit_bytes()
+        self._models_dir = self._load_models_dir()
         self._pending_request = None
         self._pending_lama_layer = None
         self._pending_instruct_layer = None
@@ -144,6 +147,7 @@ class EditorWindow:
         # Create all panels (only one visible at a time, stretch to fill)
         self._brush_panel = BrushPanel(self._canvas_placeholder_brush())
         self._diffusion_panel = DiffusionPanel()
+        self._diffusion_panel.set_models_dir(self._models_dir)
         self._lama_panel = LamaPanel()
         self._instruct_panel = InstructPanel()
 
@@ -352,6 +356,23 @@ class EditorWindow:
         self._document.set_history_memory_limit_bytes(limit_bytes)
         self._settings.set("history_memory_limit_bytes", limit_bytes)
 
+    def _load_models_dir(self) -> str:
+        raw = self._settings.get("models_dir", DiffusionPanel.default_models_dir())
+        if not isinstance(raw, str):
+            return DiffusionPanel.default_models_dir()
+        value = os.path.expanduser(raw.strip())
+        if not value:
+            return DiffusionPanel.default_models_dir()
+        return value
+
+    def _set_models_dir(self, models_dir: str) -> None:
+        value = os.path.expanduser(models_dir.strip())
+        if not value:
+            value = DiffusionPanel.default_models_dir()
+        self._models_dir = value
+        self._diffusion_panel.set_models_dir(value)
+        self._settings.set("models_dir", value)
+
     def _show_settings_dialog(self):
         if self.ui is None:
             return
@@ -364,6 +385,36 @@ class EditorWindow:
 
         content = VStack()
         content.spacing = 8
+
+        models_title = Label()
+        models_title.text = "Stable Diffusion models directory"
+        content.add_child(models_title)
+
+        models_row = HStack()
+        models_row.spacing = 6
+
+        models_dir_input = TextInput()
+        models_dir_input.text = self._models_dir
+        models_dir_input.preferred_width = px(420)
+        models_row.add_child(models_dir_input)
+
+        browse_btn = Button()
+        browse_btn.text = "Browse..."
+        browse_btn.preferred_width = px(90)
+
+        def _browse_models_dir():
+            selected = open_directory_dialog(
+                title="Select models directory",
+                directory=models_dir_input.text or self._last_dir,
+            )
+            if selected:
+                models_dir_input.text = selected
+                self._last_dir = selected
+                self._settings.set("last_dir", self._last_dir)
+
+        browse_btn.on_click = _browse_models_dir
+        models_row.add_child(browse_btn)
+        content.add_child(models_row)
 
         title = Label()
         title.text = "Undo/Redo memory limit (GiB)"
@@ -387,9 +438,12 @@ class EditorWindow:
         def _apply(result: str):
             if result != "OK":
                 return
+            self._set_models_dir(models_dir_input.text)
             limit_bytes = int(limit_input.value * _BYTES_PER_GIB)
             self._set_history_memory_limit_bytes(limit_bytes)
-            self._statusbar.text = f"History limit: {limit_input.value:.2f} GiB"
+            self._statusbar.text = (
+                f"Saved settings: models dir, history limit {limit_input.value:.2f} GiB"
+            )
 
         dlg.on_result = _apply
         dlg.show(self.ui)
