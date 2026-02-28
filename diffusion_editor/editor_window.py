@@ -110,7 +110,7 @@ class EditorWindow:
 
         # Wire callbacks
         self._wire_callbacks()
-        self._register_shortcuts()
+        self._menu_bar.register_shortcuts(self.ui)
 
     # ------------------------------------------------------------------
     # UI Construction
@@ -294,27 +294,6 @@ class EditorWindow:
         self._instruct_panel.on_draw_patch_toggled = self._canvas.set_patch_rect_mode
         self._instruct_panel.on_clear_patch = self._on_instruct_clear_patch_rect
 
-    def _register_shortcuts(self):
-        if self.ui is None:
-            return
-
-        # File shortcuts
-        self.ui.add_shortcut_from_string("Ctrl+N", self.new_project)
-        self.ui.add_shortcut_from_string("Ctrl+S", self.save_file)
-        self.ui.add_shortcut_from_string("Ctrl+Q", self._quit)
-        self.ui.add_shortcut_from_string("Ctrl+O", self.open_file)
-        self.ui.add_shortcut_from_string("Ctrl+Shift+S", self.save_file_as)
-        self.ui.add_shortcut_from_string("Ctrl+I", self.import_image)
-        self.ui.add_shortcut_from_string("Ctrl+E", self.export_image)
-
-        # Edit shortcuts
-        self.ui.add_shortcut_from_string("Ctrl+Z", self.undo)
-        self.ui.add_shortcut_from_string("Ctrl+Shift+Z", self.redo)
-        self.ui.add_shortcut_from_string("Ctrl+Y", self.redo)
-
-        # Layer shortcuts
-        self.ui.add_shortcut_from_string("Ctrl+Shift+N", self._new_layer)
-
     # ------------------------------------------------------------------
     # Panel switching
     # ------------------------------------------------------------------
@@ -425,14 +404,16 @@ class EditorWindow:
         browse_btn.preferred_width = px(90)
 
         def _browse_models_dir():
-            selected = open_directory_dialog(
+            def _on_result(selected):
+                if selected:
+                    models_dir_input.text = selected
+                    self._last_dir = selected
+                    self._settings.set("last_dir", self._last_dir)
+            open_directory_dialog(
+                self.ui, _on_result,
                 title="Select models directory",
                 directory=models_dir_input.text or self._last_dir,
             )
-            if selected:
-                models_dir_input.text = selected
-                self._last_dir = selected
-                self._settings.set("last_dir", self._last_dir)
 
         browse_btn.on_click = _browse_models_dir
         models_row.add_child(browse_btn)
@@ -605,29 +586,33 @@ class EditorWindow:
         self._project_path = None
 
     def new_project_from_image(self):
-        path = open_file_dialog(
-            "New From Image", self._last_dir,
-            "Images | *.png *.jpg *.jpeg *.bmp *.tiff *.webp")
-        if not path:
-            return
-        self._last_dir = os.path.dirname(path)
-        self._settings.set("last_dir", self._last_dir)
-        img = Image.open(path).convert("RGBA")
-        arr = np.array(img, dtype=np.uint8)
-        self._layer_stack.init_from_image(arr)
-        self._clear_history()
-        self._canvas.fit_in_view()
-        self._project_path = None
+        def _on_result(path):
+            if not path:
+                return
+            self._last_dir = os.path.dirname(path)
+            self._settings.set("last_dir", self._last_dir)
+            img = Image.open(path).convert("RGBA")
+            arr = np.array(img, dtype=np.uint8)
+            self._layer_stack.init_from_image(arr)
+            self._clear_history()
+            self._canvas.fit_in_view()
+            self._project_path = None
+        open_file_dialog(
+            self.ui, _on_result,
+            title="New From Image", directory=self._last_dir,
+            filter_str="Images | *.png *.jpg *.jpeg *.bmp *.tiff *.webp")
 
     def open_file(self):
-        path = open_file_dialog(
-            "Open Project", self._last_dir,
-            "Diffusion Editor Project | *.deproj")
-        if not path:
-            return
-        self._last_dir = os.path.dirname(path)
-        self._settings.set("last_dir", self._last_dir)
-        self.open_file_path(path)
+        def _on_result(path):
+            if not path:
+                return
+            self._last_dir = os.path.dirname(path)
+            self._settings.set("last_dir", self._last_dir)
+            self.open_file_path(path)
+        open_file_dialog(
+            self.ui, _on_result,
+            title="Open Project", directory=self._last_dir,
+            filter_str="Diffusion Editor Project | *.deproj")
 
     def open_file_path(self, path: str):
         try:
@@ -641,14 +626,16 @@ class EditorWindow:
             self._statusbar.text = f"Open error: {e}"
 
     def import_image(self):
-        path = open_file_dialog(
-            "Import Image", self._last_dir,
-            "Images | *.png *.jpg *.jpeg *.bmp *.tiff *.webp")
-        if not path:
-            return
-        self._last_dir = os.path.dirname(path)
-        self._settings.set("last_dir", self._last_dir)
-        self.import_image_path(path)
+        def _on_result(path):
+            if not path:
+                return
+            self._last_dir = os.path.dirname(path)
+            self._settings.set("last_dir", self._last_dir)
+            self.import_image_path(path)
+        open_file_dialog(
+            self.ui, _on_result,
+            title="Import Image", directory=self._last_dir,
+            filter_str="Images | *.png *.jpg *.jpeg *.bmp *.tiff *.webp")
 
     def import_image_path(self, path: str):
         img = Image.open(path).convert("RGBA")
@@ -715,38 +702,47 @@ class EditorWindow:
             self.save_file_as()
 
     def save_file_as(self):
-        path = save_file_dialog(
-            "Save Project", self._last_dir,
-            "Diffusion Editor Project | *.deproj")
-        if not path:
-            return
-        if not path.lower().endswith(".deproj"):
-            path += ".deproj"
-        self._last_dir = os.path.dirname(path)
-        self._settings.set("last_dir", self._last_dir)
-        try:
-            self._layer_stack.save_project(path)
-            self._project_path = path
-            self._statusbar.text = f"Saved: {os.path.basename(path)}"
-        except Exception as e:
-            log.exception(f"Save project failed: {path}")
-            self._statusbar.text = f"Save error: {e}"
+        def _on_result(path):
+            if not path:
+                return
+            if not path.lower().endswith(".deproj"):
+                path += ".deproj"
+            self._last_dir = os.path.dirname(path)
+            self._settings.set("last_dir", self._last_dir)
+            try:
+                self._layer_stack.save_project(path)
+                self._project_path = path
+                self._statusbar.text = f"Saved: {os.path.basename(path)}"
+            except Exception as e:
+                log.exception(f"Save project failed: {path}")
+                self._statusbar.text = f"Save error: {e}"
+        save_file_dialog(
+            self.ui, _on_result,
+            title="Save Project", directory=self._last_dir,
+            filter_str="Diffusion Editor Project | *.deproj")
 
     def export_image(self):
-        path = save_file_dialog(
-            "Export Image", self._last_dir,
-            "PNG | *.png;;JPEG | *.jpg *.jpeg")
-        if not path:
-            return
-        self._last_dir = os.path.dirname(path)
-        self._settings.set("last_dir", self._last_dir)
-        arr = self._canvas.get_composite()
-        if arr is None:
-            return
-        img = Image.fromarray(arr, "RGBA")
-        if path.lower().endswith((".jpg", ".jpeg")):
-            img = img.convert("RGB")
-        img.save(path)
+        def _on_result(path):
+            if not path:
+                return
+            self._last_dir = os.path.dirname(path)
+            self._settings.set("last_dir", self._last_dir)
+            arr = self._canvas.get_composite()
+            if arr is None:
+                return
+            img = Image.fromarray(arr, "RGBA")
+            if path.lower().endswith((".jpg", ".jpeg")):
+                img = img.convert("RGB")
+            try:
+                img.save(path)
+                self._statusbar.text = f"Exported: {os.path.basename(path)}"
+            except Exception as e:
+                log.exception(f"Export image failed: {path}")
+                self._statusbar.text = f"Export error: {e}"
+        save_file_dialog(
+            self.ui, _on_result,
+            title="Export Image", directory=self._last_dir,
+            filter_str="PNG | *.png;;JPEG | *.jpg *.jpeg")
         self._statusbar.text = f"Exported: {path}"
 
     def _fit(self):
