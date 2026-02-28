@@ -477,6 +477,9 @@ class DiffusionPanel(ScrollArea):
     def on_ip_adapter_load_error(self, error: str):
         self._ip_status.text = f"Error: {error[:60]}"
 
+    def set_draw_patch_checked(self, value: bool):
+        self._draw_patch_cb.checked = value
+
     def show_diffusion_layer(self, layer):
         self._layer_group.visible = True
         self._prompt.text = layer.prompt

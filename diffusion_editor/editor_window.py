@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import logging
 import os
 import random
 
 import numpy as np
 from PIL import Image
+from tcbase import log
 
 from tcgui.widgets.ui import UI
 from tcgui.widgets.vstack import VStack
@@ -53,8 +53,6 @@ from .engine_result_mapper import (
     map_segmentation_result, map_lama_result,
     map_instruct_result, map_diffusion_result,
 )
-
-logger = logging.getLogger(__name__)
 
 _BYTES_PER_GIB = 1024 * 1024 * 1024
 _DEFAULT_HISTORY_MEMORY_LIMIT_BYTES = 5 * _BYTES_PER_GIB
@@ -322,7 +320,9 @@ class EditorWindow:
         for name, p in [("brush", self._brush_panel), ("diffusion", self._diffusion_panel),
                          ("lama", self._lama_panel), ("instruct", self._instruct_panel)]:
             if p.visible:
-                print(f"[panel] {name}: x={p.x:.0f} y={p.y:.0f} w={p.width:.0f} h={p.height:.0f}")
+                log.debug(
+                    f"[panel] {name}: x={p.x:.0f} y={p.y:.0f} w={p.width:.0f} h={p.height:.0f}"
+                )
 
     # ------------------------------------------------------------------
     # Status
@@ -561,7 +561,7 @@ class EditorWindow:
             self._project_path = path
             self._statusbar.text = f"Opened: {os.path.basename(path)}"
         except Exception as e:
-            logger.exception("Open project failed: %s", path)
+            log.exception(f"Open project failed: {path}")
             self._statusbar.text = f"Open error: {e}"
 
     def import_image(self):
@@ -633,7 +633,7 @@ class EditorWindow:
                 self._layer_stack.save_project(self._project_path)
                 self._statusbar.text = f"Saved: {self._project_path}"
             except Exception as e:
-                logger.exception("Save project failed: %s", self._project_path)
+                log.exception(f"Save project failed: {self._project_path}")
                 self._statusbar.text = f"Save error: {e}"
         else:
             self.save_file_as()
@@ -653,7 +653,7 @@ class EditorWindow:
             self._project_path = path
             self._statusbar.text = f"Saved: {os.path.basename(path)}"
         except Exception as e:
-            logger.exception("Save project failed: %s", path)
+            log.exception(f"Save project failed: {path}")
             self._statusbar.text = f"Save error: {e}"
 
     def export_image(self):
@@ -897,14 +897,14 @@ class EditorWindow:
     def _on_patch_rect_drawn(self, x0, y0, x1, y1):
         layer = self._layer_stack.active_layer
         if isinstance(layer, DiffusionLayer):
-            self._diffusion_panel._draw_patch_cb.checked = False
+            self._diffusion_panel.set_draw_patch_checked(False)
             self._document.execute(SetManualPatchRectCommand(
                 layer=layer,
                 rect=(x0, y0, x1, y1),
                 label="Set Diffusion Patch Rect",
             ))
         elif isinstance(layer, InstructLayer):
-            self._instruct_panel._draw_patch_cb.checked = False
+            self._instruct_panel.set_draw_patch_checked(False)
             self._document.execute(SetManualPatchRectCommand(
                 layer=layer,
                 rect=(x0, y0, x1, y1),
@@ -1026,7 +1026,7 @@ class EditorWindow:
     def _on_instruct_load_model(self):
         if self._instruct_engine.is_busy:
             return
-        self._instruct_panel._model_status.text = "Loading..."
+        self._instruct_panel.set_model_loading()
         self._instruct_engine.submit_load()
         self._statusbar.text = "Loading InstructPix2Pix model..."
 
@@ -1156,7 +1156,7 @@ class EditorWindow:
                 self._document.execute(command)
             self._statusbar.text = status
         elif seg_error is not None:
-            logger.error("Segmentation error: %s", seg_error)
+            log.error(f"Segmentation error: {seg_error}")
             self._statusbar.text = f"Segmentation error: {seg_error[:80]}"
 
     def _poll_lama(self):
@@ -1169,7 +1169,7 @@ class EditorWindow:
             self._statusbar.text = status
             self._pending_lama_layer = None
         elif lama_error is not None:
-            logger.error("LaMa error: %s", lama_error)
+            log.error(f"LaMa error: {lama_error}")
             self._statusbar.text = f"LaMa error: {lama_error[:80]}"
             self._pending_lama_layer = None
 
@@ -1179,7 +1179,7 @@ class EditorWindow:
             return
         if task_type == "load":
             if error:
-                logger.error("InstructPix2Pix load error: %s", error)
+                log.error(f"InstructPix2Pix load error: {error}")
                 self._instruct_panel.on_model_load_error(error)
                 self._statusbar.text = f"InstructPix2Pix load error: {error[:80]}"
                 self._pending_instruct_layer = None
@@ -1190,7 +1190,7 @@ class EditorWindow:
                     self._on_instruct_apply()
         elif task_type == "inference":
             if error:
-                logger.error("InstructPix2Pix inference error: %s", error)
+                log.error(f"InstructPix2Pix inference error: {error}")
                 self._statusbar.text = f"InstructPix2Pix error: {error[:80]}"
                 self._pending_instruct_layer = None
                 return
@@ -1207,11 +1207,13 @@ class EditorWindow:
         if task_type is None:
             return
 
-        print(f"[_poll_diffusion] got task_type={task_type}, error={error}, result_type={type(result)}")
+        log.debug(
+            f"[_poll_diffusion] task_type={task_type}, error={error}, result_type={type(result)}"
+        )
 
         if task_type == "load":
             if error:
-                logger.error("Diffusion model load error: %s", error)
+                log.error(f"Diffusion model load error: {error}")
                 self._diffusion_panel.on_model_load_error(error)
                 self._statusbar.text = f"Model load error: {error[:80]}"
                 self._pending_request = None
@@ -1224,7 +1226,7 @@ class EditorWindow:
 
         elif task_type == "load_ip_adapter":
             if error:
-                logger.error("IP-Adapter load error: %s", error)
+                log.error(f"IP-Adapter load error: {error}")
                 self._diffusion_panel.on_ip_adapter_load_error(error)
                 self._statusbar.text = f"IP-Adapter error: {error[:80]}"
                 self._pending_request = None
@@ -1237,14 +1239,15 @@ class EditorWindow:
 
         elif task_type == "inference":
             if error:
-                logger.error("Diffusion inference error: %s", error)
-                print(f"[_poll_diffusion] inference ERROR: {error}")
+                log.error(f"Diffusion inference error: {error}")
                 self._statusbar.text = f"Diffusion error: {error[:80]}"
                 self._pending_request = None
                 return
 
             result_image, used_seed = result
-            print(f"[_poll_diffusion] inference OK, seed={used_seed}, pending={type(self._pending_request).__name__}")
+            log.debug(
+                f"[_poll_diffusion] inference OK, seed={used_seed}, pending={type(self._pending_request).__name__}"
+            )
             command, status = map_diffusion_result(
                 self._pending_request, result_image, used_seed)
             if command is not None:

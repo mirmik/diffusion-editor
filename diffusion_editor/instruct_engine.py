@@ -1,6 +1,7 @@
 import threading
 import torch
 from PIL import Image
+from tcbase import log
 
 
 class InstructEngine:
@@ -32,7 +33,7 @@ class InstructEngine:
             self._pipe.scheduler.config
         )
         self._pipe.to("cuda")
-        print("[InstructEngine] Model loaded: timbrooks/instruct-pix2pix")
+        log.info("[InstructEngine] Model loaded: timbrooks/instruct-pix2pix")
 
     def unload(self):
         if self._pipe is not None:
@@ -57,8 +58,7 @@ class InstructEngine:
             self.load_model()
             self._result = True
         except Exception as e:
-            import traceback
-            traceback.print_exc()
+            log.exception("InstructPix2Pix load failed")
             self._error = str(e)
         self._busy = False
 
@@ -95,13 +95,10 @@ class InstructEngine:
                 seed = torch.randint(0, 2**32, (1,)).item()
             generator = torch.Generator(device="cpu").manual_seed(seed)
 
-            print(f"[InstructEngine] params:")
-            print(f"  instruction:          {instruction!r}")
-            print(f"  image size:           {image.size}")
-            print(f"  guidance_scale:       {guidance_scale}")
-            print(f"  image_guidance_scale: {image_guidance_scale}")
-            print(f"  steps:                {steps}")
-            print(f"  seed:                 {seed}")
+            log.debug(
+                "[InstructEngine] instruction=%r image_size=%s guidance_scale=%s image_guidance_scale=%s steps=%s seed=%s"
+                % (instruction, image.size, guidance_scale, image_guidance_scale, steps, seed)
+            )
 
             result = self._pipe(
                 prompt=instruction,
@@ -112,11 +109,10 @@ class InstructEngine:
                 generator=generator,
             ).images[0]
 
-            print(f"[InstructEngine] done, result size: {result.size}")
+            log.debug(f"[InstructEngine] done, result size: {result.size}")
             self._result = (result, seed)
         except Exception as e:
-            import traceback
-            traceback.print_exc()
+            log.exception("InstructPix2Pix inference failed")
             self._error = str(e)
         self._busy = False
 

@@ -263,11 +263,17 @@ class InstructPanel(ScrollArea):
     # External updates
     # ------------------------------------------------------------------
 
+    def set_model_loading(self):
+        self._model_status.text = "Loading..."
+
     def on_model_loaded(self):
         self._model_status.text = "Loaded: instruct-pix2pix"
 
     def on_model_load_error(self, error: str):
         self._model_status.text = f"Error: {error[:60]}"
+
+    def set_draw_patch_checked(self, value: bool):
+        self._draw_patch_cb.checked = value
 
     def show_instruct_layer(self, layer):
         self._layer_group.visible = True

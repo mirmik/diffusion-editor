@@ -1,5 +1,6 @@
 from threading import Thread
 from PIL import Image
+from tcbase import log
 
 
 class LamaEngine:
@@ -31,19 +32,17 @@ class LamaEngine:
 
     def _run(self, image: Image.Image, mask: Image.Image):
         try:
-            print("[LamaEngine] loading model...")
+            log.debug("[LamaEngine] loading model...")
             self._ensure_loaded()
-            print("[LamaEngine] running inference...")
+            log.debug("[LamaEngine] running inference...")
             image = image.convert("RGB")
             mask = mask.convert("L")
             result = self._model(image, mask)
             self._result = result
-            print(f"[LamaEngine] done, result size: {result.size}")
+            log.debug(f"[LamaEngine] done, result size: {result.size}")
         except Exception as e:
-            import traceback
-            traceback.print_exc()
+            log.exception("LaMa inference failed")
             self._error = str(e)
-            print(f"[LamaEngine] error: {e}")
         self._busy = False
 
     def poll(self) -> tuple[Image.Image | None, str | None]:

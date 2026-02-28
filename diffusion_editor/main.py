@@ -7,6 +7,7 @@ from sdl2 import video
 
 from tgfx import OpenGLGraphicsBackend
 from tcbase import Key, MouseButton, Mods
+from tcbase import log
 
 from .editor_window import EditorWindow
 
@@ -128,14 +129,15 @@ def _set_sdl_cursor(name: str):
 def main():
     import faulthandler
     faulthandler.enable()
+    log.set_level(log.Level.INFO)
 
     window, gl_ctx = create_window("Diffusion Editor", 1280, 800)
-    print("[main] Window created", flush=True)
+    log.info("[main] Window created")
 
     graphics = OpenGLGraphicsBackend.get_instance()
-    print("[main] Got graphics backend", flush=True)
+    log.debug("[main] Got graphics backend")
     graphics.ensure_ready()
-    print("[main] Graphics ready", flush=True)
+    log.debug("[main] Graphics ready")
 
     editor = EditorWindow(graphics)
     ui = editor.ui

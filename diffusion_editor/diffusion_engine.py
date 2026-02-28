@@ -1,8 +1,8 @@
 import os
 import threading
-import logging
 import torch
 from PIL import Image
+from tcbase import log
 from diffusers import (
     StableDiffusionXLPipeline,
     StableDiffusionXLImg2ImgPipeline,
@@ -12,7 +12,6 @@ from diffusers import (
 
 # Filename hints for v-prediction models
 _VPRED_HINTS = ("vpred", "v-pred", "v_pred", "vprediction", "v-prediction", "v_prediction")
-logger = logging.getLogger(__name__)
 
 
 def _guess_prediction_type(path: str) -> str | None:
@@ -87,7 +86,7 @@ class DiffusionEngine:
             "guessed_from_name": guessed,
             "override": prediction_type,
         }
-        print(f"[DiffusionEngine] Loaded: {self.model_info}")
+        log.info(f"[DiffusionEngine] Loaded: {self.model_info}")
 
     @property
     def ip_adapter_loaded(self) -> bool:
@@ -102,7 +101,7 @@ class DiffusionEngine:
             weight_name="ip-adapter_sdxl.bin",
         )
         self._ip_adapter_loaded = True
-        print("[DiffusionEngine] IP-Adapter loaded")
+        log.info("[DiffusionEngine] IP-Adapter loaded")
 
     def unload(self):
         if self._pipe is not None:
@@ -117,9 +116,9 @@ class DiffusionEngine:
         if self._pipe is None:
             raise RuntimeError("No model loaded")
         if self._pipe_mode == mode:
-            print(f"[DiffusionEngine] _ensure_pipeline: already in {mode} mode")
+            log.debug(f"[DiffusionEngine] _ensure_pipeline: already in {mode} mode")
             return
-        print(f"[DiffusionEngine] _ensure_pipeline: switching {self._pipe_mode} -> {mode}")
+        log.debug(f"[DiffusionEngine] _ensure_pipeline: switching {self._pipe_mode} -> {mode}")
         components = dict(
             vae=self._pipe.vae,
             text_encoder=self._pipe.text_encoder,
@@ -131,7 +130,7 @@ class DiffusionEngine:
         )
         none_components = [k for k, v in components.items() if v is None]
         if none_components:
-            print(f"[DiffusionEngine] WARNING: None components: {none_components}")
+            log.warn(f"[DiffusionEngine] None components: {none_components}")
         if self._ip_adapter_loaded:
             components["image_encoder"] = self._pipe.image_encoder
             components["feature_extractor"] = self._pipe.feature_extractor
@@ -163,16 +162,13 @@ class DiffusionEngine:
             seed = torch.randint(0, 2**32, (1,)).item()
         generator = torch.Generator(device="cpu").manual_seed(seed)
 
-        print(f"[DiffusionEngine] _img2img params:")
-        print(f"  prompt:          {prompt!r}")
-        print(f"  negative_prompt: {negative_prompt!r}")
-        print(f"  image size:      {image.size}")
-        print(f"  strength:        {strength}")
-        print(f"  steps:           {num_inference_steps}")
-        print(f"  guidance_scale:  {guidance_scale}")
-        print(f"  seed:            {seed}")
-        print(f"  ip_adapter:      {ip_adapter_image is not None} scale={ip_adapter_scale}")
-        print(f"  model:           {self._model_path}")
+        log.debug(
+            "[DiffusionEngine] _img2img prompt=%r neg=%r size=%s strength=%s steps=%s cfg=%s seed=%s ip_adapter=%s scale=%s model=%s"
+            % (
+                prompt, negative_prompt, image.size, strength, num_inference_steps,
+                guidance_scale, seed, ip_adapter_image is not None, ip_adapter_scale, self._model_path
+            )
+        )
 
         kwargs = dict(
             prompt=prompt,
@@ -192,7 +188,7 @@ class DiffusionEngine:
 
         result = self._pipe(**kwargs).images[0]
 
-        print(f"[DiffusionEngine] done, result size: {result.size}")
+        log.debug(f"[DiffusionEngine] _img2img done, result size: {result.size}")
         return result, seed
 
     def _inpaint(self, image: Image.Image, mask_image: Image.Image,
@@ -239,18 +235,14 @@ class DiffusionEngine:
             seed = torch.randint(0, 2**32, (1,)).item()
         generator = torch.Generator(device="cpu").manual_seed(seed)
 
-        print(f"[DiffusionEngine] _inpaint params:")
-        print(f"  prompt:          {prompt!r}")
-        print(f"  negative_prompt: {negative_prompt!r}")
-        print(f"  image size:      {image.size}")
-        print(f"  mask size:       {mask_image.size}")
-        print(f"  masked_content:  {masked_content}")
-        print(f"  strength:        {strength}")
-        print(f"  steps:           {num_inference_steps}")
-        print(f"  guidance_scale:  {guidance_scale}")
-        print(f"  seed:            {seed}")
-        print(f"  ip_adapter:      {ip_adapter_image is not None} scale={ip_adapter_scale}")
-        print(f"  model:           {self._model_path}")
+        log.debug(
+            "[DiffusionEngine] _inpaint prompt=%r neg=%r size=%s mask=%s masked_content=%s strength=%s steps=%s cfg=%s seed=%s ip_adapter=%s scale=%s model=%s"
+            % (
+                prompt, negative_prompt, image.size, mask_image.size, masked_content, strength,
+                num_inference_steps, guidance_scale, seed, ip_adapter_image is not None,
+                ip_adapter_scale, self._model_path
+            )
+        )
 
         kwargs = dict(
             prompt=prompt,
@@ -271,10 +263,10 @@ class DiffusionEngine:
             self._pipe.set_ip_adapter_scale(ip_adapter_scale)
             kwargs["ip_adapter_image"] = ip_adapter_image
 
-        print(f"[DiffusionEngine] _inpaint: calling pipe({w8}x{h8}, steps={num_inference_steps})...")
+        log.debug(f"[DiffusionEngine] _inpaint: calling pipe({w8}x{h8}, steps={num_inference_steps})")
         result = self._pipe(**kwargs).images[0]
 
-        print(f"[DiffusionEngine] _inpaint done, result size: {result.size}")
+        log.debug(f"[DiffusionEngine] _inpaint done, result size: {result.size}")
         return result, seed
 
     def _txt2img(self, prompt: str, negative_prompt: str,
@@ -292,14 +284,13 @@ class DiffusionEngine:
             seed = torch.randint(0, 2**32, (1,)).item()
         generator = torch.Generator(device="cpu").manual_seed(seed)
 
-        print(f"[DiffusionEngine] _txt2img params:")
-        print(f"  prompt:          {prompt!r}")
-        print(f"  negative_prompt: {negative_prompt!r}")
-        print(f"  size:            {w8}x{h8}")
-        print(f"  steps:           {num_inference_steps}")
-        print(f"  guidance_scale:  {guidance_scale}")
-        print(f"  seed:            {seed}")
-        print(f"  ip_adapter:      {ip_adapter_image is not None} scale={ip_adapter_scale}")
+        log.debug(
+            "[DiffusionEngine] _txt2img prompt=%r neg=%r size=%sx%s steps=%s cfg=%s seed=%s ip_adapter=%s scale=%s"
+            % (
+                prompt, negative_prompt, w8, h8, num_inference_steps,
+                guidance_scale, seed, ip_adapter_image is not None, ip_adapter_scale
+            )
+        )
 
         kwargs = dict(
             prompt=prompt,
@@ -320,7 +311,7 @@ class DiffusionEngine:
 
         result = self._pipe(**kwargs).images[0]
 
-        print(f"[DiffusionEngine] txt2img done, result size: {result.size}")
+        log.debug(f"[DiffusionEngine] _txt2img done, result size: {result.size}")
         return result, seed
 
     def submit(self, image: Image.Image, prompt: str, negative_prompt: str,
@@ -352,7 +343,7 @@ class DiffusionEngine:
     def _run_inference(self, image, prompt, negative_prompt, strength, steps,
                        guidance_scale, seed, mode, mask_image, masked_content,
                        ip_adapter_image, ip_adapter_scale, width, height):
-        print(f"[DiffusionEngine] _run_inference thread started, mode={mode}")
+        log.debug(f"[DiffusionEngine] _run_inference thread started, mode={mode}")
         try:
             if mode == "txt2img":
                 result_image, used_seed = self._txt2img(
@@ -371,12 +362,12 @@ class DiffusionEngine:
                     strength, steps, guidance_scale, seed,
                     ip_adapter_image, ip_adapter_scale)
             self._result = (result_image, used_seed)
-            print(f"[DiffusionEngine] _run_inference OK, result set")
+            log.debug("[DiffusionEngine] _run_inference OK, result set")
         except Exception as e:
-            logger.exception("Diffusion inference failed (mode=%s)", mode)
+            log.exception(f"Diffusion inference failed (mode={mode})")
             self._error = str(e)
         self._busy = False
-        print(f"[DiffusionEngine] _run_inference thread done, busy=False")
+        log.debug("[DiffusionEngine] _run_inference thread done, busy=False")
 
     def submit_load_ip_adapter(self):
         if self._busy:
@@ -399,7 +390,7 @@ class DiffusionEngine:
             self.load_ip_adapter()
             self._result = True
         except Exception as e:
-            logger.exception("IP-Adapter load failed")
+            log.exception("IP-Adapter load failed")
             self._error = str(e)
         self._busy = False
 
@@ -422,7 +413,7 @@ class DiffusionEngine:
             self.load_model(path, prediction_type)
             self._result = path
         except Exception as e:
-            logger.exception("Model load failed: %s", path)
+            log.exception(f"Model load failed: {path}")
             self._error = str(e)
         self._busy = False
 
