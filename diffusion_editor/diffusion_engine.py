@@ -448,3 +448,10 @@ class DiffusionEngine:
         self._result_meta = None
         self._task_type = None
         return task_type, result, error, meta
+
+    def shutdown(self, timeout: float = 1.0):
+        """Best-effort engine shutdown for app exit."""
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=timeout)
+        self.unload()

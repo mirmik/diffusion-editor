@@ -1,11 +1,18 @@
 """Tests for DocumentService and command bus integration."""
 
 import numpy as np
+from PIL import Image
 
 from diffusion_editor.document_service import (
-    CallbackCommand, CommandBus, DocumentService, AddLayerCommand,
-    SetLayerOpacityCommand, FlattenLayersCommand, SnapshotCallbackCommand,
+    CallbackCommand, CommandBus, DocumentService,
 )
+from diffusion_editor.commands import (
+    AddLayerCommand, SetLayerOpacityCommand, FlattenLayersCommand,
+    SnapshotCallbackCommand, ClearLayerMaskCommand, SetManualPatchRectCommand,
+    ClearManualPatchRectCommand, ReplaceLayerMaskCommand,
+    ApplyGeneratedResultCommand,
+)
+from diffusion_editor.layer import DiffusionLayer
 from diffusion_editor.history import HistoryManager
 from diffusion_editor.layer_stack import LayerStack
 
@@ -130,3 +137,145 @@ def test_document_service_snapshot_callback_command():
     assert stack.value == 3
     assert service.undo() == "inc-cb"
     assert stack.value == 0
+
+
+def test_document_service_clear_layer_mask_command():
+    stack = LayerStack()
+    stack.on_changed = lambda: None
+    stack.init_from_image(np.full((8, 8, 4), 255, dtype=np.uint8))
+    layer = DiffusionLayer(
+        name="Diff",
+        width=8,
+        height=8,
+        source_patch=None,
+        patch_x=0,
+        patch_y=0,
+        patch_w=8,
+        patch_h=8,
+        prompt="",
+        negative_prompt="",
+        strength=0.5,
+        guidance_scale=7.0,
+        steps=20,
+        seed=1,
+    )
+    layer.mask[2:4, 2:4] = 255
+    stack.insert_layer(layer)
+    history = HistoryManager(stack.load_state)
+    service = DocumentService(stack, history, stack.load_state)
+
+    service.execute(ClearLayerMaskCommand(layer=layer, label="Clear Mask"))
+
+    assert not layer.has_mask()
+    assert service.undo() == "Clear Mask"
+    restored = stack.active_layer
+    assert restored is not None
+    assert hasattr(restored, "has_mask")
+    assert restored.has_mask()
+
+
+def test_document_service_manual_patch_rect_commands():
+    stack = LayerStack()
+    stack.on_changed = lambda: None
+    stack.init_from_image(np.full((8, 8, 4), 255, dtype=np.uint8))
+    layer = DiffusionLayer(
+        name="Diff",
+        width=8,
+        height=8,
+        source_patch=None,
+        patch_x=0,
+        patch_y=0,
+        patch_w=8,
+        patch_h=8,
+        prompt="",
+        negative_prompt="",
+        strength=0.5,
+        guidance_scale=7.0,
+        steps=20,
+        seed=1,
+    )
+    stack.insert_layer(layer)
+    history = HistoryManager(stack.load_state)
+    service = DocumentService(stack, history, stack.load_state)
+
+    service.execute(SetManualPatchRectCommand(
+        layer=layer,
+        rect=(1, 2, 5, 6),
+        label="Set Rect",
+    ))
+    assert layer.manual_patch_rect == (1, 2, 5, 6)
+
+    service.execute(ClearManualPatchRectCommand(layer=layer, label="Clear Rect"))
+    assert layer.manual_patch_rect is None
+
+    assert service.undo() == "Clear Rect"
+    assert stack.active_layer is not None
+    assert stack.active_layer.manual_patch_rect == (1, 2, 5, 6)
+
+
+def test_document_service_replace_layer_mask_command():
+    stack = LayerStack()
+    stack.on_changed = lambda: None
+    stack.init_from_image(np.full((8, 8, 4), 255, dtype=np.uint8))
+    layer = DiffusionLayer(
+        name="Diff",
+        width=8,
+        height=8,
+        source_patch=None,
+        patch_x=0,
+        patch_y=0,
+        patch_w=8,
+        patch_h=8,
+        prompt="",
+        negative_prompt="",
+        strength=0.5,
+        guidance_scale=7.0,
+        steps=20,
+        seed=1,
+    )
+    stack.insert_layer(layer)
+    history = HistoryManager(stack.load_state)
+    service = DocumentService(stack, history, stack.load_state)
+    mask = np.zeros((8, 8), dtype=np.uint8)
+    mask[0:2, 0:2] = 255
+
+    service.execute(ReplaceLayerMaskCommand(layer=layer, mask=mask))
+
+    assert np.array_equal(layer.mask, mask)
+    assert service.undo() == "Apply Segmentation Mask"
+
+
+def test_document_service_apply_generated_result_command():
+    stack = LayerStack()
+    stack.on_changed = lambda: None
+    stack.init_from_image(np.full((8, 8, 4), 255, dtype=np.uint8))
+    layer = DiffusionLayer(
+        name="Diff",
+        width=8,
+        height=8,
+        source_patch=None,
+        patch_x=0,
+        patch_y=0,
+        patch_w=8,
+        patch_h=8,
+        prompt="",
+        negative_prompt="",
+        strength=0.5,
+        guidance_scale=7.0,
+        steps=20,
+        seed=1,
+    )
+    stack.insert_layer(layer)
+    history = HistoryManager(stack.load_state)
+    service = DocumentService(stack, history, stack.load_state)
+    result = Image.fromarray(np.full((8, 8, 3), (200, 10, 10), dtype=np.uint8), "RGB")
+
+    service.execute(ApplyGeneratedResultCommand(
+        layer=layer,
+        result_image=result,
+        label="Apply Result",
+    ))
+
+    assert np.any(layer.image[:, :, 3] > 0)
+    assert service.undo() == "Apply Result"
+    assert np.all(stack.active_layer.image == 0)

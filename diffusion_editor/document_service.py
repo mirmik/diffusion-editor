@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Protocol
-
-import numpy as np
+from typing import Callable
 
 from .history import HistoryManager
-from .layer import Layer
 from .layer_stack import LayerStack
+from .commands import SnapshotCommand
 
 
 @dataclass
@@ -43,95 +41,6 @@ class CommandBus:
             redo_fn=command.redo_fn,
             size_bytes=command.size_bytes,
         )
-
-
-class SnapshotCommand(Protocol):
-    """Command interface executed against LayerStack with snapshot undo/redo."""
-
-    @property
-    def label(self) -> str:
-        ...
-
-    def apply(self, layer_stack: LayerStack) -> None:
-        ...
-
-
-@dataclass(frozen=True)
-class AddLayerCommand:
-    name: str
-    image: np.ndarray | None = None
-    label: str = "New Layer"
-
-    def apply(self, layer_stack: LayerStack) -> None:
-        layer_stack.add_layer(self.name, self.image)
-
-
-@dataclass(frozen=True)
-class InsertLayerCommand:
-    layer: Layer
-    label: str
-
-    def apply(self, layer_stack: LayerStack) -> None:
-        layer_stack.insert_layer(self.layer)
-
-
-@dataclass(frozen=True)
-class RemoveLayerCommand:
-    layer: Layer
-    label: str = "Remove Layer"
-
-    def apply(self, layer_stack: LayerStack) -> None:
-        layer_stack.remove_layer(self.layer)
-
-
-@dataclass(frozen=True)
-class MoveLayerCommand:
-    layer: Layer
-    new_parent: Layer | None
-    index: int
-    label: str = "Move Layer"
-
-    def apply(self, layer_stack: LayerStack) -> None:
-        layer_stack.move_layer(self.layer, self.new_parent, self.index)
-
-
-@dataclass(frozen=True)
-class SetLayerVisibilityCommand:
-    layer: Layer
-    visible: bool
-    label: str = "Toggle Visibility"
-
-    def apply(self, layer_stack: LayerStack) -> None:
-        layer_stack.set_visibility(self.layer, self.visible)
-
-
-@dataclass(frozen=True)
-class SetLayerOpacityCommand:
-    layer: Layer
-    opacity: float
-    label: str = "Set Opacity"
-
-    def apply(self, layer_stack: LayerStack) -> None:
-        layer_stack.set_opacity(self.layer, self.opacity)
-
-
-@dataclass(frozen=True)
-class FlattenLayersCommand:
-    label: str = "Flatten Layers"
-
-    def apply(self, layer_stack: LayerStack) -> None:
-        layer_stack.flatten()
-
-
-@dataclass(frozen=True)
-class SnapshotCallbackCommand:
-    """Command adapter for an arbitrary snapshot-based callback."""
-
-    label: str
-    apply_fn: Callable[[LayerStack], None]
-
-    def apply(self, layer_stack: LayerStack) -> None:
-        self.apply_fn(layer_stack)
 
 
 class DocumentService:

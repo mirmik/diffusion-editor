@@ -186,31 +186,33 @@ def main():
         elif t == sdl2.SDL_TEXTINPUT:
             ui.text_input(ev.text.text.decode("utf-8"))
 
-    while editor.running:
-        if sdl2.SDL_WaitEventTimeout(ctypes.byref(event), 50):
-            dispatch(event)
-            while sdl2.SDL_PollEvent(ctypes.byref(event)) != 0:
+    try:
+        while editor.running:
+            if sdl2.SDL_WaitEventTimeout(ctypes.byref(event), 50):
                 dispatch(event)
+                while sdl2.SDL_PollEvent(ctypes.byref(event)) != 0:
+                    dispatch(event)
 
-        if not editor.running:
-            break
+            if not editor.running:
+                break
 
-        # Poll engines
-        editor.poll()
+            # Poll engines
+            editor.poll()
 
-        # Render
-        vw, vh = get_drawable_size(window)
-        graphics.bind_framebuffer(None)
-        graphics.set_viewport(0, 0, vw, vh)
-        graphics.clear_color_depth(0.12, 0.12, 0.14, 1.0)
+            # Render
+            vw, vh = get_drawable_size(window)
+            graphics.bind_framebuffer(None)
+            graphics.set_viewport(0, 0, vw, vh)
+            graphics.clear_color_depth(0.12, 0.12, 0.14, 1.0)
 
-        editor.render(vw, vh)
+            editor.render(vw, vh)
 
-        video.SDL_GL_SwapWindow(window)
-
-    video.SDL_GL_DeleteContext(gl_ctx)
-    video.SDL_DestroyWindow(window)
-    sdl2.SDL_Quit()
+            video.SDL_GL_SwapWindow(window)
+    finally:
+        editor.close()
+        video.SDL_GL_DeleteContext(gl_ctx)
+        video.SDL_DestroyWindow(window)
+        sdl2.SDL_Quit()
 
 
 if __name__ == "__main__":

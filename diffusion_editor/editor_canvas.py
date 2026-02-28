@@ -908,3 +908,9 @@ class EditorCanvas(Canvas):
                                    (0.2, 0.78, 0.31, 0.15))
                 renderer.draw_rect_outline(wx0, wy0, wx1 - wx0, wy1 - wy0,
                                            (0.2, 0.78, 0.31, 0.8), 2.0)
+
+    def dispose(self):
+        """Release GPU resources held by the canvas compositor."""
+        if self._gpu_compositor is not None:
+            self._gpu_compositor.dispose()
+            self._gpu_compositor = None

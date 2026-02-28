@@ -71,3 +71,13 @@ class SegmentationEngine:
         self._result = None
         self._error = None
         return result, error
+
+    def unload(self):
+        self._session = None
+
+    def shutdown(self, timeout: float = 1.0):
+        """Best-effort engine shutdown for app exit."""
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=timeout)
+        self.unload()

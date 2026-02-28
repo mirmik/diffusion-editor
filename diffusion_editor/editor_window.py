@@ -37,14 +37,21 @@ from .diffusion_engine import DiffusionEngine
 from .lama_engine import LamaEngine
 from .instruct_engine import InstructEngine
 from .segmentation import SegmentationEngine
-from .diffusion_brush import extract_patch, extract_mask_patch, paste_result
+from .diffusion_brush import extract_patch, extract_mask_patch
 from .file_dialog import open_file_dialog, save_file_dialog
 from .settings import Settings
 from .history import HistoryManager
-from .document_service import (
-    DocumentService, AddLayerCommand, InsertLayerCommand,
-    RemoveLayerCommand, MoveLayerCommand, SetLayerVisibilityCommand,
-    SetLayerOpacityCommand, FlattenLayersCommand, SnapshotCallbackCommand,
+from .document_service import DocumentService
+from .commands import (
+    AddLayerCommand, InsertLayerCommand, RemoveLayerCommand,
+    MoveLayerCommand, SetLayerVisibilityCommand, SetLayerOpacityCommand,
+    FlattenLayersCommand, ClearLayerMaskCommand,
+    SetDiffusionIpAdapterRectCommand, ClearDiffusionIpAdapterRectCommand,
+    SetManualPatchRectCommand, ClearManualPatchRectCommand,
+)
+from .engine_result_mapper import (
+    map_segmentation_result, map_lama_result,
+    map_instruct_result, map_diffusion_result,
 )
 
 logger = logging.getLogger(__name__)
@@ -68,6 +75,7 @@ class EditorWindow:
 
     def __init__(self, graphics):
         self._running = True
+        self._closed = False
         self._settings = Settings()
         self._project_path: str | None = None
         self._last_dir: str = self._settings.get("last_dir", "")
@@ -435,11 +443,6 @@ class EditorWindow:
         if label is not None:
             self._statusbar.text = f"Redo: {label}"
 
-    def _clear_layer_mask(self, layer):
-        layer.clear_mask()
-        if self._layer_stack.on_changed:
-            self._layer_stack.on_changed()
-
     def _begin_external_edit(self, label: str, layer: Layer, target: str):
         if self._history_replaying:
             return
@@ -732,9 +735,9 @@ class EditorWindow:
     def _on_clear_mask(self):
         layer = self._layer_stack.active_layer
         if isinstance(layer, DiffusionLayer):
-            self._document.execute(SnapshotCallbackCommand(
+            self._document.execute(ClearLayerMaskCommand(
+                layer=layer,
                 label="Clear Diffusion Mask",
-                apply_fn=lambda _stack: self._clear_layer_mask(layer),
             ))
 
     def _sync_panel_to_layer(self, layer: DiffusionLayer):
@@ -881,55 +884,39 @@ class EditorWindow:
     def _on_ref_rect_drawn(self, x0, y0, x1, y1):
         layer = self._layer_stack.active_layer
         if isinstance(layer, DiffusionLayer):
-            def _action():
-                layer.ip_adapter_rect = (x0, y0, x1, y1)
-                self._diffusion_panel.show_diffusion_layer(layer)
-            self._document.execute(SnapshotCallbackCommand(
-                label="Set IP-Adapter Rect",
-                apply_fn=lambda _stack: _action(),
+            self._document.execute(SetDiffusionIpAdapterRectCommand(
+                layer=layer,
+                rect=(x0, y0, x1, y1),
             ))
 
     def _on_clear_ref_rect(self):
         layer = self._layer_stack.active_layer
         if isinstance(layer, DiffusionLayer):
-            def _action():
-                layer.ip_adapter_rect = None
-                self._diffusion_panel.show_diffusion_layer(layer)
-            self._document.execute(SnapshotCallbackCommand(
-                label="Clear IP-Adapter Rect",
-                apply_fn=lambda _stack: _action(),
-            ))
+            self._document.execute(ClearDiffusionIpAdapterRectCommand(layer=layer))
 
     def _on_patch_rect_drawn(self, x0, y0, x1, y1):
         layer = self._layer_stack.active_layer
         if isinstance(layer, DiffusionLayer):
-            def _action():
-                layer.manual_patch_rect = (x0, y0, x1, y1)
-                self._diffusion_panel._draw_patch_cb.checked = False
-                self._diffusion_panel.show_diffusion_layer(layer)
-            self._document.execute(SnapshotCallbackCommand(
+            self._diffusion_panel._draw_patch_cb.checked = False
+            self._document.execute(SetManualPatchRectCommand(
+                layer=layer,
+                rect=(x0, y0, x1, y1),
                 label="Set Diffusion Patch Rect",
-                apply_fn=lambda _stack: _action(),
             ))
         elif isinstance(layer, InstructLayer):
-            def _action():
-                layer.manual_patch_rect = (x0, y0, x1, y1)
-                self._instruct_panel._draw_patch_cb.checked = False
-                self._instruct_panel.show_instruct_layer(layer)
-            self._document.execute(SnapshotCallbackCommand(
+            self._instruct_panel._draw_patch_cb.checked = False
+            self._document.execute(SetManualPatchRectCommand(
+                layer=layer,
+                rect=(x0, y0, x1, y1),
                 label="Set Instruct Patch Rect",
-                apply_fn=lambda _stack: _action(),
             ))
 
     def _on_clear_patch_rect(self):
         layer = self._layer_stack.active_layer
         if isinstance(layer, DiffusionLayer):
-            def _action():
-                layer.manual_patch_rect = None
-                self._diffusion_panel.show_diffusion_layer(layer)
-            self._document.execute(SnapshotCallbackCommand(
+            self._document.execute(ClearManualPatchRectCommand(
+                layer=layer,
                 label="Clear Diffusion Patch Rect",
-                apply_fn=lambda _stack: _action(),
             ))
 
     # ------------------------------------------------------------------
@@ -987,9 +974,9 @@ class EditorWindow:
     def _on_lama_clear_mask(self):
         layer = self._layer_stack.active_layer
         if isinstance(layer, LamaLayer):
-            self._document.execute(SnapshotCallbackCommand(
+            self._document.execute(ClearLayerMaskCommand(
+                layer=layer,
                 label="Clear LaMa Mask",
-                apply_fn=lambda _stack: self._clear_layer_mask(layer),
             ))
 
     def _on_lama_select_background(self):
@@ -1121,20 +1108,17 @@ class EditorWindow:
     def _on_instruct_clear_mask(self):
         layer = self._layer_stack.active_layer
         if isinstance(layer, InstructLayer):
-            self._document.execute(SnapshotCallbackCommand(
+            self._document.execute(ClearLayerMaskCommand(
+                layer=layer,
                 label="Clear Instruct Mask",
-                apply_fn=lambda _stack: self._clear_layer_mask(layer),
             ))
 
     def _on_instruct_clear_patch_rect(self):
         layer = self._layer_stack.active_layer
         if isinstance(layer, InstructLayer):
-            def _action():
-                layer.manual_patch_rect = None
-                self._instruct_panel.show_instruct_layer(layer)
-            self._document.execute(SnapshotCallbackCommand(
+            self._document.execute(ClearManualPatchRectCommand(
+                layer=layer,
                 label="Clear Instruct Patch Rect",
-                apply_fn=lambda _stack: _action(),
             ))
 
     # ------------------------------------------------------------------
@@ -1167,16 +1151,10 @@ class EditorWindow:
         seg_mask, seg_error = self._seg_engine.poll()
         if seg_mask is not None:
             layer = self._layer_stack.active_layer
-            if isinstance(layer, (DiffusionLayer, LamaLayer)):
-                def _action():
-                    layer.mask = seg_mask.copy()
-                    if self._layer_stack.on_changed:
-                        self._layer_stack.on_changed()
-                self._document.execute(SnapshotCallbackCommand(
-                    label="Apply Segmentation Mask",
-                    apply_fn=lambda _stack: _action(),
-                ))
-            self._statusbar.text = "Background mask applied"
+            command, status = map_segmentation_result(layer, seg_mask)
+            if command is not None:
+                self._document.execute(command)
+            self._statusbar.text = status
         elif seg_error is not None:
             logger.error("Segmentation error: %s", seg_error)
             self._statusbar.text = f"Segmentation error: {seg_error[:80]}"
@@ -1185,29 +1163,10 @@ class EditorWindow:
         result_image, lama_error = self._lama_engine.poll()
         if result_image is not None:
             layer = self._pending_lama_layer
-            if isinstance(layer, LamaLayer):
-                def _action():
-                    from PIL import ImageFilter
-                    layer.image[:] = 0
-                    if layer.has_mask():
-                        mask_pil = Image.fromarray(layer.mask, "L")
-                        mask_pil = mask_pil.filter(ImageFilter.MaxFilter(7))
-                        mask_pil = mask_pil.filter(ImageFilter.GaussianBlur(radius=4))
-                        mask_arg = np.array(mask_pil, dtype=np.uint8)
-                    else:
-                        mask_arg = None
-                    paste_result(layer.image, result_image,
-                                 layer.patch_x, layer.patch_y,
-                                 layer.patch_w, layer.patch_h, mask=mask_arg)
-                    self._layer_stack.mark_layer_dirty(layer)
-                    if self._layer_stack.on_changed:
-                        self._layer_stack.on_changed()
-                    self._lama_panel.show_lama_layer(layer)
-                self._document.execute(SnapshotCallbackCommand(
-                    label="Apply LaMa Result",
-                    apply_fn=lambda _stack: _action(),
-                ))
-                self._statusbar.text = "Objects removed (LaMa)"
+            command, status = map_lama_result(layer, result_image)
+            if command is not None:
+                self._document.execute(command)
+            self._statusbar.text = status
             self._pending_lama_layer = None
         elif lama_error is not None:
             logger.error("LaMa error: %s", lama_error)
@@ -1237,29 +1196,10 @@ class EditorWindow:
                 return
             result_image, used_seed = result
             layer = self._pending_instruct_layer
-            if isinstance(layer, InstructLayer):
-                def _action():
-                    layer.image[:] = 0
-                    if layer.has_mask():
-                        from PIL import ImageFilter
-                        mask_pil = Image.fromarray(layer.mask, "L")
-                        mask_pil = mask_pil.filter(ImageFilter.MaxFilter(7))
-                        mask_pil = mask_pil.filter(ImageFilter.GaussianBlur(radius=4))
-                        mask_arg = np.array(mask_pil, dtype=np.uint8)
-                    else:
-                        mask_arg = None
-                    paste_result(layer.image, result_image,
-                                 layer.patch_x, layer.patch_y,
-                                 layer.patch_w, layer.patch_h, mask=mask_arg)
-                    self._layer_stack.mark_layer_dirty(layer)
-                    if self._layer_stack.on_changed:
-                        self._layer_stack.on_changed()
-                    self._instruct_panel.show_instruct_layer(layer)
-                self._document.execute(SnapshotCallbackCommand(
-                    label="Apply Instruct Result",
-                    apply_fn=lambda _stack: _action(),
-                ))
-                self._statusbar.text = f"Instruction applied (seed={used_seed})"
+            command, status = map_instruct_result(layer, result_image, used_seed)
+            if command is not None:
+                self._document.execute(command)
+            self._statusbar.text = status
             self._pending_instruct_layer = None
 
     def _poll_diffusion(self):
@@ -1305,30 +1245,11 @@ class EditorWindow:
 
             result_image, used_seed = result
             print(f"[_poll_diffusion] inference OK, seed={used_seed}, pending={type(self._pending_request).__name__}")
-            if isinstance(self._pending_request, DiffusionLayer):
-                dl = self._pending_request
-                def _action():
-                    dl.image[:] = 0
-                    if dl.has_mask():
-                        from PIL import ImageFilter
-                        mask_pil = Image.fromarray(dl.mask, "L")
-                        mask_pil = mask_pil.filter(ImageFilter.MaxFilter(7))
-                        mask_pil = mask_pil.filter(ImageFilter.GaussianBlur(radius=4))
-                        mask_arg = np.array(mask_pil, dtype=np.uint8)
-                    else:
-                        mask_arg = None
-                    paste_result(dl.image, result_image,
-                                 dl.patch_x, dl.patch_y,
-                                 dl.patch_w, dl.patch_h, mask=mask_arg)
-                    self._layer_stack.mark_layer_dirty(dl)
-                    if self._layer_stack.on_changed:
-                        self._layer_stack.on_changed()
-                    self._diffusion_panel.show_diffusion_layer(dl)
-                self._document.execute(SnapshotCallbackCommand(
-                    label="Apply Diffusion Result",
-                    apply_fn=lambda _stack: _action(),
-                ))
-                self._statusbar.text = f"Regenerated (seed={used_seed})"
+            command, status = map_diffusion_result(
+                self._pending_request, result_image, used_seed)
+            if command is not None:
+                self._document.execute(command)
+            self._statusbar.text = status
             self._pending_request = None
 
     # ------------------------------------------------------------------
@@ -1341,3 +1262,16 @@ class EditorWindow:
     @property
     def running(self) -> bool:
         return self._running
+
+    def close(self):
+        """Release runtime resources (GPU/engines). Safe to call multiple times."""
+        if self._closed:
+            return
+        self._closed = True
+        self._running = False
+        if hasattr(self, "_canvas") and self._canvas is not None:
+            self._canvas.dispose()
+        self._engine.shutdown()
+        self._instruct_engine.shutdown()
+        self._lama_engine.shutdown()
+        self._seg_engine.shutdown()
