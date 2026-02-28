@@ -20,6 +20,8 @@ from tcgui.widgets.menu import MenuItem, Menu
 from tcgui.widgets.tool_bar import ToolBar
 from tcgui.widgets.status_bar import StatusBar
 from tcgui.widgets.message_box import MessageBox, Buttons
+from tcgui.widgets.dialog import Dialog
+from tcgui.widgets.spin_box import SpinBox
 from tcgui.widgets.units import px, pct
 from tcgui.widgets.splitter import Splitter
 
@@ -42,6 +44,11 @@ from .history import HistoryManager
 
 logger = logging.getLogger(__name__)
 
+_BYTES_PER_GIB = 1024 * 1024 * 1024
+_DEFAULT_HISTORY_MEMORY_LIMIT_BYTES = 5 * _BYTES_PER_GIB
+_MIN_HISTORY_MEMORY_LIMIT_GIB = 0.25
+_MAX_HISTORY_MEMORY_LIMIT_GIB = 256.0
+
 
 @dataclass
 class ExternalEditContext:
@@ -59,6 +66,7 @@ class EditorWindow:
         self._settings = Settings()
         self._project_path: str | None = None
         self._last_dir: str = self._settings.get("last_dir", "")
+        self._history_memory_limit_bytes = self._load_history_memory_limit_bytes()
         self._pending_request = None
         self._pending_lama_layer = None
         self._pending_instruct_layer = None
@@ -73,7 +81,10 @@ class EditorWindow:
         self._seg_engine = SegmentationEngine()
         self._lama_engine = LamaEngine()
         self._instruct_engine = InstructEngine()
-        self._history = HistoryManager(self._apply_snapshot)
+        self._history = HistoryManager(
+            self._apply_snapshot,
+            max_memory_bytes=self._history_memory_limit_bytes,
+        )
 
         # Build UI
         self._build_ui(graphics)
@@ -178,6 +189,8 @@ class EditorWindow:
         edit_menu.add_item(MenuItem("Undo", shortcut="Ctrl+Z", on_click=self.undo))
         edit_menu.add_item(MenuItem("Redo", shortcut="Ctrl+Shift+Z", on_click=self.redo))
         edit_menu.add_item(MenuItem("Redo", shortcut="Ctrl+Y", on_click=self.redo))
+        edit_menu.add_item(MenuItem(separator=True))
+        edit_menu.add_item(MenuItem("Settings...", on_click=self._show_settings_dialog))
         self._menu_bar.add_menu("Edit", edit_menu)
 
         # Layer menu
@@ -304,6 +317,65 @@ class EditorWindow:
         if n < 1024 * 1024:
             return f"{n / 1024:.0f}K"
         return f"{n / (1024 * 1024):.1f}M"
+
+    def _load_history_memory_limit_bytes(self) -> int:
+        raw = self._settings.get("history_memory_limit_bytes", _DEFAULT_HISTORY_MEMORY_LIMIT_BYTES)
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return _DEFAULT_HISTORY_MEMORY_LIMIT_BYTES
+        if value <= 0:
+            return _DEFAULT_HISTORY_MEMORY_LIMIT_BYTES
+        return value
+
+    def _set_history_memory_limit_bytes(self, limit_bytes: int) -> None:
+        limit_bytes = max(int(limit_bytes), int(_MIN_HISTORY_MEMORY_LIMIT_GIB * _BYTES_PER_GIB))
+        self._history_memory_limit_bytes = limit_bytes
+        self._history.set_max_memory_bytes(limit_bytes)
+        self._settings.set("history_memory_limit_bytes", limit_bytes)
+
+    def _show_settings_dialog(self):
+        if self.ui is None:
+            return
+
+        dlg = Dialog()
+        dlg.title = "Settings"
+        dlg.buttons = ["OK", "Cancel"]
+        dlg.default_button = "OK"
+        dlg.cancel_button = "Cancel"
+
+        content = VStack()
+        content.spacing = 8
+
+        title = Label()
+        title.text = "Undo/Redo memory limit (GiB)"
+        content.add_child(title)
+
+        limit_input = SpinBox()
+        limit_input.decimals = 2
+        limit_input.step = 0.25
+        limit_input.min_value = _MIN_HISTORY_MEMORY_LIMIT_GIB
+        limit_input.max_value = _MAX_HISTORY_MEMORY_LIMIT_GIB
+        limit_input.value = self._history_memory_limit_bytes / _BYTES_PER_GIB
+        limit_input.preferred_width = px(220)
+        content.add_child(limit_input)
+
+        note = Label()
+        note.text = "Older history entries are removed when the limit is exceeded."
+        content.add_child(note)
+
+        dlg.content = content
+
+        def _apply(result: str):
+            if result != "OK":
+                return
+            limit_bytes = int(limit_input.value * _BYTES_PER_GIB)
+            self._set_history_memory_limit_bytes(limit_bytes)
+            self._statusbar.text = f"History limit: {limit_input.value:.2f} GiB"
+
+        dlg.on_result = _apply
+        dlg.show(self.ui)
+        self.ui.set_focus(limit_input)
 
     def _memory_status(self) -> str:
         hist = self._history.memory_bytes()
@@ -437,6 +509,7 @@ class EditorWindow:
             label=label,
             undo_fn=lambda: self._apply_layer_patch(layer_path, target, rect, before_patch),
             redo_fn=lambda: self._apply_layer_patch(layer_path, target, rect, after_patch),
+            size_bytes=before_patch.nbytes + after_patch.nbytes,
         )
 
     # ------------------------------------------------------------------

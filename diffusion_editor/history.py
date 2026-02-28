@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable
 
 
@@ -13,9 +13,13 @@ class HistoryEntry:
 
 
 class HistoryManager:
-    def __init__(self, apply_snapshot: Callable[[bytes], None], max_entries: int = 50):
+    def __init__(self, apply_snapshot: Callable[[bytes], None], max_entries: int = 50,
+                 max_memory_bytes: int = 5 * 1024 * 1024 * 1024):
+        if max_memory_bytes <= 0:
+            raise ValueError("max_memory_bytes must be > 0")
         self._apply_snapshot = apply_snapshot
         self._max_entries = max_entries
+        self._max_memory_bytes = max_memory_bytes
         self._undo_stack: list[HistoryEntry] = []
         self._redo_stack: list[HistoryEntry] = []
 
@@ -30,6 +34,16 @@ class HistoryManager:
     def clear(self) -> None:
         self._undo_stack.clear()
         self._redo_stack.clear()
+
+    @property
+    def max_memory_bytes(self) -> int:
+        return self._max_memory_bytes
+
+    def set_max_memory_bytes(self, max_memory_bytes: int) -> None:
+        if max_memory_bytes <= 0:
+            raise ValueError("max_memory_bytes must be > 0")
+        self._max_memory_bytes = max_memory_bytes
+        self._enforce_limits()
 
     def push(self, label: str, before: bytes, after: bytes) -> None:
         if before == after:
@@ -47,9 +61,8 @@ class HistoryManager:
         self._undo_stack.append(HistoryEntry(
             label=label, undo_fn=undo_fn, redo_fn=redo_fn,
             size_bytes=size_bytes))
-        if len(self._undo_stack) > self._max_entries:
-            self._undo_stack.pop(0)
         self._redo_stack.clear()
+        self._enforce_limits()
 
     def memory_bytes(self) -> int:
         """Estimated memory held by undo/redo entries."""
@@ -75,3 +88,17 @@ class HistoryManager:
         entry.redo_fn()
         self._undo_stack.append(entry)
         return entry.label
+
+    def _enforce_limits(self) -> None:
+        while len(self._undo_stack) > self._max_entries:
+            self._undo_stack.pop(0)
+        while len(self._redo_stack) > self._max_entries:
+            self._redo_stack.pop(0)
+        while self.memory_bytes() > self._max_memory_bytes:
+            if self._undo_stack:
+                self._undo_stack.pop(0)
+                continue
+            if self._redo_stack:
+                self._redo_stack.pop(0)
+                continue
+            break
