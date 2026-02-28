@@ -239,6 +239,7 @@ class EditorWindow:
         self._layer_panel.on_flatten_layers = self._flatten_layers
         self._layer_panel.on_move_layer = self._move_layer
         self._layer_panel.on_toggle_visibility = self._set_layer_visibility
+        self._layer_panel.on_opacity_changed = self._set_layer_opacity
 
         # LaMa panel
         self._lama_panel.on_remove = self._on_lama_remove
@@ -296,6 +297,19 @@ class EditorWindow:
     # Status
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _fmt_bytes(n: int) -> str:
+        if n < 1024:
+            return f"{n}B"
+        if n < 1024 * 1024:
+            return f"{n / 1024:.0f}K"
+        return f"{n / (1024 * 1024):.1f}M"
+
+    def _memory_status(self) -> str:
+        hist = self._history.memory_bytes()
+        cache = self._layer_stack._renderer.cache_memory_bytes()
+        return f"Hist:{self._fmt_bytes(hist)} Cache:{self._fmt_bytes(cache)}"
+
     def _on_mouse_moved(self, x, y):
         if self._layer_stack.width == 0:
             return
@@ -303,10 +317,11 @@ class EditorWindow:
         layer = self._layer_stack.active_layer
         name = layer.name if layer else "-"
         bs = self._canvas.brush.size
+        mem = self._memory_status()
         if 0 <= x < w and 0 <= y < h:
-            self._statusbar.text = f"{w}x{h} | ({x},{y}) | {name} | Brush:{bs}px"
+            self._statusbar.text = f"{w}x{h} | ({x},{y}) | {name} | Brush:{bs}px | {mem}"
         else:
-            self._statusbar.text = f"{w}x{h} | {name} | Brush:{bs}px"
+            self._statusbar.text = f"{w}x{h} | {name} | Brush:{bs}px | {mem}"
 
     def _on_color_picked(self, r, g, b, a):
         self._canvas.brush.set_color(r, g, b, a)
@@ -527,6 +542,12 @@ class EditorWindow:
         self._record_action(
             "Toggle Visibility",
             lambda: self._layer_stack.set_visibility(layer, visible),
+        )
+
+    def _set_layer_opacity(self, layer: Layer, opacity: float):
+        self._record_action(
+            "Set Opacity",
+            lambda: self._layer_stack.set_opacity(layer, opacity),
         )
 
     def save_file(self):

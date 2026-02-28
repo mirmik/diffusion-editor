@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 
 
@@ -9,6 +9,7 @@ class HistoryEntry:
     label: str
     undo_fn: Callable[[], None]
     redo_fn: Callable[[], None]
+    size_bytes: int = 0
 
 
 class HistoryManager:
@@ -37,14 +38,27 @@ class HistoryManager:
             label=label,
             undo_fn=lambda: self._apply_snapshot(before),
             redo_fn=lambda: self._apply_snapshot(after),
+            size_bytes=len(before) + len(after),
         )
 
     def push_callbacks(self, label: str, undo_fn: Callable[[], None],
-                       redo_fn: Callable[[], None]) -> None:
-        self._undo_stack.append(HistoryEntry(label=label, undo_fn=undo_fn, redo_fn=redo_fn))
+                       redo_fn: Callable[[], None],
+                       size_bytes: int = 0) -> None:
+        self._undo_stack.append(HistoryEntry(
+            label=label, undo_fn=undo_fn, redo_fn=redo_fn,
+            size_bytes=size_bytes))
         if len(self._undo_stack) > self._max_entries:
             self._undo_stack.pop(0)
         self._redo_stack.clear()
+
+    def memory_bytes(self) -> int:
+        """Estimated memory held by undo/redo entries."""
+        total = 0
+        for entry in self._undo_stack:
+            total += entry.size_bytes
+        for entry in self._redo_stack:
+            total += entry.size_bytes
+        return total
 
     def undo(self) -> str | None:
         if not self._undo_stack:

@@ -22,6 +22,16 @@ class LayerRenderer:
         self._nested_cache.clear()
         self._composite_cache.clear()
 
+    def cache_memory_bytes(self) -> int:
+        """Estimated memory held by tile caches."""
+        total = 0
+        for cache in (self._prefix_cache, self._nested_cache,
+                      self._composite_cache):
+            for v in cache.values():
+                if v is not None:
+                    total += v.nbytes
+        return total
+
     def invalidate_tiles(self, layers: set[Layer], tiles: set[tuple[int, int]] | None) -> None:
         for layer in layers:
             self._invalidate_layer(layer, tiles)

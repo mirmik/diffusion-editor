@@ -8,6 +8,7 @@ from tcgui.widgets.button import Button
 from tcgui.widgets.label import Label
 from tcgui.widgets.tree import TreeNode, TreeWidget
 from tcgui.widgets.checkbox import Checkbox
+from tcgui.widgets.slider_edit import SliderEdit
 from tcgui.widgets.menu import Menu, MenuItem
 from tcgui.widgets.dialog import Dialog
 from tcgui.widgets.text_input import TextInput
@@ -38,6 +39,7 @@ class LayerPanel(VStack):
         self.on_flatten_layers: callable = None
         self.on_move_layer: callable = None  # (layer, new_parent, index)
         self.on_toggle_visibility: callable = None  # (layer, visible)
+        self.on_opacity_changed: callable = None  # (layer, opacity)
 
         # Tree widget (stretch to fill remaining space)
         self._tree = TreeWidget()
@@ -74,6 +76,17 @@ class LayerPanel(VStack):
         btn_row.add_child(flatten_btn)
 
         self.add_child(btn_row)
+
+        # Opacity slider
+        self._opacity_slider = SliderEdit()
+        self._opacity_slider.label = "Opacity"
+        self._opacity_slider.min_value = 0.0
+        self._opacity_slider.max_value = 1.0
+        self._opacity_slider.value = 1.0
+        self._opacity_slider.step = 0.01
+        self._opacity_slider.preferred_width = pct(100)
+        self._opacity_slider.on_changed = self._on_opacity_changed
+        self.add_child(self._opacity_slider)
 
         # Create special layers
         diff_btn = Button()
@@ -119,6 +132,7 @@ class LayerPanel(VStack):
             if node is not None:
                 self._tree._select_node(node)
 
+        self._sync_opacity_slider()
         self._updating = False
 
     def _create_node(self, layer: Layer) -> TreeNode:
@@ -196,6 +210,25 @@ class LayerPanel(VStack):
     # Tree callbacks
     # ------------------------------------------------------------------
 
+    def _on_opacity_changed(self, value: float):
+        if self._updating:
+            return
+        layer = self._layer_stack.active_layer
+        if layer is None:
+            return
+        if self.on_opacity_changed:
+            self.on_opacity_changed(layer, value)
+        else:
+            self._layer_stack.set_opacity(layer, value)
+
+    def _sync_opacity_slider(self):
+        """Update opacity slider to reflect the active layer."""
+        layer = self._layer_stack.active_layer
+        if layer is not None:
+            self._opacity_slider.value = layer.opacity
+        else:
+            self._opacity_slider.value = 1.0
+
     def _on_tree_select(self, node: TreeNode):
         if self._updating:
             return
@@ -203,6 +236,7 @@ class LayerPanel(VStack):
         if layer is not None:
             self._updating = True
             self._layer_stack.active_layer = layer
+            self._opacity_slider.value = layer.opacity
             self._updating = False
 
     def _on_tree_drop(self, dragged: TreeNode, target: TreeNode | None,
