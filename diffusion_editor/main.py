@@ -27,7 +27,7 @@ def create_window(title: str, width: int, height: int):
     video.SDL_GL_SetAttribute(video.SDL_GL_DOUBLEBUFFER, 1)
     video.SDL_GL_SetAttribute(video.SDL_GL_DEPTH_SIZE, 24)
 
-    flags = video.SDL_WINDOW_OPENGL | video.SDL_WINDOW_RESIZABLE | video.SDL_WINDOW_SHOWN
+    flags = video.SDL_WINDOW_OPENGL | video.SDL_WINDOW_RESIZABLE | video.SDL_WINDOW_SHOWN | video.SDL_WINDOW_MAXIMIZED
     window = video.SDL_CreateWindow(
         title.encode("utf-8"),
         video.SDL_WINDOWPOS_CENTERED,

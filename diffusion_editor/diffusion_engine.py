@@ -1,3 +1,4 @@
+import gc
 import os
 import threading
 import torch
@@ -344,6 +345,7 @@ class DiffusionEngine:
                        guidance_scale, seed, mode, mask_image, masked_content,
                        ip_adapter_image, ip_adapter_scale, width, height):
         log.debug(f"[DiffusionEngine] _run_inference thread started, mode={mode}")
+        gc.disable()
         try:
             if mode == "txt2img":
                 result_image, used_seed = self._txt2img(
@@ -366,6 +368,8 @@ class DiffusionEngine:
         except Exception as e:
             log.exception(f"Diffusion inference failed (mode={mode})")
             self._error = str(e)
+        finally:
+            gc.enable()
         self._busy = False
         log.debug("[DiffusionEngine] _run_inference thread done, busy=False")
 
@@ -386,12 +390,15 @@ class DiffusionEngine:
         return True
 
     def _run_load_ip_adapter(self):
+        gc.disable()
         try:
             self.load_ip_adapter()
             self._result = True
         except Exception as e:
             log.exception("IP-Adapter load failed")
             self._error = str(e)
+        finally:
+            gc.enable()
         self._busy = False
 
     def submit_load(self, path: str, prediction_type: str | None = None):
@@ -409,12 +416,18 @@ class DiffusionEngine:
         return True
 
     def _run_load(self, path, prediction_type):
+        # Disable GC during model load: safetensors allocates large tensors
+        # which can trigger GC in this thread. GC may try to finalize objects
+        # with native resources (OpenGL/CUDA) from the main thread → segfault.
+        gc.disable()
         try:
             self.load_model(path, prediction_type)
             self._result = path
         except Exception as e:
             log.exception(f"Model load failed: {path}")
             self._error = str(e)
+        finally:
+            gc.enable()
         self._busy = False
 
     def poll(self):
