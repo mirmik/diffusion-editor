@@ -159,7 +159,7 @@ class EditorWindow:
             self._left_container.add_child(p)
 
         main_area.add_child(self._left_container)
-        main_area.add_child(Splitter(target=self._left_container, side="left"))
+        main_area.add_child(Splitter(target=self._left_container, side="right"))
 
         # Canvas (center, stretches to fill remaining space)
         self._canvas = EditorCanvas(self._layer_stack, graphics=graphics)
@@ -170,7 +170,7 @@ class EditorWindow:
 
         # Right panel: layer panel
         self._layer_panel = LayerPanel(self._layer_stack)
-        main_area.add_child(Splitter(target=self._layer_panel, side="right"))
+        main_area.add_child(Splitter(target=self._layer_panel, side="left"))
         main_area.add_child(self._layer_panel)
 
         root.add_child(main_area)
