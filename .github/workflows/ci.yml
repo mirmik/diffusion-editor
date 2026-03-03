@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+      - main
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout diffusion-editor
+        uses: actions/checkout@v4
+
+      - name: Checkout termin-base
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/termin-base
+          token: ${{ secrets.CLONETOKEN }}
+          path: deps/termin-base
+
+      - name: Checkout termin-graphics
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/termin-graphics
+          token: ${{ secrets.CLONETOKEN }}
+          path: deps/termin-graphics
+
+      - name: Checkout termin-gui
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/termin-gui
+          token: ${{ secrets.CLONETOKEN }}
+          path: deps/termin-gui
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install Python tooling
+        run: python -m pip install --upgrade pip setuptools wheel nanobind pytest numpy Pillow
+
+      - name: Build and install termin-base (C/C++)
+        run: |
+          cmake -S deps/termin-base -B deps/termin-base/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DTERMIN_BASE_BUILD_TESTS=ON \
+            -DTCBASE_BUILD_PYTHON=OFF \
+            -DCMAKE_INSTALL_PREFIX=$GITHUB_WORKSPACE/deps/install
+          cmake --build deps/termin-base/build --parallel
+          cmake --install deps/termin-base/build
+          ctest --test-dir deps/termin-base/build --output-on-failure
+
+      - name: Build and test termin-graphics (C/C++)
+        run: |
+          cmake -S deps/termin-graphics -B deps/termin-graphics/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTS=ON \
+            -DCMAKE_INSTALL_PREFIX=$GITHUB_WORKSPACE/deps/install \
+            -DCMAKE_PREFIX_PATH=$GITHUB_WORKSPACE/deps/install
+          cmake --build deps/termin-graphics/build --parallel
+          ctest --test-dir deps/termin-graphics/build --output-on-failure
+
+      - name: Install tcbase package
+        run: python -m pip install ./deps/termin-base --no-build-isolation
+
+      - name: Install tgfx package
+        env:
+          CMAKE_PREFIX_PATH: ${{ github.workspace }}/deps/install
+        run: python -m pip install ./deps/termin-graphics --no-build-isolation
+
+      - name: Install tcgui package
+        run: python -m pip install ./deps/termin-gui
+
+      - name: Run diffusion-editor tests
+        run: PYTHONPATH=. python -m pytest -q tests
