@@ -30,15 +30,20 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Download termin-graphics SDK
+      - name: Install Python dependencies
+        run: pip install --upgrade pip setuptools wheel nanobind pytest numpy Pillow
+
+      - name: Download upstream SDKs
         env:
           GH_TOKEN: ${{ secrets.CLONETOKEN }}
         run: |
+          gh release download sdk-latest -R ${{ github.repository_owner }}/termin-base -p sdk-base.tar.gz -D /tmp
+          sudo tar xzf /tmp/sdk-base.tar.gz -C /
+          gh release download sdk-latest -R ${{ github.repository_owner }}/termin-mesh -p sdk-mesh.tar.gz -D /tmp
+          sudo tar xzf /tmp/sdk-mesh.tar.gz -C /
           gh release download sdk-latest -R ${{ github.repository_owner }}/termin-graphics -p sdk-graphics.tar.gz -D /tmp
           sudo tar xzf /tmp/sdk-graphics.tar.gz -C /
-
-      - name: Install Python dependencies
-        run: pip install --upgrade pip setuptools wheel nanobind pytest numpy Pillow /opt/termin/wheels/*.whl
+          pip install /opt/termin/wheels/*.whl
 
       - name: Install tcgui and diffusion-editor
         run: |
