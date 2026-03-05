@@ -7,6 +7,9 @@ on:
       - main
   pull_request:
 
+env:
+  LD_LIBRARY_PATH: /opt/termin/lib
+
 jobs:
   test:
     runs-on: ubuntu-latest
