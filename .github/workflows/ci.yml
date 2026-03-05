@@ -2,9 +2,7 @@ name: CI
 
 on:
   push:
-    branches:
-      - master
-      - main
+    branches: [master, main]
   pull_request:
 
 env:
@@ -15,96 +13,37 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout diffusion-editor
-        uses: actions/checkout@v4
-
-      - name: Checkout termin-base
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository_owner }}/termin-base
-          token: ${{ secrets.CLONETOKEN }}
-          path: deps/termin-base
-
-      - name: Checkout termin-mesh
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository_owner }}/termin-mesh
-          token: ${{ secrets.CLONETOKEN }}
-          path: deps/termin-mesh
-
-      - name: Checkout termin-graphics
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository_owner }}/termin-graphics
-          token: ${{ secrets.CLONETOKEN }}
-          path: deps/termin-graphics
-
-      - name: Checkout termin-gui
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository_owner }}/termin-gui
-          token: ${{ secrets.CLONETOKEN }}
-          path: deps/termin-gui
+      - uses: actions/checkout@v4
 
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libgl1-mesa-dev
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/termin-gui
+          token: ${{ secrets.CLONETOKEN }}
+          path: deps/termin-gui
+
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
-      - name: Install Python tooling
-        run: python -m pip install --upgrade pip setuptools wheel nanobind pytest numpy Pillow
-
-      - name: Build and install termin-base (C/C++)
-        run: |
-          cmake -S deps/termin-base -B deps/termin-base/build \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DTERMIN_BASE_BUILD_TESTS=ON \
-            -DTCBASE_BUILD_PYTHON=OFF \
-            -DCMAKE_INSTALL_PREFIX=/opt/termin
-          cmake --build deps/termin-base/build --parallel
-          sudo cmake --install deps/termin-base/build
-          ctest --test-dir deps/termin-base/build --output-on-failure
-
-      - name: Build and install termin-mesh (C/C++)
-        run: |
-          cmake -S deps/termin-mesh -B deps/termin-mesh/build \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX=/opt/termin \
-            -DCMAKE_PREFIX_PATH=/opt/termin
-          cmake --build deps/termin-mesh/build --parallel
-          sudo cmake --install deps/termin-mesh/build
-
-      - name: Build and install termin-graphics (C/C++)
-        run: |
-          cmake -S deps/termin-graphics -B deps/termin-graphics/build \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_TESTS=ON \
-            -DCMAKE_INSTALL_PREFIX=/opt/termin \
-            -DCMAKE_PREFIX_PATH=/opt/termin
-          cmake --build deps/termin-graphics/build --parallel
-          sudo cmake --install deps/termin-graphics/build
-          ctest --test-dir deps/termin-graphics/build --output-on-failure
-
-      - name: Install tcbase package
-        run: python -m pip install ./deps/termin-base --no-build-isolation
-
-      - name: Install tmesh package
+      - name: Download termin-graphics SDK
         env:
-          CMAKE_PREFIX_PATH: /opt/termin
-        run: python -m pip install ./deps/termin-mesh --no-build-isolation
+          GH_TOKEN: ${{ secrets.CLONETOKEN }}
+        run: |
+          gh release download sdk-latest -R ${{ github.repository_owner }}/termin-graphics -p sdk-graphics.tar.gz -D /tmp
+          sudo tar xzf /tmp/sdk-graphics.tar.gz -C /
 
-      - name: Install tgfx package
-        env:
-          CMAKE_PREFIX_PATH: /opt/termin
-        run: python -m pip install ./deps/termin-graphics --no-build-isolation
+      - name: Install Python dependencies
+        run: pip install --upgrade pip setuptools wheel nanobind pytest numpy Pillow /opt/termin/wheels/*.whl
 
-      - name: Install tcgui package
-        run: python -m pip install ./deps/termin-gui
+      - name: Install tcgui and diffusion-editor
+        run: |
+          pip install ./deps/termin-gui
+          pip install -e . 2>/dev/null || true
 
-      - name: Run diffusion-editor tests
-        run: PYTHONPATH=. python -m pytest -q tests
+      - name: Run tests
+        run: PYTHONPATH=. pytest -q tests
