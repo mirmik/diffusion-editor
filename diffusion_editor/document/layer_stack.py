@@ -1,0 +1,592 @@
+import json
+import io
+import re
+import zipfile
+
+import numpy as np
+
+from .archive_serialization import load_array_from_zip, save_array_to_zip
+from .layer import Layer, _layer_from_dict
+from .layer_renderer import LayerRenderer
+from .mask import Selection
+
+
+class LayerStack:
+    def __init__(self, tile_size: int = 256):
+        self._layers: list[Layer] = []  # root-level layers
+        self._active_layer: Layer | None = None
+        self.solo_layer_id: str | None = None
+        self._width = 0
+        self._height = 0
+        self._tile_size = tile_size
+        self.on_changed: callable = None
+        self._renderer = LayerRenderer(self)
+        self.selection = Selection()
+
+    # --- Tree traversal ---
+
+    def _all_layers_flat(self) -> list[Layer]:
+        """All layers in depth-first order (index 0 = topmost)."""
+        result = []
+        for layer in self._layers:
+            result.append(layer)
+            result.extend(layer.all_descendants())
+        return result
+
+    def all_layers(self) -> list[Layer]:
+        """All layers in depth-first order (index 0 = topmost)."""
+        return self._all_layers_flat()
+
+    def next_name(self, prefix: str) -> str:
+        pattern = re.compile(rf'^{re.escape(prefix)} (\d+)$')
+        max_n = -1
+        for layer in self._all_layers_flat():
+            m = pattern.match(layer.name)
+            if m:
+                max_n = max(max_n, int(m.group(1)))
+        return f"{prefix} {max_n + 1}"
+
+    @property
+    def width(self):
+        return self._width
+
+    @property
+    def height(self):
+        return self._height
+
+    @property
+    def tile_size(self):
+        return self._tile_size
+
+    @property
+    def tiles_x(self) -> int:
+        if self._width == 0:
+            return 0
+        return (self._width + self._tile_size - 1) // self._tile_size
+
+    @property
+    def tiles_y(self) -> int:
+        if self._height == 0:
+            return 0
+        return (self._height + self._tile_size - 1) // self._tile_size
+
+    def tile_bounds(self, tx: int, ty: int) -> tuple[int, int, int, int]:
+        x0 = tx * self._tile_size
+        y0 = ty * self._tile_size
+        x1 = min(self._width, x0 + self._tile_size)
+        y1 = min(self._height, y0 + self._tile_size)
+        return x0, y0, x1, y1
+
+    def tile_shape(self, tx: int, ty: int) -> tuple[int, int]:
+        x0, y0, x1, y1 = self.tile_bounds(tx, ty)
+        return (y1 - y0, x1 - x0)
+
+    def cache_memory_bytes(self) -> int:
+        return self._renderer.cache_memory_bytes()
+
+    @property
+    def layers(self):
+        return self._layers
+
+    @property
+    def active_layer(self) -> Layer | None:
+        return self._active_layer
+
+    @active_layer.setter
+    def active_layer(self, layer: Layer | None):
+        if layer is not self._active_layer:
+            self._active_layer = layer
+            if self.on_changed:
+                self.on_changed()
+
+    def init_from_image(self, image: np.ndarray):
+        self._layers.clear()
+        self.solo_layer_id = None
+        h, w = image.shape[:2]
+        self._width = w
+        self._height = h
+        self.selection = Selection(height=h, width=w)
+        layer = Layer("Background", w, h, image, tile_size=self._tile_size)
+        self._layers.append(layer)
+        self._active_layer = layer
+        self._rebuild_caches()
+        if self.on_changed:
+            self.on_changed()
+
+    def _insert_near_active(self, layer: Layer):
+        """Insert layer as a sibling above the active layer."""
+        self._apply_tile_size(layer)
+        if self._active_layer is not None and self._active_layer.parent is not None:
+            parent = self._active_layer.parent
+            idx = parent.children.index(self._active_layer)
+            parent.add_child(layer, idx)
+        elif self._active_layer is not None and self._active_layer in self._layers:
+            idx = self._layers.index(self._active_layer)
+            self._layers.insert(idx, layer)
+        else:
+            self._layers.insert(0, layer)
+        self._active_layer = layer
+
+    def _apply_tile_size(self, layer: Layer):
+        layer.content.tile_size = self._tile_size
+        for child in layer.children:
+            self._apply_tile_size(child)
+
+    def add_layer(self, name: str, image: np.ndarray = None):
+        if self._width == 0 or self._height == 0:
+            return
+        if image is not None:
+            h, w = image.shape[:2]
+            layer = Layer(name, w, h, image, tile_size=self._tile_size)
+        else:
+            layer = Layer(name, self._width, self._height,
+                          tile_size=self._tile_size)
+        self._insert_near_active(layer)
+        self._rebuild_caches()
+        if self.on_changed:
+            self.on_changed()
+
+    def insert_image_layer(self, name: str, image: np.ndarray,
+                           x: int = 0, y: int = 0):
+        if self._width == 0 or self._height == 0:
+            return
+        h, w = image.shape[:2]
+        layer = Layer(name, w, h, image, tile_size=self._tile_size, x=x, y=y)
+        self._insert_near_active(layer)
+        self._rebuild_caches()
+        if self.on_changed:
+            self.on_changed()
+
+    def insert_layer(self, layer: Layer):
+        if self._width == 0 or self._height == 0:
+            return
+        self._insert_near_active(layer)
+        self._rebuild_caches()
+        if self.on_changed:
+            self.on_changed()
+
+    def remove_layer(self, layer: Layer):
+        """Remove layer and its entire subtree."""
+        all_layers = self._all_layers_flat()
+        if len(all_layers) <= 1:
+            return
+        removed_ids = {layer.id}
+        removed_ids.update(child.id for child in layer.all_descendants())
+        if layer.parent is not None:
+            parent = layer.parent
+            idx = parent.children.index(layer)
+            parent.remove_child(layer)
+            if parent.children:
+                self._active_layer = parent.children[min(idx, len(parent.children) - 1)]
+            else:
+                self._active_layer = parent
+        elif layer in self._layers:
+            idx = self._layers.index(layer)
+            self._layers.remove(layer)
+            layer.parent = None
+            if self._layers:
+                self._active_layer = self._layers[min(idx, len(self._layers) - 1)]
+            else:
+                self._active_layer = None
+        if self.solo_layer_id in removed_ids:
+            self.solo_layer_id = None
+        self._rebuild_caches()
+        if self.on_changed:
+            self.on_changed()
+
+    def move_layer(self, layer: Layer, new_parent: Layer | None, index: int):
+        """Move layer to new_parent at index (or root if new_parent is None)."""
+        if layer.parent is not None:
+            layer.parent.remove_child(layer)
+        elif layer in self._layers:
+            self._layers.remove(layer)
+        if new_parent is not None:
+            new_parent.add_child(layer, index)
+        else:
+            self._layers.insert(index, layer)
+        self._active_layer = layer
+        self._rebuild_caches()
+        if self.on_changed:
+            self.on_changed()
+
+    def set_visibility(self, layer: Layer, visible: bool):
+        layer.visible = visible
+        self.mark_layer_dirty(layer)
+        if self.on_changed:
+            self.on_changed()
+
+    def set_opacity(self, layer: Layer, opacity: float):
+        """Set layer opacity with prefix invalidation."""
+        layer.opacity = opacity
+        self.mark_layer_dirty(layer)
+        if self.on_changed:
+            self.on_changed()
+
+    def set_layer_name(self, layer: Layer, name: str):
+        layer.name = name
+        if self.on_changed:
+            self.on_changed()
+
+    def find_layer_by_id(self, layer_id: str) -> Layer | None:
+        if not layer_id:
+            return None
+        for layer in self._all_layers_flat():
+            if layer.id == layer_id:
+                return layer
+        return None
+
+    def solo_layer(self) -> Layer | None:
+        if self.solo_layer_id is None:
+            return None
+        layer = self.find_layer_by_id(self.solo_layer_id)
+        if layer is None:
+            self.solo_layer_id = None
+        return layer
+
+    def set_solo_layer(self, layer: Layer | None) -> None:
+        next_id = layer.id if layer is not None else None
+        if self.solo_layer_id == next_id:
+            return
+        self.solo_layer_id = next_id
+        self._rebuild_caches()
+        if self.on_changed:
+            self.on_changed()
+
+    def toggle_solo_layer(self, layer: Layer) -> None:
+        if self.solo_layer_id == layer.id:
+            self.set_solo_layer(None)
+        else:
+            self.set_solo_layer(layer)
+
+    def is_layer_visible_for_composition(self, layer: Layer) -> bool:
+        solo = self.solo_layer()
+        if solo is not None:
+            return layer is solo
+        return layer.visible
+
+    def is_layer_tree_visible_for_composition(self, layer: Layer) -> bool:
+        solo = self.solo_layer()
+        if solo is None:
+            return layer.visible
+        if layer is solo:
+            return True
+        return self._layer_contains(layer, solo)
+
+    def _layer_contains(self, root: Layer, target: Layer) -> bool:
+        for child in root.children:
+            if child is target or self._layer_contains(child, target):
+                return True
+        return False
+
+    def set_layer_offset(self, layer: Layer, x: int, y: int,
+                         old_bounds: tuple[int, int, int, int] | None = None):
+        if old_bounds is None:
+            old_bounds = layer.bounds
+        layer.x = int(x)
+        layer.y = int(y)
+        new_bounds = layer.bounds
+        dirty = self._union_rect(old_bounds, new_bounds)
+        self.mark_layer_dirty(layer, dirty)
+        if self.on_changed:
+            self.on_changed()
+
+    def flatten(self):
+        result = self.composite()
+        self._layers.clear()
+        layer = Layer("Background", self._width, self._height, result, tile_size=self._tile_size)
+        self._layers.append(layer)
+        self._active_layer = layer
+        self._rebuild_caches()
+        if self.on_changed:
+            self.on_changed()
+
+    # --- Prefix cache management ---
+
+    def _rebuild_caches(self):
+        """Reset all renderer caches (after structural changes)."""
+        self._renderer.reset_cache()
+
+    def _siblings_of(self, layer: Layer) -> list[Layer]:
+        """Return the siblings list containing layer (root list or parent.children)."""
+        if layer.parent is not None:
+            return layer.parent.children
+        return self._layers
+
+    def _comp_order_siblings(self, layer: Layer) -> list[Layer]:
+        """Siblings in compositing order (bottom to top = reversed list order)."""
+        return list(reversed(self._siblings_of(layer)))
+
+    def comp_order_siblings(self, layer: Layer) -> list[Layer]:
+        """Public wrapper used by renderer."""
+        return self._comp_order_siblings(layer)
+
+    def _invalidate(self, layer: Layer):
+        """Mark a single layer as dirty and clear its cache."""
+        self._renderer.invalidate_tiles({layer}, tiles=None)
+
+    def mark_layer_dirty(self, layer: Layer, rect: tuple[int, int, int, int] | None = None):
+        """Public: call when a layer's content/visibility/opacity changed."""
+        affected = self._collect_affected_layers(layer)
+        if not affected:
+            self._rebuild_caches()
+            return
+        tiles = self._tiles_for_rect(rect)
+        self._renderer.invalidate_tiles(affected, tiles)
+
+    @staticmethod
+    def _union_rect(a: tuple[int, int, int, int] | None,
+                    b: tuple[int, int, int, int] | None
+                    ) -> tuple[int, int, int, int] | None:
+        if a is None:
+            return b
+        if b is None:
+            return a
+        return (min(a[0], b[0]), min(a[1], b[1]),
+                max(a[2], b[2]), max(a[3], b[3]))
+
+    def _tiles_for_rect(self, rect: tuple[int, int, int, int] | None
+                        ) -> set[tuple[int, int]] | None:
+        if rect is None:
+            return None
+        x0, y0, x1, y1 = rect
+        if x1 <= x0 or y1 <= y0:
+            return set()
+        tx0 = max(0, x0 // self._tile_size)
+        ty0 = max(0, y0 // self._tile_size)
+        tx1 = min(self.tiles_x - 1, (x1 - 1) // self._tile_size)
+        ty1 = min(self.tiles_y - 1, (y1 - 1) // self._tile_size)
+        tiles: set[tuple[int, int]] = set()
+        for ty in range(ty0, ty1 + 1):
+            for tx in range(tx0, tx1 + 1):
+                tiles.add((tx, ty))
+        return tiles
+
+    def _collect_affected_layers(self, layer: Layer) -> set[Layer]:
+        affected: set[Layer] = set()
+        try:
+            siblings = self._comp_order_siblings(layer)
+            idx = siblings.index(layer)
+        except ValueError:
+            return affected
+        for i in range(idx, len(siblings)):
+            affected.add(siblings[i])
+        cur = layer.parent
+        while cur is not None:
+            parent_siblings = self._comp_order_siblings(cur)
+            try:
+                pidx = parent_siblings.index(cur)
+            except ValueError:
+                break
+            for i in range(pidx, len(parent_siblings)):
+                affected.add(parent_siblings[i])
+            cur = cur.parent
+        if layer.parent is not None:
+            root = layer
+            while root.parent is not None:
+                root = root.parent
+            root_siblings = self._comp_order_siblings(root)
+            try:
+                ridx = root_siblings.index(root)
+            except ValueError:
+                return affected
+            for i in range(ridx, len(root_siblings)):
+                affected.add(root_siblings[i])
+        return affected
+
+    # --- Compositing ---
+
+    def composite(self, exclude_layer: Layer | None = None) -> np.ndarray:
+        """Composite layers visible in the current composition state.
+
+        If exclude_layer is set, returns prefix of that layer (everything below it).
+        """
+        if not self._layers or self._width == 0:
+            return np.zeros((1, 1, 4), dtype=np.uint8)
+
+        if exclude_layer is not None:
+            return self.get_prefix_below(exclude_layer).copy()
+
+        return self._renderer.composite_full()
+
+    def get_prefix_below(self, layer: Layer) -> np.ndarray:
+        return self._renderer.prefix_full(layer)
+
+    def get_prefix_below_rect(self, layer: Layer, x0: int, y0: int,
+                              x1: int, y1: int) -> np.ndarray:
+        """Return prefix buffer for a rect (uint8 RGBA)."""
+        if self._width == 0 or self._height == 0:
+            return np.zeros((1, 1, 4), dtype=np.uint8)
+        x0 = max(0, x0)
+        y0 = max(0, y0)
+        x1 = min(self._width, x1)
+        y1 = min(self._height, y1)
+        if x1 <= x0 or y1 <= y0:
+            return np.zeros((0, 0, 4), dtype=np.uint8)
+
+        out = np.zeros((y1 - y0, x1 - x0, 4), dtype=np.uint8)
+        tiles = self._tiles_for_rect((x0, y0, x1, y1))
+        if not tiles:
+            return out
+        for tx, ty in tiles:
+            tile = self._renderer.full_prefix_tile(layer, tx, ty)
+            if tile is None:
+                continue
+            bx0, by0, bx1, by1 = self.tile_bounds(tx, ty)
+            ox0 = max(x0, bx0)
+            oy0 = max(y0, by0)
+            ox1 = min(x1, bx1)
+            oy1 = min(y1, by1)
+            if ox1 <= ox0 or oy1 <= oy0:
+                continue
+            src_x0 = ox0 - bx0
+            src_y0 = oy0 - by0
+            src_x1 = src_x0 + (ox1 - ox0)
+            src_y1 = src_y0 + (oy1 - oy0)
+            dst_x0 = ox0 - x0
+            dst_y0 = oy0 - y0
+            dst_x1 = dst_x0 + (ox1 - ox0)
+            dst_y1 = dst_y0 + (oy1 - oy0)
+            out[dst_y0:dst_y1, dst_x0:dst_x1] = tile[src_y0:src_y1, src_x0:src_x1]
+        return out
+
+    # --- Serialization ---
+
+    FORMAT_VERSION = 8
+
+    def _serialize_manifest_and_layers(self, zf: zipfile.ZipFile):
+        manifest = {
+            "format_version": self.FORMAT_VERSION,
+            "canvas_width": self._width,
+            "canvas_height": self._height,
+            "tile_size": self._tile_size,
+            "active_layer_path": self._find_layer_path(self._active_layer),
+            "selection_file": "selection.npy" if not self.selection.is_empty else None,
+            "layers": [],
+        }
+        for i, layer in enumerate(self._layers):
+            layer_path = str(i)
+            manifest["layers"].append(layer.to_dict(layer_path))
+            layer.save_images_to_zip(zf, layer_path)
+        if not self.selection.is_empty:
+            save_array_to_zip(zf, "selection.npy", self.selection.data)
+        zf.writestr("manifest.json",
+                    json.dumps(manifest, indent=2, ensure_ascii=False))
+
+    def _load_from_zip(self, zf: zipfile.ZipFile):
+        manifest = json.loads(zf.read("manifest.json"))
+        version = manifest.get("format_version", 0)
+        if version > self.FORMAT_VERSION:
+            raise ValueError(
+                f"Project version {version} is newer than "
+                f"supported version {self.FORMAT_VERSION}")
+
+        self._tile_size = manifest.get("tile_size", self._tile_size)
+        new_layers = []
+        for layer_dict in manifest["layers"]:
+            layer = _layer_from_dict(layer_dict, zf, tile_size=self._tile_size)
+            new_layers.append(layer)
+
+        self._layers.clear()
+        self._layers.extend(new_layers)
+        self._ensure_unique_layer_ids()
+        if version < 8:
+            self._migrate_canvas_patch_rects_to_layer_local()
+        for layer in self._layers:
+            self._apply_tile_size(layer)
+        self._width = manifest["canvas_width"]
+        self._height = manifest["canvas_height"]
+
+        # Restore selection (v6+) or initialize empty
+        selection_file = manifest.get("selection_file")
+        if selection_file and selection_file in zf.namelist():
+            sel_arr = load_array_from_zip(zf, selection_file)
+            if sel_arr.dtype == np.uint8:
+                sel_arr = sel_arr.astype(np.float32) / 255.0
+            self.selection = Selection(sel_arr)
+        else:
+            self.selection = Selection(height=self._height, width=self._width)
+
+        # Restore active layer (v2: by path, v1: by index)
+        active_path = manifest.get("active_layer_path")
+        if active_path is not None:
+            self._active_layer = self._find_layer_by_path(active_path)
+        else:
+            idx = manifest.get("active_index", 0)
+            if 0 <= idx < len(self._layers):
+                self._active_layer = self._layers[idx]
+            else:
+                self._active_layer = None
+
+        if self._active_layer is None and self._layers:
+            self._active_layer = self._layers[0]
+        self.solo_layer()
+        self._rebuild_caches()
+        if self.on_changed:
+            self.on_changed()
+
+    def serialize_state(self) -> bytes:
+        """Fast snapshot for undo: ZIP_STORED, no compression."""
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+            self._serialize_manifest_and_layers(zf)
+        return buf.getvalue()
+
+    def load_state(self, state: bytes):
+        with zipfile.ZipFile(io.BytesIO(state), "r") as zf:
+            self._load_from_zip(zf)
+
+    def _find_layer_path(self, target: Layer | None) -> str | None:
+        if target is None:
+            return None
+        def _search(layers, prefix):
+            for i, layer in enumerate(layers):
+                path = f"{prefix}/{i}" if prefix else str(i)
+                if layer is target:
+                    return path
+                result = _search(layer.children, path)
+                if result is not None:
+                    return result
+            return None
+        return _search(self._layers, "")
+
+    def get_layer_path(self, target: Layer | None) -> str | None:
+        return self._find_layer_path(target)
+
+    def _find_layer_by_path(self, path: str) -> Layer | None:
+        if not path:
+            return None
+        parts = [int(p) for p in path.split("/")]
+        layers = self._layers
+        layer = None
+        for idx in parts:
+            if 0 <= idx < len(layers):
+                layer = layers[idx]
+                layers = layer.children
+            else:
+                return None
+        return layer
+
+    def get_layer_by_path(self, path: str) -> Layer | None:
+        return self._find_layer_by_path(path)
+
+    def _ensure_unique_layer_ids(self) -> None:
+        from .layer import new_layer_id
+
+        seen: set[str] = set()
+        for layer in self._all_layers_flat():
+            if not layer.id or layer.id in seen:
+                layer.id = new_layer_id()
+            seen.add(layer.id)
+
+    def _migrate_canvas_patch_rects_to_layer_local(self) -> None:
+        for layer in self._all_layers_flat():
+            if layer.patch_rect is not None:
+                layer.patch_rect = layer.canvas_rect_to_local(layer.patch_rect)
+
+    def save_project(self, path: str):
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+            self._serialize_manifest_and_layers(zf)
+
+    def load_project(self, path: str):
+        with zipfile.ZipFile(path, "r") as zf:
+            self._load_from_zip(zf)

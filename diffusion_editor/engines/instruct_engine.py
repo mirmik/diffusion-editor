@@ -1,0 +1,168 @@
+import threading
+from PIL import Image
+from tcbase import log
+
+from ..generation.types import (
+    EnginePollEvent,
+    InstructInferenceResult,
+    InstructRequest,
+)
+
+
+def _import_torch():
+    import torch
+    return torch
+
+
+class InstructEngine:
+    def __init__(self):
+        self._pipe = None
+        self._busy = False
+        self._result = None
+        self._error = None
+        self._result_meta = None
+        self._task_type = None  # "inference" or "load"
+        self._thread = None
+
+    @property
+    def is_loaded(self) -> bool:
+        return self._pipe is not None
+
+    @property
+    def is_busy(self) -> bool:
+        return self._busy
+
+    def load_model(self):
+        torch = _import_torch()
+        from diffusers import StableDiffusionInstructPix2PixPipeline, EulerAncestralDiscreteScheduler
+        self._pipe = StableDiffusionInstructPix2PixPipeline.from_pretrained(
+            "timbrooks/instruct-pix2pix",
+            torch_dtype=torch.float16,
+            safety_checker=None,
+        )
+        self._pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(
+            self._pipe.scheduler.config
+        )
+        self._pipe.to("cuda")
+        log.info("[InstructEngine] Model loaded: timbrooks/instruct-pix2pix")
+
+    def unload(self):
+        if self._pipe is not None:
+            torch = _import_torch()
+            del self._pipe
+            self._pipe = None
+            torch.cuda.empty_cache()
+
+    def submit_load(self):
+        if self._busy:
+            return False
+        self._busy = True
+        self._result = None
+        self._error = None
+        self._result_meta = None
+        self._task_type = "load"
+        self._thread = threading.Thread(target=self._run_load, daemon=True)
+        self._thread.start()
+        return True
+
+    def _run_load(self):
+        try:
+            self.load_model()
+            self._result = True
+        except Exception as e:
+            log.exception("InstructPix2Pix load failed")
+            self._error = str(e)
+        self._busy = False
+
+    def submit_request(self, request: InstructRequest, meta=None):
+        if self._busy:
+            return False
+        self._busy = True
+        self._result = None
+        self._error = None
+        self._result_meta = meta
+        self._task_type = "inference"
+        self._thread = threading.Thread(
+            target=self._run_inference,
+            args=(
+                request.image,
+                request.instruction,
+                request.guidance_scale,
+                request.image_guidance_scale,
+                request.steps,
+                request.seed,
+            ),
+            daemon=True,
+        )
+        self._thread.start()
+        return True
+
+    def _run_inference(self, image, instruction, guidance_scale,
+                       image_guidance_scale, steps, seed):
+        try:
+            if self._pipe is None:
+                raise RuntimeError("Model not loaded")
+
+            image = image.convert("RGB")
+
+            torch = _import_torch()
+            if seed == -1:
+                seed = torch.randint(0, 2**32, (1,)).item()
+            generator = torch.Generator(device="cpu").manual_seed(seed)
+
+            log.debug(
+                "[InstructEngine] instruction=%r image_size=%s guidance_scale=%s image_guidance_scale=%s steps=%s seed=%s"
+                % (instruction, image.size, guidance_scale, image_guidance_scale, steps, seed)
+            )
+
+            result = self._pipe(
+                prompt=instruction,
+                image=image,
+                num_inference_steps=steps,
+                guidance_scale=guidance_scale,
+                image_guidance_scale=image_guidance_scale,
+                generator=generator,
+            ).images[0]
+
+            log.debug(f"[InstructEngine] done, result size: {result.size}")
+            self._result = (result, seed)
+        except Exception as e:
+            log.exception("InstructPix2Pix inference failed")
+            self._error = str(e)
+        self._busy = False
+
+    def poll_event(self) -> EnginePollEvent | None:
+        if self._busy:
+            return None
+
+        task_type = self._task_type
+        result = self._result
+        error = self._error
+        meta = self._result_meta
+
+        if result is None and error is None:
+            return None
+
+        self._result = None
+        self._error = None
+        self._result_meta = None
+        self._task_type = None
+        if task_type == "inference" and result is not None:
+            result_image, used_seed = result
+            result = InstructInferenceResult(
+                image=result_image,
+                seed=used_seed,
+            )
+        return EnginePollEvent(
+            task_type=task_type,
+            result=result,
+            error=error,
+            meta=meta,
+        )
+
+    def shutdown(self, timeout: float = 1.0):
+        """Best-effort engine shutdown for app exit."""
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=timeout)
+        self.unload()
