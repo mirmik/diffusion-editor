@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      sdk_asset:
+        description: Termin SDK release asset to download
+        required: false
+        default: termin-sdk-linux-x86_64-py310-latest-ci.tar.zst
+  repository_dispatch:
+    types: [termin-sdk-published]
+
+permissions:
+  contents: read
+
+env:
+  TERMIN_REPO: mirmik/termin
+  TERMIN_SDK_RELEASE_TAG: sdk-latest-ci
+  DEFAULT_TERMIN_SDK_ASSET: termin-sdk-linux-x86_64-py310-latest-ci.tar.zst
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev libglu1-mesa-dev libsdl2-dev libvulkan-dev libshaderc-dev zstd
+
+      - name: Resolve Termin SDK asset
+        id: sdk
+        env:
+          DISPATCH_ASSET: ${{ github.event.client_payload.asset }}
+          INPUT_ASSET: ${{ github.event.inputs.sdk_asset }}
+        run: |
+          asset="${DISPATCH_ASSET:-${INPUT_ASSET:-$DEFAULT_TERMIN_SDK_ASSET}}"
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+
+      - name: Download Termin SDK
+        env:
+          GH_TOKEN: ${{ secrets.TERMIN_RELEASE_TOKEN || github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/termin-sdk"
+          gh release download "$TERMIN_SDK_RELEASE_TAG" \
+            --repo "$TERMIN_REPO" \
+            --pattern "${{ steps.sdk.outputs.asset }}" \
+            --dir "$RUNNER_TEMP"
+          tar --zstd -xf "$RUNNER_TEMP/${{ steps.sdk.outputs.asset }}" -C "$RUNNER_TEMP/termin-sdk"
+          test -d "$RUNNER_TEMP/termin-sdk/lib"
+          test -d "$RUNNER_TEMP/termin-sdk/wheels"
+          test -f "$RUNNER_TEMP/termin-sdk/manifest.json"
+
+      - name: Install Python dependencies
+        env:
+          TERMIN_SDK: ${{ runner.temp }}/termin-sdk
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install --find-links "$TERMIN_SDK/wheels" tcgui termin-display tgfx tcbase
+          python -m pip install Pillow numpy pysdl2 pytest
+          python -m pip install --no-build-isolation --no-deps -e .
+
+      - name: Verify Termin imports
+        env:
+          TERMIN_SDK: ${{ runner.temp }}/termin-sdk
+          LD_LIBRARY_PATH: ${{ runner.temp }}/termin-sdk/lib
+        run: |
+          python - <<'PY'
+          from termin.display import SDLBackendWindow
+          from tgfx import Tgfx2Context
+          import tcgui
+
+          if SDLBackendWindow is None:
+              raise RuntimeError("termin.display.SDLBackendWindow is not available")
+          print("Termin imports OK", Tgfx2Context, tcgui.__name__)
+          PY
+
+      - name: Run tests
+        env:
+          TERMIN_SDK: ${{ runner.temp }}/termin-sdk
+          LD_LIBRARY_PATH: ${{ runner.temp }}/termin-sdk/lib
+        run: python -m pytest -q
