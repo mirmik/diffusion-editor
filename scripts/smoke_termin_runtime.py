@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render one tcgui frame and reject shader diagnostics from the child host."""
+"""Exercise tcgui and diffusion-editor GPU composition on the Termin SDK."""
 
 from __future__ import annotations
 
@@ -22,7 +22,9 @@ _SHADER_FAILURE_MARKERS = (
 )
 
 
-def _render_one_frame() -> int:
+def _render_frames(frame_count: int, project_path: Path | None = None) -> int:
+    import numpy as np
+
     from tcbase import log
     from tcgui.widgets.label import Label
     from tcgui.widgets.panel import Panel
@@ -30,6 +32,9 @@ def _render_one_frame() -> int:
     from tcgui.widgets.units import pct
     from termin.display import SDLBackendWindow
     from tgfx import Tgfx2Context, configure_default_shader_runtime
+
+    from diffusion_editor.canvas.gpu_compositor import GPUCompositor
+    from diffusion_editor.document.layer_stack import LayerStack
 
     log.set_level(log.Level.INFO)
     if not configure_default_shader_runtime("diffusion-editor-smoke"):
@@ -47,19 +52,47 @@ def _render_one_frame() -> int:
     root.add_child(label)
     ui = UI(graphics=graphics)
     ui.root = root
+    compositor = None
 
     try:
+        # This is the path that caught the API drift missed by the original
+        # one-frame UI-only smoke: TcShader resource layout, texture upload,
+        # symbolic binding, offscreen passes, and immediate triangles.
+        stack = LayerStack(tile_size=16)
+        if project_path is None:
+            pixels = np.zeros((32, 32, 4), dtype=np.uint8)
+            pixels[..., 0] = 180
+            pixels[..., 3] = 255
+            stack.init_from_image(pixels)
+        else:
+            stack.load_project(str(project_path))
+        compositor = GPUCompositor(stack, graphics=graphics)
+        compositor.composite()
+        if graphics.context.in_frame:
+            raise RuntimeError("GPUCompositor stranded an open RenderContext2 frame")
+
         width, height = window.framebuffer_size()
-        texture = ui.render_compose(
-            width, height, background_color=(0.12, 0.12, 0.14, 1.0)
-        )
-        if texture is None:
-            raise RuntimeError("tcgui produced no texture for a non-empty UI")
+        texture = None
+        for _ in range(frame_count):
+            texture = ui.render_compose(
+                width, height, background_color=(0.12, 0.12, 0.14, 1.0)
+            )
+            if texture is None:
+                raise RuntimeError("tcgui produced no texture for a non-empty UI")
+            if graphics.context.in_frame:
+                raise RuntimeError("tcgui stranded an open RenderContext2 frame")
         window.present(texture)
-        print(f"Termin OpenGL render smoke OK: {width}x{height}")
+        project_note = f", project={project_path}" if project_path else ""
+        print(
+            f"Termin render smoke OK: {width}x{height}, frames={frame_count}"
+            f"{project_note}"
+        )
         texture = None
         return 0
     finally:
+        if compositor is not None:
+            compositor.dispose()
+            compositor = None
         ui.root = None
         ui._renderer.close()
         ui = None
@@ -75,7 +108,7 @@ def _render_one_frame() -> int:
         window.close()
 
 
-def _run_checked_child() -> int:
+def _run_checked_child(frame_count: int, project_path: Path | None) -> int:
     sdk = os.environ.get("TERMIN_SDK")
     if not sdk:
         from diffusion_editor.sdk_runtime import resolve_sdk
@@ -85,8 +118,17 @@ def _run_checked_child() -> int:
     if not (Path(sdk) / "python-runtime-manifest.json").is_file():
         raise RuntimeError(f"TERMIN_SDK is incomplete: {sdk}")
 
+    child_command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--child",
+        "--frames",
+        str(frame_count),
+    ]
+    if project_path is not None:
+        child_command.extend(("--project", str(project_path)))
     result = subprocess.run(
-        [sys.executable, str(Path(__file__).resolve()), "--child"],
+        child_command,
         env=os.environ.copy(),
         capture_output=True,
         text=True,
@@ -110,11 +152,20 @@ def _run_checked_child() -> int:
 
 
 def main() -> int:
-    if sys.argv[1:] == ["--child"]:
-        return _render_one_frame()
-    if sys.argv[1:]:
-        raise SystemExit(f"usage: {Path(sys.argv[0]).name}")
-    return _run_checked_child()
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--frames", type=int, default=8)
+    parser.add_argument("--project", type=Path)
+    args = parser.parse_args()
+    if args.frames < 1:
+        parser.error("--frames must be positive")
+    if args.project is not None and not args.project.is_file():
+        parser.error(f"project does not exist: {args.project}")
+    if args.child:
+        return _render_frames(args.frames, args.project)
+    return _run_checked_child(args.frames, args.project)
 
 
 if __name__ == "__main__":

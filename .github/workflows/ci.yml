@@ -82,7 +82,7 @@ jobs:
           python -m diffusion_editor.sdk_runtime verify-installed \
             --sdk "$TERMIN_SDK" --imports
 
-      - name: Render one OpenGL frame
+      - name: Render OpenGL runtime smoke
         env:
           TERMIN_SDK: ${{ runner.temp }}/termin-sdk
           TERMIN_BACKEND: opengl

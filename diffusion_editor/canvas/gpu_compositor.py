@@ -11,79 +11,105 @@ from ..document.layer_stack import LayerStack
 from ..document.layer import Layer
 
 from tgfx._tgfx_native import (
+    ShaderArtifactPolicy,
+    ShaderLanguage,
+    TcShader,
     Tgfx2Context,
     Tgfx2TextureHandle,
     Tgfx2BlendFactor,
-    Tgfx2ShaderStage,
+    tc_shader_ensure_tgfx2,
 )
 
 # ---------------------------------------------------------------------------
-# GLSL sources
+# Scoped Slang sources
 # ---------------------------------------------------------------------------
 #
-# Single source for both backends — `#ifdef VULKAN` is auto-defined by
-# shaderc (=100) when compiling to SPIR-V. Per-draw state lives in a
-# push_constant block on Vulkan and in a UBO at binding 14 on OpenGL
-# (matches the tgfx2 GL push-constant ring UBO). Sampler sits at
-# COMBINED_IMAGE_SAMPLER binding 4, the shared descriptor set's slot
-# for the first fragment sampler.
+# The Termin compiler produces backend artifacts and resource-layout metadata
+# from these sources. Explicit TerminScope attributes keep transient texture
+# and per-draw uniform bindings portable across OpenGL and Vulkan.
 
-_VERT_SRC = """#version 450 core
-layout(location=0) in vec3 a_position;
-layout(location=1) in vec4 a_uv_pad;
+_VERT_SRC = """import termin_prelude;
 
-layout(location=0) out vec2 v_uv;
-
-void main() {
-    v_uv = a_uv_pad.xy;
-    gl_Position = vec4(a_position.xy, 0.0, 1.0);
-}
-"""
-
-_COMPOSITE_FRAG_SRC = """#version 450 core
-struct CompositePush {
-    float u_opacity;
+struct VertexInput {
+    float3 position : POSITION;
+    float4 uv_pad : TEXCOORD0;
 };
-#ifdef VULKAN
-layout(push_constant) uniform CompositePushBlock { CompositePush pc; };
-#else
-layout(std140, binding = 14) uniform CompositePushBlock { CompositePush pc; };
-#endif
 
-layout(binding = 4) uniform sampler2D u_texture;
+struct VertexOutput {
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+};
 
-layout(location=0) in vec2 v_uv;
-layout(location=0) out vec4 FragColor;
-
-void main() {
-    vec4 t = texture(u_texture, v_uv);
-    float a = t.a * pc.u_opacity;
-    FragColor = vec4(t.rgb * a, a);
+[shader("vertex")]
+VertexOutput vs_main(VertexInput input) {
+    VertexOutput output;
+    output.position = termin_to_native_clip(float4(input.position.xy, 0.0, 1.0));
+    output.uv = input.uv_pad.xy;
+    return output;
 }
 """
 
-_UNPREMUL_FRAG_SRC = """#version 450 core
-layout(binding = 4) uniform sampler2D u_texture;
+_COMPOSITE_FRAG_SRC = """import termin_prelude;
 
-layout(location=0) in vec2 v_uv;
-layout(location=0) out vec4 FragColor;
+struct CompositeParams {
+    float opacity;
+};
 
-void main() {
-    vec4 pm = texture(u_texture, v_uv);
-    if (pm.a > 0.001)
-        FragColor = vec4(pm.rgb / pm.a, pm.a);
+[[TerminScope("draw")]]
+ConstantBuffer<CompositeParams> u_composite;
+
+[[TerminScope("transient")]]
+Sampler2D u_texture;
+
+struct FragmentInput {
+    float4 screen_position : SV_Position;
+    float2 uv : TEXCOORD0;
+};
+
+struct FragmentOutput {
+    float4 color : SV_Target0;
+};
+
+[shader("fragment")]
+FragmentOutput fs_main(FragmentInput input) {
+    float4 texel = u_texture.Sample(input.uv);
+    float alpha = texel.a * u_composite.opacity;
+    FragmentOutput output;
+    output.color = float4(texel.rgb * alpha, alpha);
+    return output;
+}
+"""
+
+_UNPREMUL_FRAG_SRC = """import termin_prelude;
+
+[[TerminScope("transient")]]
+Sampler2D u_texture;
+
+struct FragmentInput {
+    float4 screen_position : SV_Position;
+    float2 uv : TEXCOORD0;
+};
+
+struct FragmentOutput {
+    float4 color : SV_Target0;
+};
+
+[shader("fragment")]
+FragmentOutput fs_main(FragmentInput input) {
+    float4 premultiplied = u_texture.Sample(input.uv);
+    FragmentOutput output;
+    if (premultiplied.a > 0.001)
+        output.color = float4(premultiplied.rgb / premultiplied.a,
+                              premultiplied.a);
     else
-        FragColor = vec4(0.0);
+        output.color = float4(0.0);
+    return output;
 }
 """
 
-# Python-side layout of the CompositePush block. `float u_opacity` alone
-# fits in 4 bytes, but std140 UBOs round each member up to 16; Vulkan
-# push-constant blocks are under std430 so a single float is fine. We
-# pad to 16 so the OpenGL branch (which uses std140) and the Vulkan
-# branch both accept the same bytes.
-_COMPOSITE_PUSH_FMT = "=f12x"   # u_opacity + 12 bytes padding (16 total)
-_COMPOSITE_PUSH_SIZE = struct.calcsize(_COMPOSITE_PUSH_FMT)
+# Python-side std140 layout of CompositeParams. A one-float constant buffer
+# still occupies a 16-byte block on all supported backends.
+_COMPOSITE_PARAMS_FMT = "=f12x"  # opacity + 12 bytes padding (16 total)
 
 
 def _full_screen_quad_verts() -> np.ndarray:
@@ -169,8 +195,10 @@ class GPUCompositor:
         self._ctx = None
         self._composite_vs = None
         self._composite_fs = None
+        self._composite_shader = None
         self._unpremul_vs = None
         self._unpremul_fs = None
+        self._unpremul_shader = None
 
         self._quad_verts = _full_screen_quad_verts()
 
@@ -191,50 +219,60 @@ class GPUCompositor:
         self._sync_dirty_textures()
 
         ctx = self._ctx
-        ctx.begin_frame()
+        opened_frame = not ctx.in_frame
+        if opened_frame:
+            ctx.begin_frame()
+        try:
+            # --- Main pass: accumulate layers with premultiplied-alpha blending ---
+            ctx.begin_pass(
+                color=self._main_tex,
+                depth=Tgfx2TextureHandle(),  # no depth
+                clear_color_enabled=True,
+                r=0.0, g=0.0, b=0.0, a=0.0,
+                clear_depth=1.0,
+                clear_depth_enabled=False,
+            )
+            ctx.set_viewport(0, 0, w, h)
+            ctx.set_depth_test(False)
+            ctx.set_blend(True)
+            ctx.set_blend_func(Tgfx2BlendFactor.One,
+                               Tgfx2BlendFactor.OneMinusSrcAlpha)
+            ctx.bind_shader(self._composite_vs, self._composite_fs)
+            ctx.use_shader_resource_layout(self._composite_shader)
 
-        # --- Main pass: accumulate layers with premultiplied-alpha blending ---
-        ctx.begin_pass(
-            color=self._main_tex,
-            depth=Tgfx2TextureHandle(),  # no depth
-            clear_color_enabled=True,
-            r=0.0, g=0.0, b=0.0, a=0.0,
-            clear_depth=1.0,
-            clear_depth_enabled=False,
-        )
-        ctx.set_viewport(0, 0, w, h)
-        ctx.set_depth_test(False)
-        ctx.set_blend(True)
-        ctx.set_blend_func(Tgfx2BlendFactor.One,
-                           Tgfx2BlendFactor.OneMinusSrcAlpha)
-        ctx.bind_shader(self._composite_vs, self._composite_fs)
+            # Bottom-to-top: reversed list order (last in list = bottom).
+            # Need to close the current pass to re-target for nested
+            # group-opacity subtrees, so we track the active target stack.
+            for layer in reversed(self._stack.layers):
+                self._render_layer_tree(layer, self._main_tex)
 
-        # Bottom-to-top: reversed list order (last in list = bottom).
-        # Need to close the current pass to re-target for nested
-        # group-opacity subtrees, so we track the active target stack.
-        for layer in reversed(self._stack.layers):
-            self._render_layer_tree(layer, self._main_tex)
+            ctx.end_pass()
 
-        ctx.end_pass()
-
-        # --- Un-premultiply pass: main_tex → display_tex ---
-        ctx.begin_pass(
-            color=self._display_tex,
-            depth=Tgfx2TextureHandle(),
-            clear_color_enabled=True,
-            r=0.0, g=0.0, b=0.0, a=0.0,
-            clear_depth=1.0,
-            clear_depth_enabled=False,
-        )
-        ctx.set_viewport(0, 0, w, h)
-        ctx.set_blend(False)
-        ctx.bind_shader(self._unpremul_vs, self._unpremul_fs)
-        # Unpremul shader has no uniforms — just the sampler at binding 4.
-        ctx.bind_sampled_texture(4, self._main_tex)
-        ctx.draw_immediate_triangles(self._quad_verts, 6)
-        ctx.end_pass()
-
-        ctx.end_frame()
+            # --- Un-premultiply pass: main_tex → display_tex ---
+            ctx.begin_pass(
+                color=self._display_tex,
+                depth=Tgfx2TextureHandle(),
+                clear_color_enabled=True,
+                r=0.0, g=0.0, b=0.0, a=0.0,
+                clear_depth=1.0,
+                clear_depth_enabled=False,
+            )
+            ctx.set_viewport(0, 0, w, h)
+            ctx.set_blend(False)
+            ctx.bind_shader(self._unpremul_vs, self._unpremul_fs)
+            ctx.use_shader_resource_layout(self._unpremul_shader)
+            ctx.bind_texture_by_name("u_texture", self._main_tex)
+            ctx.draw_immediate_triangles(self._quad_verts, 6)
+        finally:
+            # An exception must never strand a borrowed RenderContext2 in an
+            # open pass/frame. UIRenderer deliberately does not close frames
+            # opened by another renderer; leaving ours alive makes Vulkan's
+            # transient buffers and descriptor pool grow until exhaustion.
+            try:
+                ctx.end_pass()
+            finally:
+                if opened_frame:
+                    ctx.end_frame()
         self._dirty = False
 
     @property
@@ -335,19 +373,32 @@ class GPUCompositor:
         if self._ctx is None:
             self._ctx = self._graphics.context
         if self._composite_vs is None:
-            # Compile directly on the tgfx2 device — same path UIRenderer
-            # uses. No TcShader bridge, no legacy tc_gpu_slot: the route
-            # works on both OpenGL and Vulkan.
-            dev = self._graphics.device
-            self._composite_vs = dev.create_shader(Tgfx2ShaderStage.Vertex, _VERT_SRC)
-            self._composite_fs = dev.create_shader(Tgfx2ShaderStage.Fragment,
-                                                    _COMPOSITE_FRAG_SRC)
-            self._unpremul_vs = dev.create_shader(Tgfx2ShaderStage.Vertex, _VERT_SRC)
-            self._unpremul_fs = dev.create_shader(Tgfx2ShaderStage.Fragment,
-                                                   _UNPREMUL_FRAG_SRC)
+            self._composite_shader, composite = self._ensure_shader(
+                "diffusion-editor-gpu-composite", _COMPOSITE_FRAG_SRC)
+            self._composite_vs, self._composite_fs = composite.vs, composite.fs
+            self._unpremul_shader, unpremul = self._ensure_shader(
+                "diffusion-editor-gpu-unpremultiply", _UNPREMUL_FRAG_SRC)
+            self._unpremul_vs, self._unpremul_fs = unpremul.vs, unpremul.fs
             if not (self._composite_vs and self._composite_fs
                     and self._unpremul_vs and self._unpremul_fs):
                 raise RuntimeError("GPUCompositor: shader compile failed")
+
+    def _ensure_shader(self, uuid: str, fragment_source: str):
+        """Build a stable TcShader with the current symbolic resource layout."""
+        shader = TcShader.get_or_create(uuid)
+        shader.set_sources_with_entries(
+            _VERT_SRC,
+            fragment_source,
+            "",
+            uuid,
+            f"diffusion_editor/canvas/{uuid}.slang",
+            "vs_main",
+            "fs_main",
+        )
+        shader.set_language(ShaderLanguage.SLANG)
+        shader.set_artifact_policy(ShaderArtifactPolicy.REQUIRED)
+        pair = tc_shader_ensure_tgfx2(self._ctx, shader)
+        return shader, pair
 
     def _ensure_attachments(self, w: int, h: int):
         if (self._main_tex is not None
@@ -443,6 +494,7 @@ class GPUCompositor:
             ctx.set_blend_func(Tgfx2BlendFactor.One,
                                Tgfx2BlendFactor.OneMinusSrcAlpha)
             ctx.bind_shader(self._composite_vs, self._composite_fs)
+            ctx.use_shader_resource_layout(self._composite_shader)
 
             for child in reversed(layer.children):
                 self._render_layer_tree(child, temp)
@@ -489,12 +541,9 @@ class GPUCompositor:
     def _draw_texture_quad(self, texture: Tgfx2TextureHandle, opacity: float,
                            verts: np.ndarray | None = None):
         ctx = self._ctx
-        # Sampler slot 4 matches `layout(binding = 4)` in the fragment
-        # shader (combined image+sampler — the shared descriptor set's
-        # first fragment texture binding on both backends).
-        ctx.bind_sampled_texture(4, texture)
-        data = struct.pack(_COMPOSITE_PUSH_FMT, float(opacity))
-        ctx.set_push_constants(np.asarray(bytearray(data), dtype=np.uint8))
+        ctx.bind_texture_by_name("u_texture", texture)
+        data = struct.pack(_COMPOSITE_PARAMS_FMT, float(opacity))
+        ctx.bind_uniform_by_name("u_composite", data)
         ctx.draw_immediate_triangles(self._quad_verts if verts is None else verts, 6)
 
     # ------------------------------------------------------------------

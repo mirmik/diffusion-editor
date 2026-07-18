@@ -13,6 +13,7 @@ from diffusion_editor.sdk_runtime import (
     resolve_sdk,
     termin_requirement_closure,
     verify_installed,
+    verify_installed_payloads,
 )
 
 
@@ -26,6 +27,7 @@ def _write_wheel(
     *requires: str,
     native_member: str | None = None,
     native_payload: bytes = b"native-binding",
+    payload_members: dict[str, bytes] | None = None,
 ) -> None:
     wheel_name = name.replace("-", "_")
     path = sdk / "wheels" / f"{wheel_name}-{version}-py3-none-any.whl"
@@ -42,6 +44,8 @@ def _write_wheel(
         )
         if native_member is not None:
             archive.writestr(native_member, native_payload)
+        for member, payload in (payload_members or {}).items():
+            archive.writestr(member, payload)
 
 
 def _make_sdk(tmp_path: Path, *, stale_tgfx: bool = False) -> Path:
@@ -160,3 +164,31 @@ def test_retagged_wheel_is_accepted_only_when_native_payload_matches(tmp_path: P
     requirements = termin_requirement_closure(contract)
     assert "tgfx==0.1.0+sdk456" in requirements
     assert "termin-display==0.1.0+sdk456" in requirements
+
+
+def test_installed_payload_must_match_selected_sdk_wheel(tmp_path: Path):
+    sdk = _make_sdk(tmp_path)
+    tcgui_wheel = next((sdk / "wheels").glob("tcgui-*.whl"))
+    tcgui_wheel.unlink()
+    _write_wheel(
+        sdk,
+        "tcgui",
+        "0.1.0",
+        "tcbase",
+        "tgfx",
+        payload_members={"tcgui/widgets/renderer.py": b"current-sdk-renderer\n"},
+    )
+    installed = tmp_path / "installed"
+    (installed / "tcgui/widgets").mkdir(parents=True)
+    (installed / "tcgui/widgets/renderer.py").write_bytes(b"stale-venv-renderer\n")
+
+    with pytest.raises(SdkContractError, match="installed file differs from SDK"):
+        verify_installed_payloads(
+            load_contract(sdk),
+            {"tcgui": installed},
+        )
+
+    (installed / "tcgui/widgets/renderer.py").write_bytes(
+        b"current-sdk-renderer\n"
+    )
+    verify_installed_payloads(load_contract(sdk), {"tcgui": installed})

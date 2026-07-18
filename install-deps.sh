@@ -43,7 +43,7 @@ echo "=== Installing diffusion-editor Python requirements ==="
 
 echo ""
 echo "=== Installing exact Termin packages from SDK wheelhouse ==="
-"$PIP" install --no-index --no-deps --find-links "$WHEELHOUSE" \
+"$PIP" install --force-reinstall --no-index --no-deps --find-links "$WHEELHOUSE" \
     "${TERMIN_REQUIREMENTS[@]}"
 
 echo ""

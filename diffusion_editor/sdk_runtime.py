@@ -298,6 +298,11 @@ def _select_sdk_wheel(
 def termin_requirement_versions(contract: SdkContract) -> dict[str, str]:
     """Return exact SDK-owned requirements needed by this application."""
 
+    selected = _selected_termin_wheels(contract)
+    return {name: selected[name].version for name in sorted(selected)}
+
+
+def _selected_termin_wheels(contract: SdkContract) -> dict[str, WheelMetadata]:
     wheels = wheelhouse_metadata(contract)
     pending = [normalize_distribution(name) for name in DIRECT_TERMIN_DISTRIBUTIONS]
     selected: dict[str, WheelMetadata] = {}
@@ -323,7 +328,7 @@ def termin_requirement_versions(contract: SdkContract) -> dict[str, str]:
             "SDK wheel dependency closure mixes native build IDs: "
             + (", ".join(sorted(native_build_ids)) or "none found")
         )
-    return {name: selected[name].version for name in sorted(selected)}
+    return selected
 
 
 def termin_requirement_closure(contract: SdkContract) -> tuple[str, ...]:
@@ -357,15 +362,101 @@ def verify_installed(
         raise SdkContractError("Termin Python environment does not match the selected SDK:\n- " + "\n- ".join(errors))
 
 
-def verify_imports() -> None:
+def _installed_distribution_roots() -> dict[str, Path]:
+    result: dict[str, Path] = {}
+    for distribution in metadata.distributions():
+        name = distribution.metadata.get("Name")
+        if name:
+            result[normalize_distribution(name)] = Path(
+                distribution.locate_file("")
+            ).resolve()
+    return result
+
+
+def verify_installed_payloads(
+    contract: SdkContract,
+    distribution_roots: dict[str, Path] | None = None,
+) -> None:
+    """Reject same-version wheels whose installed files differ from the SDK.
+
+    Termin rebuilds have historically reused a distribution version. Version
+    equality alone can therefore combine current SDK libraries with stale
+    pure-Python modules from a venv. Compare every wheel payload byte, while
+    ignoring installer-generated dist-info files.
+    """
+
+    roots = (
+        distribution_roots
+        if distribution_roots is not None
+        else _installed_distribution_roots()
+    )
+    errors: list[str] = []
+    for name, wheel in sorted(_selected_termin_wheels(contract).items()):
+        try:
+            with ZipFile(wheel.path) as archive:
+                payload_members = [
+                    member
+                    for member in archive.namelist()
+                    if not member.endswith("/") and ".dist-info/" not in member
+                ]
+                if not payload_members:
+                    continue
+                root = roots.get(name)
+                if root is None:
+                    errors.append(f"{name}: installed distribution root not found")
+                    continue
+                for member in payload_members:
+                    installed_path = root / member
+                    if not installed_path.is_file():
+                        errors.append(f"{name}: missing installed file {member}")
+                        break
+                    if hashlib.sha256(archive.read(member)).digest() != hashlib.sha256(
+                        installed_path.read_bytes()
+                    ).digest():
+                        errors.append(f"{name}: installed file differs from SDK: {member}")
+                        break
+        except (OSError, BadZipFile, KeyError) as exc:
+            errors.append(f"{name}: cannot compare installed payload: {exc}")
+
+    if errors:
+        raise SdkContractError(
+            "Termin Python payloads do not match the selected SDK; "
+            "run ./install-deps.sh to refresh the venv:\n- "
+            + "\n- ".join(errors)
+        )
+
+
+def _require_module_from_runtime_environment(module) -> None:
+    origin = getattr(module, "__file__", None)
+    if not origin:
+        raise SdkContractError(f"Cannot determine origin of {module.__name__}")
+    resolved = Path(origin).resolve()
+    # Installed wheels normally live in the venv, not SDK/site-packages. Their
+    # bytes were checked above; module origin must at least be inside the same
+    # interpreter environment rather than an unrelated user/global install.
+    interpreter_root = Path(sys.prefix).resolve()
+    if (
+        PROJECT_ROOT not in resolved.parents
+        and interpreter_root not in resolved.parents
+    ):
+        raise SdkContractError(
+            f"{module.__name__} imported from unrelated location: {resolved}"
+        )
+
+
+def verify_imports(contract: SdkContract) -> None:
     import tcbase  # noqa: F401
     import tcgui
+    import tgfx
+    import termin.display
     from termin.display import SDLBackendWindow
     from tgfx import Tgfx2Context, configure_default_shader_runtime
 
     required = (tcgui, SDLBackendWindow, Tgfx2Context, configure_default_shader_runtime)
     if any(value is None for value in required):
         raise SdkContractError("One or more required Termin runtime exports are unavailable")
+    for module in (tcbase, tcgui, tgfx, termin.display):
+        _require_module_from_runtime_environment(module)
 
 
 def write_state(root: Path, state_file: Path = DEFAULT_STATE_FILE) -> None:
@@ -429,8 +520,9 @@ def main(argv: Iterable[str] | None = None) -> int:
             # verify_installed also checks the wheelhouse closure, ensuring the
             # saved SDK can reproduce this environment.
             verify_installed(contract)
+            verify_installed_payloads(contract)
             if args.imports:
-                verify_imports()
+                verify_imports(contract)
             print(f"Termin SDK runtime verified: {root} (Python {contract.python_abi})")
             return 0
         if args.command == "write-state":
