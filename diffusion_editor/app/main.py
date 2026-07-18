@@ -14,7 +14,7 @@ from sdl2 import video
 from tcbase import Key, MouseButton, Mods
 from tcbase import log
 
-from tgfx import Tgfx2Context
+from tgfx import Tgfx2Context, configure_default_shader_runtime
 from termin.display import SDLBackendWindow
 
 from .editor_window import EditorWindow
@@ -121,6 +121,12 @@ def main():
     import faulthandler
     faulthandler.enable()
     log.set_level(log.Level.INFO)
+
+    if not configure_default_shader_runtime("diffusion-editor"):
+        raise RuntimeError(
+            "Termin shader runtime is unavailable. Check that TERMIN_SDK points "
+            "to the installed SDK and contains bin/termin_shaderc and bin/slangc."
+        )
 
     # SDLBackendWindow owns the device + SDL window; backend picked from
     # TERMIN_BACKEND env-var.

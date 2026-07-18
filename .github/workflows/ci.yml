@@ -35,7 +35,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgl1-mesa-dev libglu1-mesa-dev libsdl2-dev libvulkan-dev libshaderc-dev zstd
+          sudo apt-get install -y libgl1-mesa-dev libglu1-mesa-dev libsdl2-dev libvulkan-dev libshaderc-dev xvfb zstd
 
       - name: Resolve Termin SDK asset
         id: sdk
@@ -59,33 +59,37 @@ jobs:
           test -d "$RUNNER_TEMP/termin-sdk/lib"
           test -d "$RUNNER_TEMP/termin-sdk/wheels"
           test -f "$RUNNER_TEMP/termin-sdk/manifest.json"
+          test -f "$RUNNER_TEMP/termin-sdk/python-runtime-manifest.json"
 
       - name: Install Python dependencies
         env:
           TERMIN_SDK: ${{ runner.temp }}/termin-sdk
         run: |
           python -m pip install --upgrade pip setuptools wheel
-          python -m pip install --find-links "$TERMIN_SDK/wheels" tcgui termin-display tgfx tcbase
-          python -m pip install Pillow numpy pysdl2 pytest
+          termin_requirements_output="$(
+            python -m diffusion_editor.sdk_runtime requirements --sdk "$TERMIN_SDK"
+          )"
+          mapfile -t termin_requirements <<< "$termin_requirements_output"
+          python -m pip install --no-index --no-deps \
+            --find-links "$TERMIN_SDK/wheels" "${termin_requirements[@]}"
+          python -m pip install Pillow numpy PyYAML pysdl2 pytest
           python -m pip install --no-build-isolation --no-deps -e .
 
       - name: Verify Termin imports
         env:
           TERMIN_SDK: ${{ runner.temp }}/termin-sdk
-          LD_LIBRARY_PATH: ${{ runner.temp }}/termin-sdk/lib
         run: |
-          python - <<'PY'
-          from termin.display import SDLBackendWindow
-          from tgfx import Tgfx2Context
-          import tcgui
+          python -m diffusion_editor.sdk_runtime verify-installed \
+            --sdk "$TERMIN_SDK" --imports
 
-          if SDLBackendWindow is None:
-              raise RuntimeError("termin.display.SDLBackendWindow is not available")
-          print("Termin imports OK", Tgfx2Context, tcgui.__name__)
-          PY
+      - name: Render one OpenGL frame
+        env:
+          TERMIN_SDK: ${{ runner.temp }}/termin-sdk
+          TERMIN_BACKEND: opengl
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: xvfb-run -a python scripts/smoke_termin_runtime.py
 
       - name: Run tests
         env:
           TERMIN_SDK: ${{ runner.temp }}/termin-sdk
-          LD_LIBRARY_PATH: ${{ runner.temp }}/termin-sdk/lib
         run: python -m pytest -q

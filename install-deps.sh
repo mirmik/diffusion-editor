@@ -8,7 +8,7 @@
 #   1. $TERMIN_SDK
 #   2. /opt/termin
 
-set -e
+set -euo pipefail
 
 cd "$(dirname "$0")"
 
@@ -21,51 +21,41 @@ fi
 PY="$VENV/bin/python"
 PIP="$VENV/bin/pip"
 
-_sdk_valid() {
-    [ -d "$1/lib" ] && [ -d "$1/wheels" ]
-}
-
+SDK_ARGS=()
 if [ -n "${TERMIN_SDK:-}" ]; then
-    if ! _sdk_valid "$TERMIN_SDK"; then
-        echo "ERROR: TERMIN_SDK=$TERMIN_SDK is not a valid Termin SDK." >&2
-        echo "Expected both: \$TERMIN_SDK/lib and \$TERMIN_SDK/wheels" >&2
-        exit 1
-    fi
-elif _sdk_valid "/opt/termin"; then
-    export TERMIN_SDK="/opt/termin"
-else
-    echo "ERROR: Termin SDK not found." >&2
-    echo "Set TERMIN_SDK or install Termin SDK to /opt/termin." >&2
-    echo "Expected SDK layout: lib/ and wheels/" >&2
-    exit 1
+    SDK_ARGS=(--sdk "$TERMIN_SDK")
 fi
+export TERMIN_SDK
+TERMIN_SDK="$("$PY" -m diffusion_editor.sdk_runtime resolve "${SDK_ARGS[@]}")"
 
 WHEELHOUSE="$TERMIN_SDK/wheels"
 echo "Using TERMIN_SDK=$TERMIN_SDK"
 echo "Using wheelhouse=$WHEELHOUSE"
 
-echo ""
-echo "=== Installing Termin packages from SDK wheelhouse ==="
-"$PIP" install --find-links "$WHEELHOUSE" tcgui termin-display
+TERMIN_REQUIREMENTS_OUTPUT="$(
+    "$PY" -m diffusion_editor.sdk_runtime requirements --sdk "$TERMIN_SDK"
+)"
+mapfile -t TERMIN_REQUIREMENTS <<< "$TERMIN_REQUIREMENTS_OUTPUT"
 
 echo ""
 echo "=== Installing diffusion-editor Python requirements ==="
 "$PIP" install -r requirements.txt
 
 echo ""
+echo "=== Installing exact Termin packages from SDK wheelhouse ==="
+"$PIP" install --no-index --no-deps --find-links "$WHEELHOUSE" \
+    "${TERMIN_REQUIREMENTS[@]}"
+
+echo ""
 echo "=== Installing diffusion-editor editable package ==="
-"$PIP" install --no-build-isolation -e .
+"$PIP" install --no-build-isolation --no-deps -e .
 
 echo ""
 echo "=== Verifying Termin runtime imports ==="
-"$PY" - <<'PY'
-from termin.display import SDLBackendWindow
-
-if SDLBackendWindow is None:
-    raise RuntimeError("termin.display.SDLBackendWindow is not available in this Termin SDK build")
-
-print("SDLBackendWindow OK")
-PY
+"$PY" -m diffusion_editor.sdk_runtime verify-installed \
+    --sdk "$TERMIN_SDK" --imports
+"$PIP" check
+"$PY" -m diffusion_editor.sdk_runtime write-state --sdk "$TERMIN_SDK"
 
 echo ""
 echo "Done. Dependencies installed into $VENV"
