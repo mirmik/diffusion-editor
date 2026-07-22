@@ -159,11 +159,11 @@ def main():
     def dispatch(ev):
         t = ev.type
         if t == sdl2.SDL_QUIT:
-            editor._running = False
+            editor.request_stop()
             window.set_should_close(True)
         elif t == sdl2.SDL_WINDOWEVENT:
             if ev.window.event == video.SDL_WINDOWEVENT_CLOSE:
-                editor._running = False
+                editor.request_stop()
                 window.set_should_close(True)
         elif t == sdl2.SDL_MOUSEMOTION:
             ui.mouse_move(float(ev.motion.x), float(ev.motion.y))
@@ -209,6 +209,8 @@ def main():
             if tex is not None:
                 window.present(tex)
     finally:
+        # Application shutdown stops view workers, inference workers and GPU
+        # resources before the borrowed host/window leaves scope.
         editor.close()
         # SDLBackendWindow destructor cleans up SDL window + GL/Vulkan
         # device in the correct order. Dropping the Python wrapper is

@@ -29,8 +29,6 @@ from tcgui.widgets.units import px, pct
 from tcgui.widgets.splitter import Splitter
 
 from ..agent.chat_panel import DEFAULT_AGENT_BASE_URL, DEFAULT_AGENT_MODEL, AgentChatPanel
-from ..agent.tools import create_editor_tool_registry
-from ..document.layer_stack import LayerStack
 from ..document.mask import coerce_mask_data
 from ..document.layer import Layer
 from ..document.tool import DiffusionTool, LamaTool, InstructTool
@@ -39,24 +37,20 @@ from ..canvas.editor_canvas import EditorCanvas
 from ..ui.panels.layer_panel import LayerPanel
 from ..ui.panels.brush_panel import BrushPanel
 from ..ui.panels.diffusion_panel import DiffusionPanel
-from ..generation.diffusion_controller import DiffusionGenerationController
-from ..grounding.controller import GroundingController
-from ..engines.grounding_engine import GroundingEngine
 from ..grounding.types import GroundingParams
-from ..generation.instruct_controller import InstructGenerationController
 from ..ui.dialogs.ip_adapter_reference_dialog import show_ip_adapter_reference_dialog
-from ..generation.lama_controller import LamaGenerationController
 from ..ui.panels.lama_panel import LamaPanel
 from ..ui.panels.instruct_panel import InstructPanel
 from ..ui.panels.selection_panel import SelectionPanel
-from ..generation.segmentation_controller import SegmentationGenerationController
-from ..engines.lama_engine import LamaEngine
-from ..engines.segmentation_engine import SegmentationEngine
 from ..generation.patch_resolver import source_patch_at_center
 from ..ui.dialogs.file_dialog import open_file_dialog, save_file_dialog, open_directory_dialog
-from .settings import Settings
-from ..document.history import HistoryManager
-from ..document.document_service import DocumentService
+from .application import (
+    MAX_HISTORY_MEMORY_LIMIT_GIB,
+    MIN_HISTORY_MEMORY_LIMIT_GIB,
+    EditorApplication,
+    ShutdownPhase,
+)
+from .presentation import PanelUpdate, ViewPorts
 from ..document.commands import (
     AddLayerCommand, RemoveLayerCommand,
     MoveLayerCommand, SetLayerVisibilityCommand, SetLayerOpacityCommand,
@@ -68,15 +62,8 @@ from ..document.commands import (
     ClearSelectionCommand, InvertSelectionCommand, SelectAllCommand,
     SetLayerSelectionCommand,
 )
-from ..generation.result_mapper import (
-    map_segmentation_result, map_lama_result,
-    map_instruct_result, map_diffusion_result, map_grounding_result,
-)
 
 _BYTES_PER_GIB = 1024 * 1024 * 1024
-_DEFAULT_HISTORY_MEMORY_LIMIT_BYTES = 5 * _BYTES_PER_GIB
-_MIN_HISTORY_MEMORY_LIMIT_GIB = 0.25
-_MAX_HISTORY_MEMORY_LIMIT_GIB = 256.0
 _EXPORT_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 
 
@@ -89,10 +76,49 @@ class ExternalEditContext:
     before_offset: tuple[int, int] | None = None
 
 
+class _LegacyPresentation:
+    """Projects toolkit-neutral application events into the tcgui view."""
+
+    def __init__(self, window: "EditorWindow") -> None:
+        self._window = window
+
+    def set_status(self, text: str) -> None:
+        self._window._statusbar.text = text
+
+    def update_panel(self, update: PanelUpdate) -> None:
+        if update.panel_id == "instruct":
+            if update.state == "model-loading":
+                self._window._instruct_panel.set_model_loading()
+            elif update.state == "model-error":
+                self._window._instruct_panel.on_model_load_error(
+                    str(update.payload["error"])
+                )
+            elif update.state == "model-loaded":
+                self._window._instruct_panel.on_model_loaded()
+            return
+        if update.panel_id != "diffusion":
+            return
+        if update.state == "model-error":
+            self._window._diffusion_panel.on_model_load_error(
+                str(update.payload["error"])
+            )
+        elif update.state == "model-loaded":
+            self._window._diffusion_panel.on_model_loaded(
+                str(update.payload["path"]),
+                update.payload["info"],
+            )
+        elif update.state == "ip-adapter-error":
+            self._window._diffusion_panel.on_ip_adapter_load_error(
+                str(update.payload["error"])
+            )
+        elif update.state == "ip-adapter-loaded":
+            self._window._diffusion_panel.on_ip_adapter_loaded()
+
+
 class EditorWindow:
     """Non-widget orchestrator: assembles UI, wires callbacks, handles logic."""
 
-    def __init__(self, ctx=None):
+    def __init__(self, ctx=None, *, application: EditorApplication | None = None):
         # Optional borrowed tgfx2 context. When given (typically by
         # main.py, which owns an SDLBackendWindow and wants every renderer
         # to share one IRenderDevice), the UI draws through it; when
@@ -101,70 +127,107 @@ class EditorWindow:
         # cross-widget TextureHandle sharing and swapchain presentation
         # both assume a single process-global device.
         self._ctx = ctx
-        self._running = True
-        self._closed = False
-        self._settings = Settings()
-        self._project_path: str | None = None
-        self._last_dir: str = self._settings.get("last_dir", "")
-        self._history_memory_limit_bytes = self._load_history_memory_limit_bytes()
-        self._models_dir = self._load_models_dir()
-        self._clipboard: np.ndarray | None = None  # RGBA uint8 patch
-        self._clipboard_pos: tuple[int, int] | None = None
-        self._history_replaying = False
+        self.application = application if application is not None else EditorApplication()
+        self._settings = self.application.settings
+        self._project_path = self.application.project_path
+        self._last_dir = self.application.last_dir
+        self._history_memory_limit_bytes = self.application.history_memory_limit_bytes
+        self._models_dir = self.application.models_dir
+        self._clipboard = self.application.clipboard
+        self._clipboard_pos = self.application.clipboard_pos
         self._external_edit_ctx: ExternalEditContext | None = None
 
-        # Layer stack
-        self._layer_stack = LayerStack()
-
-        # Engines
-        from ..engines.diffusion_engine import DiffusionEngine
-        from ..engines.instruct_engine import InstructEngine
-
-        self._engine = DiffusionEngine()
-        self._seg_engine = SegmentationEngine()
-        self._lama_engine = LamaEngine()
-        self._instruct_engine = InstructEngine()
-        self._grounding_engine = GroundingEngine()
-        self._history = HistoryManager(
-            self._apply_snapshot,
-            max_memory_bytes=self._history_memory_limit_bytes,
-        )
-        self._document = DocumentService(
-            self._layer_stack,
-            self._history,
-            self._apply_snapshot,
-        )
-
-        # Agent tool registry (created once, reused across chat clear/reset)
-        self._agent_tool_registry = create_editor_tool_registry()
+        # Explicit compatibility aliases while the tcgui view is migrated in
+        # vertical slices. All of these objects are owned by EditorApplication.
+        self._layer_stack = self.application.layer_stack
+        self._history = self.application.history
+        self._document = self.application.document
+        self._engine = self.application.engines.diffusion
+        self._seg_engine = self.application.engines.segmentation
+        self._lama_engine = self.application.engines.lama
+        self._instruct_engine = self.application.engines.instruct
+        self._grounding_engine = self.application.engines.grounding
+        self._agent_tool_registry = self.application.agent_tool_registry
+        self._diffusion_controller = self.application.diffusion_controller
+        self._lama_controller = self.application.lama_controller
+        self._instruct_controller = self.application.instruct_controller
+        self._segmentation_controller = self.application.segmentation_controller
+        self._grounding_controller = self.application.grounding_controller
 
         # Build UI
         self._build_ui()
-        self._diffusion_controller = DiffusionGenerationController(
-            engine=self._engine,
-            layer_stack=self._layer_stack,
-            composite_below=lambda layer: self._canvas.get_composite_below(layer),
+        self._presentation = _LegacyPresentation(self)
+        self.application.bind_view(ViewPorts(
+            status=self._presentation,
+            panels=self._presentation,
+            canvas=self._canvas,
+        ))
+        self.application.add_snapshot_listener(self._on_snapshot_applied)
+        self.application.register_shutdown_resource(
+            ShutdownPhase.VIEW_WORKERS,
+            "agent-chat",
+            self._agent_chat_panel.shutdown,
         )
-        self._lama_controller = LamaGenerationController(
-            engine=self._lama_engine,
-            composite_below=lambda layer: self._canvas.get_composite_below(layer),
-        )
-        self._instruct_controller = InstructGenerationController(
-            engine=self._instruct_engine,
-            composite_below=lambda layer: self._canvas.get_composite_below(layer),
-        )
-        self._segmentation_controller = SegmentationGenerationController(
-            engine=self._seg_engine,
-            composite_below=lambda layer: self._canvas.get_composite_below(layer),
-        )
-        self._grounding_controller = GroundingController(
-            engine=self._grounding_engine,
-            composite=lambda: self._layer_stack.composite(),
+        self.application.register_shutdown_resource(
+            ShutdownPhase.GPU_RESOURCES,
+            "canvas",
+            self._canvas.dispose,
         )
 
         # Wire callbacks
         self._wire_callbacks()
         self._menu_bar.register_shortcuts(self.ui)
+
+    # Temporary scalar compatibility seam for the legacy view. The values
+    # live on EditorApplication even while existing tcgui callbacks retain
+    # their old private names during vertical migration.
+    @property
+    def _project_path(self) -> str | None:
+        return self.application.project_path
+
+    @_project_path.setter
+    def _project_path(self, value: str | None) -> None:
+        self.application.project_path = value
+
+    @property
+    def _last_dir(self) -> str:
+        return self.application.last_dir
+
+    @_last_dir.setter
+    def _last_dir(self, value: str) -> None:
+        self.application.last_dir = value
+
+    @property
+    def _models_dir(self) -> str:
+        return self.application.models_dir
+
+    @_models_dir.setter
+    def _models_dir(self, value: str) -> None:
+        self.application.models_dir = value
+
+    @property
+    def _history_memory_limit_bytes(self) -> int:
+        return self.application.history_memory_limit_bytes
+
+    @_history_memory_limit_bytes.setter
+    def _history_memory_limit_bytes(self, value: int) -> None:
+        self.application.history_memory_limit_bytes = value
+
+    @property
+    def _clipboard(self) -> np.ndarray | None:
+        return self.application.clipboard
+
+    @_clipboard.setter
+    def _clipboard(self, value: np.ndarray | None) -> None:
+        self.application.clipboard = value
+
+    @property
+    def _clipboard_pos(self) -> tuple[int, int] | None:
+        return self.application.clipboard_pos
+
+    @_clipboard_pos.setter
+    def _clipboard_pos(self, value: tuple[int, int] | None) -> None:
+        self.application.clipboard_pos = value
 
     # ------------------------------------------------------------------
     # UI Construction
@@ -444,37 +507,19 @@ class EditorWindow:
         return f"{n / (1024 * 1024):.1f}M"
 
     def _load_history_memory_limit_bytes(self) -> int:
-        raw = self._settings.get("history_memory_limit_bytes", _DEFAULT_HISTORY_MEMORY_LIMIT_BYTES)
-        try:
-            value = int(raw)
-        except (TypeError, ValueError):
-            return _DEFAULT_HISTORY_MEMORY_LIMIT_BYTES
-        if value <= 0:
-            return _DEFAULT_HISTORY_MEMORY_LIMIT_BYTES
-        return value
+        return self.application.history_memory_limit_bytes
 
     def _set_history_memory_limit_bytes(self, limit_bytes: int) -> None:
-        limit_bytes = max(int(limit_bytes), int(_MIN_HISTORY_MEMORY_LIMIT_GIB * _BYTES_PER_GIB))
-        self._history_memory_limit_bytes = limit_bytes
-        self._document.set_history_memory_limit_bytes(limit_bytes)
-        self._settings.set("history_memory_limit_bytes", limit_bytes)
+        self.application.set_history_memory_limit_bytes(limit_bytes)
+        self._history_memory_limit_bytes = self.application.history_memory_limit_bytes
 
     def _load_models_dir(self) -> str:
-        raw = self._settings.get("models_dir", DiffusionPanel.default_models_dir())
-        if not isinstance(raw, str):
-            return DiffusionPanel.default_models_dir()
-        value = os.path.expanduser(raw.strip())
-        if not value:
-            return DiffusionPanel.default_models_dir()
-        return value
+        return self.application.models_dir
 
     def _set_models_dir(self, models_dir: str) -> None:
-        value = os.path.expanduser(models_dir.strip())
-        if not value:
-            value = DiffusionPanel.default_models_dir()
-        self._models_dir = value
-        self._diffusion_panel.set_models_dir(value)
-        self._settings.set("models_dir", value)
+        self.application.set_models_dir(models_dir)
+        self._models_dir = self.application.models_dir
+        self._diffusion_panel.set_models_dir(self._models_dir)
 
     def _show_settings_dialog(self):
         if self.ui is None:
@@ -528,8 +573,8 @@ class EditorWindow:
         limit_input = SpinBox()
         limit_input.decimals = 2
         limit_input.step = 0.25
-        limit_input.min_value = _MIN_HISTORY_MEMORY_LIMIT_GIB
-        limit_input.max_value = _MAX_HISTORY_MEMORY_LIMIT_GIB
+        limit_input.min_value = MIN_HISTORY_MEMORY_LIMIT_GIB
+        limit_input.max_value = MAX_HISTORY_MEMORY_LIMIT_GIB
         limit_input.value = self._history_memory_limit_bytes / _BYTES_PER_GIB
         limit_input.preferred_width = px(220)
         content.add_child(limit_input)
@@ -688,16 +733,11 @@ class EditorWindow:
     # History
     # ------------------------------------------------------------------
 
-    def _apply_snapshot(self, snapshot: bytes):
-        self._history_replaying = True
-        try:
-            self._layer_stack.load_state(snapshot)
-        finally:
-            self._history_replaying = False
-            self._external_edit_ctx = None
+    def _on_snapshot_applied(self) -> None:
+        self._external_edit_ctx = None
 
     def _clear_history(self):
-        self._document.clear_history()
+        self.application.clear_history()
         self._external_edit_ctx = None
 
     def undo(self):
@@ -711,7 +751,7 @@ class EditorWindow:
             self._statusbar.text = f"Redo: {label}"
 
     def _begin_external_edit(self, label: str, layer: Layer, target: str):
-        if self._history_replaying:
+        if self.application.history_replaying:
             return
         if self._external_edit_ctx is not None:
             return
@@ -773,7 +813,7 @@ class EditorWindow:
             self._layer_stack.on_changed()
 
     def _end_external_edit(self, layer: Layer, target: str, dirty_rect):
-        if self._history_replaying:
+        if self.application.history_replaying:
             self._external_edit_ctx = None
             return
         if self._external_edit_ctx is None:
@@ -1143,7 +1183,7 @@ class EditorWindow:
         self._canvas.fit_in_view()
 
     def _quit(self):
-        self._running = False
+        self.application.request_stop()
 
     # ------------------------------------------------------------------
     # Layer tools
@@ -1485,91 +1525,7 @@ class EditorWindow:
 
     def poll(self):
         self._agent_chat_panel.poll()
-        self._poll_segmentation()
-        self._poll_lama()
-        self._poll_instruct()
-        self._poll_diffusion()
-        self._poll_grounding()
-
-    def _poll_segmentation(self):
-        event = self._segmentation_controller.poll()
-        if event is None:
-            return
-        if event.segmentation_result is not None:
-            layer, seg_mask = event.segmentation_result
-            command, status = map_segmentation_result(layer, seg_mask)
-            if command is not None:
-                self._document.execute(command)
-            self._statusbar.text = status
-            return
-        if event.status:
-            self._statusbar.text = event.status
-
-    def _poll_lama(self):
-        event = self._lama_controller.poll()
-        if event is None:
-            return
-        if event.inference_result is not None:
-            layer, result_image = event.inference_result
-            command, status = map_lama_result(layer, result_image)
-            if command is not None:
-                self._document.execute(command)
-            self._statusbar.text = status
-        elif event.status:
-            self._statusbar.text = event.status
-
-    def _poll_instruct(self):
-        event = self._instruct_controller.poll()
-        if event is not None:
-            self._handle_instruct_event(event)
-
-    def _handle_instruct_event(self, event):
-        if event.model_loading:
-            self._instruct_panel.set_model_loading()
-        if event.model_error is not None:
-            self._instruct_panel.on_model_load_error(event.model_error)
-        elif event.model_loaded:
-            self._instruct_panel.on_model_loaded()
-        if event.inference_result is not None:
-            layer, result_image, used_seed = event.inference_result
-            command, status = map_instruct_result(
-                layer, result_image, used_seed)
-            if command is not None:
-                self._document.execute(command)
-            self._statusbar.text = status
-            return
-        if event.status:
-            self._statusbar.text = event.status
-
-    def _poll_diffusion(self):
-        event = self._diffusion_controller.poll()
-        if event is None:
-            return
-
-        if event.model_error is not None:
-            self._diffusion_panel.on_model_load_error(event.model_error)
-        elif event.model_loaded_path is not None:
-            self._diffusion_panel.on_model_loaded(
-                event.model_loaded_path,
-                self._engine.model_info,
-            )
-
-        if event.ip_adapter_error is not None:
-            self._diffusion_panel.on_ip_adapter_load_error(event.ip_adapter_error)
-        elif event.ip_adapter_loaded:
-            self._diffusion_panel.on_ip_adapter_loaded()
-
-        if event.inference_result is not None:
-            pending, result_image, used_seed = event.inference_result
-            command, status = map_diffusion_result(
-                pending, result_image, used_seed)
-            if command is not None:
-                self._document.execute(command)
-            self._statusbar.text = status
-            return
-
-        if event.status is not None:
-            self._statusbar.text = event.status
+        self.application.poll()
 
     def _show_grounding_dialog(self) -> None:
         from ..ui.dialogs.grounding_dialog import GroundingDialog
@@ -1587,20 +1543,6 @@ class EditorWindow:
             self._statusbar.text = "Grounding: no active layer"
             return
         event = self._grounding_controller.start_detection(active, params)
-        if event.status:
-            self._statusbar.text = event.status
-
-    def _poll_grounding(self) -> None:
-        event = self._grounding_controller.poll()
-        if event is None:
-            return
-        if event.grounding_result is not None:
-            layer, result = event.grounding_result
-            command, status = map_grounding_result(layer, result)
-            if command is not None:
-                self._document.execute(command)
-            self._statusbar.text = status
-            return
         if event.status:
             self._statusbar.text = event.status
 
@@ -1626,20 +1568,11 @@ class EditorWindow:
 
     @property
     def running(self) -> bool:
-        return self._running
+        return self.application.running
+
+    def request_stop(self) -> None:
+        self.application.request_stop()
 
     def close(self):
         """Release runtime resources (GPU/engines). Safe to call multiple times."""
-        if self._closed:
-            return
-        self._closed = True
-        self._running = False
-        if self._canvas is not None:
-            self._canvas.dispose()
-        if self._agent_chat_panel is not None:
-            self._agent_chat_panel.shutdown()
-        self._engine.shutdown()
-        self._instruct_engine.shutdown()
-        self._lama_engine.shutdown()
-        self._seg_engine.shutdown()
-        self._grounding_engine.shutdown()
+        self.application.close()

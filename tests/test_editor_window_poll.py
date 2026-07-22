@@ -1,25 +1,21 @@
 import numpy as np
 from PIL import Image
 
+from diffusion_editor.app.application import EditorApplication, EngineSet
+from diffusion_editor.app.presentation import HeadlessEditorPresentation
 from diffusion_editor.generation.diffusion_controller import DiffusionControllerEvent
 from diffusion_editor.app.editor_window import EditorWindow
 from diffusion_editor.document.layer_stack import LayerStack
 
 
-class _Panel:
-    def __init__(self):
-        self.loaded = False
-
-    def on_model_loaded(self, _result, _info):
-        self.loaded = True
-
-
 class _Engine:
     model_info = {"path": "model.safetensors"}
 
+    def poll_event(self):
+        return None
 
-class _Status:
-    text = ""
+    def shutdown(self):
+        pass
 
 
 class _DiffusionController:
@@ -31,16 +27,35 @@ class _DiffusionController:
 
 
 def test_poll_diffusion_forwards_controller_model_loaded_event():
-    window = object.__new__(EditorWindow)
-    window._engine = _Engine()
-    window._diffusion_controller = _DiffusionController()
-    window._diffusion_panel = _Panel()
-    window._statusbar = _Status()
+    engine = _Engine()
+    application = EditorApplication(
+        settings=_MemorySettings(),
+        engines=EngineSet(engine, engine, engine, engine, engine),
+    )
+    application.diffusion_controller = _DiffusionController()
+    presentation = HeadlessEditorPresentation()
+    application.bind_view(presentation.ports())
 
-    window._poll_diffusion()
+    application.poll()
 
-    assert window._diffusion_panel.loaded
-    assert window._statusbar.text == "Model loaded"
+    assert presentation.panel_updates[-1].state == "model-loaded"
+    assert presentation.panel_updates[-1].payload["path"] == "model.safetensors"
+    assert presentation.status == "Model loaded"
+
+
+class _MemorySettings:
+    def __init__(self):
+        self.values = {}
+
+    def get(self, key, default=None):
+        return self.values.get(key, default)
+
+    def set(self, key, value):
+        self.values[key] = value
+
+
+class _Status:
+    text = ""
 
 
 def _export_window(image):

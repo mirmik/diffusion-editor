@@ -86,9 +86,13 @@ F   ← начало
 
 ## Слои приложения
 
-**Точка входа** инициализирует окно, OpenGL-контекст, запускает главный цикл и выполняет финальную очистку ресурсов.
+**Точка входа / host** инициализирует окно и графический контекст, запускает главный цикл и уничтожается последним. Сейчас это временный legacy SDL host; после миграции эту роль выполняет публичный application host из Termin.
 
-**EditorWindow** — оркестратор. Собирает UI, соединяет компоненты через колбеки, направляет события от UI к документу и движкам. Не содержит бизнес-логики.
+**EditorApplication** — toolkit-neutral владелец настроек, `LayerStack`, `DocumentService`, истории, ML-движков и контроллеров. Он принимает явные presentation ports, опрашивает контроллеры и преобразует их события в состояние документа, статус и panel updates. Модуль не импортирует `tcgui` или внутренности Termin-приложений.
+
+**EditorWindow** — временный tcgui-адаптер. Он собирает legacy UI и связывает его с тем же `EditorApplication`, который будет использовать native shell. Compatibility aliases внутри `EditorWindow` существуют только для поэтапной миграции и не являются новым публичным API.
+
+**Presentation ports** — узкие интерфейсы для статуса, состояния команд и панелей, диалогов и Canvas-взаимодействий. Headless-проекция позволяет создавать и проверять application/controller слой без UI toolkit; native-проекция должна использовать те же контракты.
 
 **Панели** (`BrushPanel`, `DiffusionPanel`, `LayerPanel` и т.д.) — UI-компоненты без прямого доступа к документу. Общаются с оркестратором через колбеки.
 
@@ -101,6 +105,16 @@ F   ← начало
 **HistoryManager** — стек undo/redo с ограничением по памяти.
 
 **Движки** — изолированные обёртки над ML-моделями. Не знают ни о UI, ни о документе.
+
+### Владение и завершение работы
+
+Application-owned: настройки и состояние документа, история, контроллеры, движки и реестр agent tools.
+
+View-owned: widgets, panel projections, agent chat view/runner и Canvas GPU-ресурсы.
+
+Termin-owned: platform window, event routing, render target/present, clipboard/cursor services, defer/repaint и host loop.
+
+`EditorApplication.close()` выполняет зарегистрированную очистку по фазам: view workers, engine workers, затем GPU resources. После этого точка входа уничтожает Termin host/window. Ошибки очистки логируются, повторный `close()` безопасен.
 
 ---
 
