@@ -13,3 +13,5 @@ dist/
 .termin-sdk
 
 .claude/
+.codex/
+.venv-workers
