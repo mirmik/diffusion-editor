@@ -166,12 +166,12 @@ class GPUCompositor:
             Required — GPUCompositor never spawns its own Tgfx2Context,
             because that would create a second IRenderDevice and break
             cross-renderer TextureHandle sharing. Obtain from the host
-            via ``Tgfx2Context.from_window(...)``.
+            via ``Tgfx2Context.from_runtime(...)``.
         """
         if graphics is None:
             raise ValueError(
                 "GPUCompositor requires a graphics= Tgfx2Context. Get one "
-                "from the host (Tgfx2Context.from_window).")
+                "from the host (Tgfx2Context.from_runtime).")
         self._stack = layer_stack
 
         # Per-layer GPU textures, keyed by ``id(layer)`` — Tgfx2TextureHandle.
@@ -386,6 +386,10 @@ class GPUCompositor:
     def _ensure_shader(self, uuid: str, fragment_source: str):
         """Build a stable TcShader with the current symbolic resource layout."""
         shader = TcShader.get_or_create(uuid)
+        # The current Termin shader contract validates source text against an
+        # already selected language/artifact policy.
+        shader.set_language(ShaderLanguage.SLANG)
+        shader.set_artifact_policy(ShaderArtifactPolicy.REQUIRED)
         shader.set_sources_with_entries(
             _VERT_SRC,
             fragment_source,
@@ -395,8 +399,6 @@ class GPUCompositor:
             "vs_main",
             "fs_main",
         )
-        shader.set_language(ShaderLanguage.SLANG)
-        shader.set_artifact_policy(ShaderArtifactPolicy.REQUIRED)
         pair = tc_shader_ensure_tgfx2(self._ctx, shader)
         return shader, pair
 

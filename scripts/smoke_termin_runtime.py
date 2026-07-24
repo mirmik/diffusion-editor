@@ -9,6 +9,9 @@ from pathlib import Path
 import subprocess
 import sys
 
+if runtime_site := os.environ.get("DIFFUSION_EDITOR_QA_SITE_PACKAGES"):
+    sys.path.insert(0, runtime_site)
+
 
 _SHADER_FAILURE_MARKERS = (
     "shader is unavailable",
@@ -22,7 +25,14 @@ _SHADER_FAILURE_MARKERS = (
 )
 
 
+def _verify_runtime(stage: str) -> None:
+    from diffusion_editor.quality_gate import verify_runtime_identity
+
+    verify_runtime_identity(f"render smoke {stage}")
+
+
 def _render_frames(frame_count: int, project_path: Path | None = None) -> int:
+    _verify_runtime("before native imports")
     import numpy as np
 
     from tcbase import log
@@ -30,20 +40,22 @@ def _render_frames(frame_count: int, project_path: Path | None = None) -> int:
     from tcgui.widgets.panel import Panel
     from tcgui.widgets.ui import UI
     from tcgui.widgets.units import pct
-    from termin.display import SDLBackendWindow
+    from termin.display import WindowedGraphicsSession
     from tgfx import Tgfx2Context, configure_default_shader_runtime
 
     from diffusion_editor.canvas.gpu_compositor import GPUCompositor
     from diffusion_editor.document.layer_stack import LayerStack
 
+    _verify_runtime("after native imports")
     log.set_level(log.Level.INFO)
     if not configure_default_shader_runtime("diffusion-editor-smoke"):
         raise RuntimeError(
             "Termin shader runtime is unavailable; check TERMIN_SDK/bin/termin_shaderc and slangc"
         )
 
-    window = SDLBackendWindow("Diffusion Editor runtime smoke", 320, 200)
-    graphics = Tgfx2Context.from_window(window.device_ptr(), window.context_ptr())
+    runtime = WindowedGraphicsSession.create_native()
+    window = runtime.create_window("Diffusion Editor runtime smoke", 320, 200)
+    graphics = Tgfx2Context.from_runtime(runtime.graphics)
     root = Panel()
     root.preferred_width = pct(100)
     root.preferred_height = pct(100)
@@ -84,9 +96,11 @@ def _render_frames(frame_count: int, project_path: Path | None = None) -> int:
         window.present(texture)
         project_note = f", project={project_path}" if project_path else ""
         print(
-            f"Termin render smoke OK: {width}x{height}, frames={frame_count}"
+            f"Termin {graphics.backend} render smoke OK: "
+            f"{width}x{height}, frames={frame_count}"
             f"{project_note}"
         )
+        _verify_runtime("after rendering")
         texture = None
         return 0
     finally:
@@ -106,6 +120,7 @@ def _render_frames(frame_count: int, project_path: Path | None = None) -> int:
         tgfx_font._default_font_atlas = None
         gc.collect()
         window.close()
+        runtime.close()
 
 
 def _run_checked_child(frame_count: int, project_path: Path | None) -> int:

@@ -120,7 +120,7 @@ class EditorWindow:
 
     def __init__(self, ctx=None, *, application: EditorApplication | None = None):
         # Optional borrowed tgfx2 context. When given (typically by
-        # main.py, which owns an SDLBackendWindow and wants every renderer
+        # main.py, which owns a WindowedGraphicsSession and wants every renderer
         # to share one IRenderDevice), the UI draws through it; when
         # None, UIRenderer falls back to its own owning Tgfx2Context.
         # Required to be non-None under TERMIN_BACKEND=vulkan because
@@ -1560,7 +1560,7 @@ class EditorWindow:
     def render_compose(self, vw: int, vh: int):
         """Render the UI and return the composite TextureHandle.
 
-        Preferred when the host owns an SDLBackendWindow and publishes the
+        Preferred when the host owns a WindowedGraphicsSession and publishes the
         result via ``win.present(tex)`` — works on both OpenGL and
         Vulkan. ``None`` if the UI is empty.
         """

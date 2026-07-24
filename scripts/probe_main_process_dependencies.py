@@ -5,8 +5,18 @@ from __future__ import annotations
 
 import importlib
 from importlib import metadata
+import os
+from pathlib import Path
 import sys
 
+if runtime_site := os.environ.get("DIFFUSION_EDITOR_QA_SITE_PACKAGES"):
+    sys.path.insert(0, runtime_site)
+
+from diffusion_editor.quality_gate import (
+    WORKER_ONLY_DISTRIBUTIONS,
+    verify_main_environment,
+    verify_runtime_identity,
+)
 
 IMPORTS = (
     ("numpy", "numpy"),
@@ -16,56 +26,30 @@ IMPORTS = (
     ("diffusion_editor.app.main", "diffusion-editor"),
 )
 
-WORKER_ONLY = (
-    "accelerate",
-    "diffusers",
-    "safetensors",
-    "tokenizers",
-    "torch",
-    "torchvision",
-    "transformers",
-)
-
-
-def _gil_enabled() -> bool:
-    probe = getattr(sys, "_is_gil_enabled", None)
-    return bool(probe()) if probe is not None else True
-
 
 def main() -> int:
-    if _gil_enabled():
-        raise RuntimeError("main-process dependency probe started with the GIL enabled")
+    project_root = Path(__file__).resolve().parents[1]
+    wheels = verify_main_environment(project_root)
 
     imported: list[str] = []
     for module_name, distribution_name in IMPORTS:
         importlib.import_module(module_name)
-        if _gil_enabled():
-            raise RuntimeError(f"importing {module_name} enabled the GIL")
+        verify_runtime_identity(f"import {module_name}")
         imported.append(f"{distribution_name}=={metadata.version(distribution_name)}")
 
-    loaded = sorted(name for name in WORKER_ONLY if name in sys.modules)
+    loaded = sorted(
+        name for name in WORKER_ONLY_DISTRIBUTIONS if name in sys.modules
+    )
     if loaded:
         raise RuntimeError(
             "worker-only modules leaked into the UI process: "
             + ", ".join(loaded)
         )
-    installed = []
-    for distribution_name in WORKER_ONLY:
-        try:
-            installed.append(
-                f"{distribution_name}=={metadata.version(distribution_name)}"
-            )
-        except metadata.PackageNotFoundError:
-            pass
-    if installed:
-        raise RuntimeError(
-            "worker-only distributions are installed in the UI environment: "
-            + ", ".join(installed)
-        )
 
     print("Main-process imports verified with the GIL disabled:")
     for item in imported:
         print(f"- {item}")
+    print(f"Native wheel ABI metadata verified: {len(wheels)} distribution(s)")
     return 0
 
 

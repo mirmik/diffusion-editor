@@ -15,7 +15,7 @@ from tcbase import Key, MouseButton, Mods
 from tcbase import log
 
 from tgfx import Tgfx2Context, configure_default_shader_runtime
-from termin.display import SDLBackendWindow
+from termin.display import WindowedGraphicsSession
 
 from .editor_window import EditorWindow
 
@@ -128,10 +128,11 @@ def main():
             "to the installed SDK and contains bin/termin_shaderc and bin/slangc."
         )
 
-    # SDLBackendWindow owns the device + SDL window; backend picked from
-    # TERMIN_BACKEND env-var.
-    window = SDLBackendWindow("Diffusion Editor", 1280, 800)
-    tgfx2_ctx = Tgfx2Context.from_window(window.device_ptr(), window.context_ptr())
+    # The windowed graphics session owns one canonical GraphicsHost shared by
+    # every window. TERMIN_BACKEND selects OpenGL/Vulkan before construction.
+    runtime = WindowedGraphicsSession.create_native()
+    window = runtime.create_window("Diffusion Editor", 1280, 800)
+    tgfx2_ctx = Tgfx2Context.from_runtime(runtime.graphics)
     log.info("[main] Window created")
 
     editor = EditorWindow(ctx=tgfx2_ctx)
@@ -212,9 +213,8 @@ def main():
         # Application shutdown stops view workers, inference workers and GPU
         # resources before the borrowed host/window leaves scope.
         editor.close()
-        # SDLBackendWindow destructor cleans up SDL window + GL/Vulkan
-        # device in the correct order. Dropping the Python wrapper is
-        # enough; explicit sdl2.SDL_Quit is handled by SDLBackendWindow.
+        window.close()
+        runtime.close()
 
 
 if __name__ == "__main__":

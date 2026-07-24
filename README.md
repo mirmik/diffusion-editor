@@ -94,6 +94,7 @@ or:
 The CI runtime gates can also be run directly:
 
 ```bash
+./run-quality-gates.sh
 python3 -m diffusion_editor.sdk_runtime python-executable
 python3 -m diffusion_editor.sdk_runtime verify-python-executable \
   --python ./venv/bin/python
@@ -103,3 +104,6 @@ TERMIN_BACKEND=opengl ./venv/bin/python scripts/smoke_termin_runtime.py
 TERMIN_BACKEND=vulkan ./venv/bin/python scripts/smoke_termin_runtime.py \
   --frames 1200 --project /path/to/project.deproj
 ```
+
+The complete automated/manual graphics and ML matrix is documented in
+[CPython 3.14t quality gates](docs/quality-gates.md).

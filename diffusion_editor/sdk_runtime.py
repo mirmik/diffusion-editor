@@ -646,12 +646,21 @@ def verify_imports(contract: SdkContract) -> None:
     import tcgui
     import tgfx
     import termin.display
-    from termin.display import SDLBackendWindow
+    from termin.display import WindowedGraphicsSession
     from tgfx import Tgfx2Context, configure_default_shader_runtime
 
-    required = (tcgui, SDLBackendWindow, Tgfx2Context, configure_default_shader_runtime)
+    required = (
+        tcgui,
+        WindowedGraphicsSession,
+        Tgfx2Context,
+        configure_default_shader_runtime,
+    )
     if any(value is None for value in required):
         raise SdkContractError("One or more required Termin runtime exports are unavailable")
+    if not hasattr(Tgfx2Context, "from_runtime"):
+        raise SdkContractError(
+            "Tgfx2Context.from_runtime is required by the windowed graphics contract"
+        )
     for module in (tcbase, tcgui, tgfx, termin.display):
         _require_module_from_runtime_environment(module)
 
