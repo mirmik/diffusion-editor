@@ -47,6 +47,12 @@ installed. An old `cp310`/`cp314` environment, or a 3.14t process started with
 the GIL enabled, fails with an instruction to move the environment aside or
 choose another `VENV` path. The installer never silently replaces it.
 
+Third-party dependencies are exact-pinned and installed from wheels only.
+Native ML packages without CPython 3.14t wheels are excluded from the UI
+process and will be hosted by isolated workers. The current compatibility
+matrix and ownership boundary are documented in
+[CPython 3.14t dependency contract](docs/cpython-314t-dependencies.md).
+
 Termin wheels are force-refreshed from that SDK even when their version string
 has not changed. This matters for pure-Python packages such as `tcgui`: an SDK
 rebuild can otherwise leave old Python code in the venv beside new native

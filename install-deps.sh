@@ -61,7 +61,8 @@ mapfile -t TERMIN_REQUIREMENTS <<< "$TERMIN_REQUIREMENTS_OUTPUT"
 
 echo ""
 echo "=== Installing diffusion-editor Python requirements ==="
-"$PY" -m pip install -r requirements.txt
+"$PY" -m pip install --only-binary=:all: \
+    --find-links "$WHEELHOUSE" -r requirements.txt
 
 echo ""
 echo "=== Installing exact Termin packages from SDK wheelhouse ==="
@@ -76,6 +77,7 @@ echo ""
 echo "=== Verifying Termin runtime imports ==="
 "$PY" -m diffusion_editor.sdk_runtime verify-installed \
     --sdk "$TERMIN_SDK" --imports
+"$PY" scripts/probe_main_process_dependencies.py
 "$PY" -m pip check
 "$PY" -m diffusion_editor.sdk_runtime write-state --sdk "$TERMIN_SDK"
 

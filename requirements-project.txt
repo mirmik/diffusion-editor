@@ -1,0 +1,13 @@
+# Published/editable package metadata.
+#
+# Termin distributions stay unpinned here because their exact +sdk build IDs
+# come from python-runtime-manifest.json. install-deps.sh does not resolve this
+# file with PyPI; it installs the SDK closure separately.
+tcbase
+tcgui
+termin-display
+tgfx
+numpy==2.5.1
+Pillow==12.3.0
+PySDL2==0.9.17
+PyYAML==6.0.3

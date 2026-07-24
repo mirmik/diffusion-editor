@@ -1,39 +1,25 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools==83.0.0", "wheel==0.47.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "diffusion-editor"
 version = "0.1.0"
 description = "Diffusion image editor built on Termin tcgui/tgfx."
-requires-python = ">=3.10"
-dependencies = [
-    "tcbase",
-    "tcgui",
-    "termin-display",
-    "tgfx",
-    "torch>=2.0,<3",
-    "Pillow>=9.5,<11",
-    "numpy>=1.24,<2",
-    "simple-lama-inpainting==0.1.2",
-    "diffusers>=0.37,<0.38",
-    "transformers>=4.46,<5",
-    "accelerate>=0.26,<2",
-    "safetensors>=0.4,<1",
-    "pysdl2>=0.9,<1",
-    "PyYAML>=6,<7",
-]
-
-[project.optional-dependencies]
-test = [
-    "pytest>=8,<9",
-]
+requires-python = ">=3.14,<3.15"
+dynamic = ["dependencies", "optional-dependencies"]
 
 [project.scripts]
 diffusion-editor = "diffusion_editor.app.main:main"
 
 [tool.setuptools.packages.find]
 include = ["diffusion_editor*"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements-project.txt"]}
+
+[tool.setuptools.dynamic.optional-dependencies]
+test = {file = ["requirements-test.txt"]}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

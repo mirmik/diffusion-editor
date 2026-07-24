@@ -1,0 +1,9 @@
+# CPython 3.14t main-process lock.
+#
+# Third-party distributions stay exact and binary-installable. Termin's
+# build-tagged distributions are installed in a separate offline step so PyPI
+# can never satisfy a colliding name such as tmesh.
+numpy==2.5.1
+Pillow==12.3.0
+PySDL2==0.9.17
+PyYAML==6.0.3
