@@ -47,21 +47,23 @@ At runtime all three clients default to `.venv-workers/bin/python` (or
 `.venv-workers/Scripts/python.exe`). Their feature-specific
 `DIFFUSION_EDITOR_*_PYTHON` overrides remain available for diagnostics.
 
-## CUDA and ROCm
+## Accelerator selection
 
-The accelerator-neutral graph is pinned in `requirements-workers-core.txt`.
-Select an official PyTorch index and matching exact versions:
+`./setup-workers.sh` defaults to `ML_ACCELERATOR=auto`: it installs the
+reviewed CUDA 12.8 PyTorch pair when the NVIDIA kernel driver is present, and
+the CPU lock otherwise. To make the choice explicit:
 
 ```sh
-ML_ACCELERATOR=cuda \
-ML_TORCH_INDEX_URL=https://download.pytorch.org/whl/<reviewed-index> \
-ML_TORCH_VERSION=<exact-version-with-suffix> \
-ML_TORCHVISION_VERSION=<matching-version-with-suffix> \
-./setup-workers.sh
+ML_ACCELERATOR=cuda ./setup-workers.sh
+ML_ACCELERATOR=cpu ./setup-workers.sh
 ```
 
-Use `ML_ACCELERATOR=rocm` for ROCm. The selected PyTorch build is shared by
-the ML and LaMa subprocesses.
+The accelerator-neutral graph is pinned in `requirements-workers-core.txt`.
+The reviewed CUDA defaults are PyTorch `2.10.0+cu128` and torchvision
+`0.25.0+cu128`. `ML_TORCH_INDEX_URL`, `ML_TORCH_VERSION`, and
+`ML_TORCHVISION_VERSION` remain available for an explicit reviewed override.
+ROCm still requires those three values with `ML_ACCELERATOR=rocm`. The
+selected PyTorch build is shared by the ML and LaMa subprocesses.
 
 ## Verification
 

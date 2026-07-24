@@ -20,6 +20,11 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--real", action="store_true")
     parser.add_argument("--sdxl")
+    parser.add_argument(
+        "--device",
+        choices=("auto", "cpu", "cuda"),
+        default="auto",
+    )
     parser.add_argument("--timeout", type=float, default=1800.0)
     args = parser.parse_args()
     if args.real and not args.sdxl:
@@ -31,6 +36,7 @@ def main() -> int:
         request_timeout=args.timeout,
     )
     cancel = threading.Event()
+    requested_device = None if args.device == "auto" else args.device
     image = Image.new("RGB", (64, 64), "navy")
     try:
         client.request(
@@ -38,7 +44,7 @@ def main() -> int:
             {
                 "model_path": args.sdxl or "fake.safetensors",
                 "prediction_type": None,
-                "device": "cpu" if args.real else None,
+                "device": requested_device,
             },
             cancel,
             on_progress=print,
@@ -64,7 +70,7 @@ def main() -> int:
         )
         client.request(
             "load_instruct",
-            {"device": "cpu" if args.real else None},
+            {"device": requested_device},
             cancel,
             on_progress=print,
         )

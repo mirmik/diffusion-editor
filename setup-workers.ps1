@@ -10,8 +10,30 @@ $Bootstrap = if ($env:WORKERS_BOOTSTRAP_PYTHON) {
     "py"
 }
 $BootstrapArgs = if ($env:WORKERS_BOOTSTRAP_PYTHON) { @() } else { @("-3.11") }
-$Accelerator = if ($env:ML_ACCELERATOR) { $env:ML_ACCELERATOR } else { "cpu" }
+$Accelerator = if ($env:ML_ACCELERATOR) { $env:ML_ACCELERATOR } else { "auto" }
 $WorkersPython = Join-Path $WorkersVenv "Scripts/python.exe"
+
+if ($Accelerator -eq "auto") {
+    $NvidiaSmi = Get-Command nvidia-smi -ErrorAction SilentlyContinue
+    $HasNvidiaGpu = $false
+    if ($NvidiaSmi) {
+        & $NvidiaSmi.Source --query-gpu=name --format=csv,noheader 2>$null |
+            Out-Null
+        $HasNvidiaGpu = ($LASTEXITCODE -eq 0)
+    }
+    $Accelerator = if ($HasNvidiaGpu) { "cuda" } else { "cpu" }
+}
+if ($Accelerator -eq "cuda") {
+    if (-not $env:ML_TORCH_INDEX_URL) {
+        $env:ML_TORCH_INDEX_URL = "https://download.pytorch.org/whl/cu128"
+    }
+    if (-not $env:ML_TORCH_VERSION) {
+        $env:ML_TORCH_VERSION = "2.10.0+cu128"
+    }
+    if (-not $env:ML_TORCHVISION_VERSION) {
+        $env:ML_TORCHVISION_VERSION = "0.25.0+cu128"
+    }
+}
 
 function Assert-WorkerPython {
     param([string]$Python, [string[]]$PrefixArgs = @())
@@ -45,7 +67,7 @@ if ($Accelerator -eq "cpu") {
         -r requirements-workers.txt
 } else {
     if ($Accelerator -notin @("cuda", "rocm")) {
-        throw "ML_ACCELERATOR must be cpu, cuda or rocm"
+        throw "ML_ACCELERATOR must be auto, cpu, cuda or rocm"
     }
     foreach ($name in @(
         "ML_TORCH_INDEX_URL",
@@ -65,6 +87,7 @@ if ($Accelerator -eq "cpu") {
 }
 
 & $WorkersPython -m pip check
+$env:ML_ACCELERATOR_RESOLVED = $Accelerator
 & $WorkersPython -c @'
 from diffusion_editor.workers.lama_model import LamaModel
 import accelerate
@@ -77,8 +100,18 @@ import tokenizers
 import torch
 import torchvision
 import transformers
+import os
+accelerator = os.environ.get("ML_ACCELERATOR_RESOLVED", "cpu")
+if accelerator == "cuda":
+    if torch.version.cuda is None:
+        raise SystemExit("CUDA was selected, but a CPU-only torch was installed")
+    if not torch.cuda.is_available():
+        raise SystemExit(
+            "CUDA torch was installed, but no usable NVIDIA GPU/driver was found"
+        )
 print(
     "Shared worker environment ready:",
+    f"accelerator={accelerator}",
     f"torch={torch.__version__}",
     f"torchvision={torchvision.__version__}",
     f"opencv={cv2.__version__}",

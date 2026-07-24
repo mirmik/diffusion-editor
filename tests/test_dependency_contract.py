@@ -134,6 +134,9 @@ def test_model_workers_share_one_exact_binary_only_lock_and_installer():
         assert "pip check" in installer
         assert "download.pytorch.org/whl/cpu" in installer
         assert "ML_TORCH_INDEX_URL" in installer
+        assert "2.10.0+cu128" in installer
+        assert "0.25.0+cu128" in installer
+        assert "ML_ACCELERATOR_RESOLVED" in installer
 
     shell_installer = (PROJECT_ROOT / "setup-workers.sh").read_text(
         encoding="utf-8"

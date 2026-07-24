@@ -22,5 +22,8 @@ weights:
   --real --sdxl /path/to/model.safetensors
 ```
 
+The real smoke selects an available GPU by default. Pass `--device cpu` only
+when a CPU run is intentional.
+
 CPU, CUDA, and ROCm installation are documented in the shared environment
 guide.

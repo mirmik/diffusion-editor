@@ -41,7 +41,7 @@ gate with their transition name.
 | LaMa CPU | identity lifecycle gate plus real LaMa smoke | passing |
 | rembg CPU | threshold lifecycle gate plus real U2Net smoke | passing |
 | Diffusers/Transformers CPU | fake lifecycle gate plus real SDXL, InstructPix2Pix, Grounding DINO and SAM smokes | passing |
-| CUDA | `ML_ACCELERATOR=cuda` installer gate, `pip check`, then real ML smoke | manual; not claimed supported without recorded driver/toolkit evidence |
+| CUDA | auto-selected reviewed CUDA 12.8 wheels, `pip check`, GPU availability probe, then real ML smoke | installer-verified; real model smoke remains hardware-dependent |
 | ROCm | `ML_ACCELERATOR=rocm` installer gate, `pip check`, then real ML smoke | manual; not claimed supported without recorded driver/toolkit evidence |
 
 For CUDA/ROCm, follow `docs/ml-worker.md`, record the exact PyTorch wheel
