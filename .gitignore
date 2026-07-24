@@ -1,5 +1,6 @@
 .venv/
 .venv-lama/
+.venv-segmentation/
 venv/
 __pycache__/
 *.pyc

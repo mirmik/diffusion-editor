@@ -54,6 +54,8 @@ matrix and ownership boundary are documented in
 [CPython 3.14t dependency contract](docs/cpython-314t-dependencies.md).
 LaMa has a separate regular-CPython environment; install and lifecycle details
 are in [the isolated LaMa worker guide](docs/lama-worker.md).
+Background segmentation uses another isolated environment documented in
+[the rembg worker guide](docs/segmentation-worker.md).
 
 Termin wheels are force-refreshed from that SDK even when their version string
 has not changed. This matters for pure-Python packages such as `tcgui`: an SDK

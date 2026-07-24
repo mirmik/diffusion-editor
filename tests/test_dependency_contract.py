@@ -108,3 +108,30 @@ def test_lama_worker_has_a_separate_exact_lock_and_installer():
         assert "--no-binary=fire" in installer
         assert "--no-build-isolation" in installer
         assert "download.pytorch.org/whl/cpu" in installer
+
+
+def test_segmentation_worker_has_a_separate_binary_only_lock():
+    runtime = tuple(item.lower() for item in _requirements(
+        "requirements-runtime.txt"
+    ))
+    worker = tuple(item.lower() for item in _requirements(
+        "requirements-segmentation-worker.txt"
+    ))
+
+    assert "rembg==2.0.77" in worker
+    assert "onnxruntime==1.27.0" in worker
+    assert "opencv-python-headless==5.0.0.93" in worker
+    assert all("==" in item for item in worker)
+    assert all("rembg" not in item for item in runtime)
+    assert all("opencv-python" not in item for item in runtime)
+
+    shell_installer = (
+        PROJECT_ROOT / "setup-segmentation-worker.sh"
+    ).read_text(encoding="utf-8")
+    powershell_installer = (
+        PROJECT_ROOT / "setup-segmentation-worker.ps1"
+    ).read_text(encoding="utf-8")
+    for installer in (shell_installer, powershell_installer):
+        assert "requirements-segmentation-worker.txt" in installer
+        assert "--only-binary=:all:" in installer
+        assert "--no-binary" not in installer
