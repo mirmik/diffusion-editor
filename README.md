@@ -17,12 +17,18 @@ For development builds, point `TERMIN_SDK` at a local SDK:
 TERMIN_SDK=/path/to/termin/sdk ./install-deps.sh
 ```
 
-The SDK must contain its runtime manifest and Termin wheels:
+The SDK must contain the schema-v3 runtime manifest, its canonical
+free-threaded interpreter, and Termin wheels:
 
 ```text
 $TERMIN_SDK/python-runtime-manifest.json
+$TERMIN_SDK/bin/termin_python
 $TERMIN_SDK/wheels/
 ```
+
+`diffusion-editor` now requires the exact CPython 3.14t ABI advertised by the
+SDK (`free_threaded=true`, `py_gil_disabled=true`, and a `cp314t` SOABI).
+Regular CPython 3.14 (`cp314`) is intentionally rejected.
 
 ## Install
 
@@ -30,11 +36,16 @@ $TERMIN_SDK/wheels/
 ./install-deps.sh
 ```
 
-The script creates `./venv`, verifies that the wheelhouse has one native build
-ID and that its bindings match the selected SDK payload, installs the exact
-Termin dependency closure, and installs this project in editable mode. After
-successful import verification it saves the absolute SDK path in the ignored
-`.termin-sdk` file.
+The script creates `./venv` with `$TERMIN_SDK/bin/termin_python`, verifies that
+the wheelhouse has one native build ID and only compatible `cp314t` native
+wheels, installs the exact Termin dependency closure, and installs this project
+in editable mode. After successful import verification it saves the absolute
+SDK path in the ignored `.termin-sdk` file.
+
+If `VENV` already exists, its interpreter is checked before anything is
+installed. An old `cp310`/`cp314` environment, or a 3.14t process started with
+the GIL enabled, fails with an instruction to move the environment aside or
+choose another `VENV` path. The installer never silently replaces it.
 
 Termin wheels are force-refreshed from that SDK even when their version string
 has not changed. This matters for pure-Python packages such as `tcgui`: an SDK
@@ -71,6 +82,9 @@ or:
 The CI runtime gates can also be run directly:
 
 ```bash
+python3 -m diffusion_editor.sdk_runtime python-executable
+python3 -m diffusion_editor.sdk_runtime verify-python-executable \
+  --python ./venv/bin/python
 ./venv/bin/python -m diffusion_editor.sdk_runtime verify-installed --imports
 TERMIN_BACKEND=opengl ./venv/bin/python scripts/smoke_termin_runtime.py
 # Optional real-project and long-frame regression run:

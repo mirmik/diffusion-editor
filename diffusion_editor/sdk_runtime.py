@@ -18,8 +18,10 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import sys
-from typing import Iterable
+import sysconfig
+from typing import Iterable, Mapping
 from zipfile import BadZipFile, ZipFile
 
 
@@ -38,6 +40,82 @@ class SdkContractError(RuntimeError):
     """The selected SDK, wheelhouse, or Python environment is inconsistent."""
 
 
+@dataclass(frozen=True)
+class PythonAbiIdentity:
+    version: str
+    soabi: str
+    free_threaded: bool
+    py_gil_disabled: bool
+
+    @classmethod
+    def from_mapping(cls, value: object, *, source: str) -> "PythonAbiIdentity":
+        if not isinstance(value, Mapping):
+            raise SdkContractError(
+                f"{source} must be a structured Python ABI object; "
+                "legacy string manifests are unsupported"
+            )
+        version = value.get("version")
+        soabi = value.get("soabi")
+        free_threaded = value.get("free_threaded")
+        py_gil_disabled = value.get("py_gil_disabled")
+        if (
+            not isinstance(version, str)
+            or not version
+            or not isinstance(soabi, str)
+            or not soabi
+            or not isinstance(free_threaded, bool)
+            or not isinstance(py_gil_disabled, bool)
+        ):
+            raise SdkContractError(
+                f"{source} requires version, soabi, free_threaded, and "
+                "py_gil_disabled with their canonical types"
+            )
+
+        match = re.match(r"^(?:cpython-|cp)(\d+)(t?)(?:-|$)", soabi)
+        if match is None:
+            raise SdkContractError(f"{source} has unsupported SOABI {soabi!r}")
+        digits, suffix = match.groups()
+        expected_digits = version.replace(".", "")
+        if digits != expected_digits:
+            raise SdkContractError(
+                f"{source} version {version!r} disagrees with SOABI {soabi!r}"
+            )
+        if free_threaded != py_gil_disabled:
+            raise SdkContractError(
+                f"{source} free_threaded and py_gil_disabled markers disagree"
+            )
+        if bool(suffix) != free_threaded:
+            raise SdkContractError(
+                f"{source} SOABI {soabi!r} disagrees with free-threading markers"
+            )
+        return cls(version, soabi, free_threaded, py_gil_disabled)
+
+    @classmethod
+    def current(cls) -> "PythonAbiIdentity":
+        version = f"{sys.version_info.major}.{sys.version_info.minor}"
+        soabi = str(sysconfig.get_config_var("SOABI") or "")
+        py_gil_disabled = bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
+        return cls.from_mapping(
+            {
+                "version": version,
+                "soabi": soabi,
+                "free_threaded": py_gil_disabled,
+                "py_gil_disabled": py_gil_disabled,
+            },
+            source="current interpreter",
+        )
+
+    @property
+    def wheel_abi_tag(self) -> str:
+        return f"cp{self.version.replace('.', '')}{'t' if self.free_threaded else ''}"
+
+    def __str__(self) -> str:
+        return (
+            f"{self.version} ({self.soabi}, "
+            f"{'free-threaded' if self.free_threaded else 'GIL build'})"
+        )
+
+
 def normalize_distribution(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
@@ -48,6 +126,7 @@ class WheelMetadata:
     version: str
     requires: tuple[str, ...]
     native_members: tuple[str, ...]
+    abi_tags: tuple[str, ...]
     path: Path
 
     @property
@@ -58,7 +137,7 @@ class WheelMetadata:
 @dataclass(frozen=True)
 class SdkContract:
     root: Path
-    python_abi: str
+    python_abi: PythonAbiIdentity
     site_packages: Path
     versions: dict[str, str]
     termin_distributions: frozenset[str]
@@ -126,10 +205,10 @@ def resolve_sdk(
         raise SdkContractError(f"SDK selected by {source} is invalid: {exc}") from exc
 
 
-def load_contract(
+def _read_contract(
     root: Path,
     *,
-    interpreter_abi: str | None = None,
+    interpreter_abi: PythonAbiIdentity | None,
 ) -> SdkContract:
     root = _validate_sdk_layout(root)
     manifest_path = root / RUNTIME_MANIFEST
@@ -138,11 +217,26 @@ def load_contract(
     except (OSError, json.JSONDecodeError) as exc:
         raise SdkContractError(f"Cannot read {manifest_path}: {exc}") from exc
 
-    python_abi = str(payload.get("python_abi", ""))
-    expected_abi = interpreter_abi or f"{sys.version_info.major}.{sys.version_info.minor}"
-    if python_abi != expected_abi:
+    if payload.get("schema") != 3:
         raise SdkContractError(
-            f"SDK Python ABI is {python_abi or '<missing>'}, interpreter ABI is {expected_abi}"
+            f"{RUNTIME_MANIFEST} schema must be 3; legacy manifests are unsupported"
+        )
+    python_abi = PythonAbiIdentity.from_mapping(
+        payload.get("python_abi"),
+        source=f"{RUNTIME_MANIFEST} python_abi",
+    )
+    if (
+        python_abi.version != "3.14"
+        or not python_abi.free_threaded
+        or not python_abi.py_gil_disabled
+        or python_abi.wheel_abi_tag != "cp314t"
+    ):
+        raise SdkContractError(
+            f"Termin SDK must target CPython 3.14t free-threading; found {python_abi}"
+        )
+    if interpreter_abi is not None and python_abi != interpreter_abi:
+        raise SdkContractError(
+            f"SDK Python ABI is {python_abi}, interpreter ABI is {interpreter_abi}"
         )
 
     site_packages_value = str(payload.get("site_packages", ""))
@@ -186,6 +280,85 @@ def load_contract(
     return contract
 
 
+def load_contract(
+    root: Path,
+    *,
+    interpreter_abi: PythonAbiIdentity | None = None,
+) -> SdkContract:
+    using_current_interpreter = interpreter_abi is None
+    identity = PythonAbiIdentity.current() if using_current_interpreter else interpreter_abi
+    contract = _read_contract(root, interpreter_abi=identity)
+    if using_current_interpreter and _current_gil_enabled():
+        raise SdkContractError(
+            "Current CPython 3.14t runtime has the GIL enabled; "
+            "unset PYTHON_GIL and restart with the SDK free-threaded interpreter"
+        )
+    return contract
+
+
+def _current_gil_enabled() -> bool:
+    probe = getattr(sys, "_is_gil_enabled", None)
+    return bool(probe()) if probe is not None else True
+
+
+def _probe_python_executable(executable: Path) -> tuple[PythonAbiIdentity, bool]:
+    if not executable.is_file():
+        raise SdkContractError(f"Python interpreter does not exist: {executable}")
+    script = (
+        "import json,sys,sysconfig;"
+        "print(json.dumps({'version':f'{sys.version_info.major}.{sys.version_info.minor}',"
+        "'soabi':sysconfig.get_config_var('SOABI') or '',"
+        "'free_threaded':bool(sysconfig.get_config_var('Py_GIL_DISABLED')),"
+        "'py_gil_disabled':bool(sysconfig.get_config_var('Py_GIL_DISABLED')),"
+        "'gil_enabled':bool(getattr(sys,'_is_gil_enabled',lambda:True)())}))"
+    )
+    try:
+        completed = subprocess.run(
+            [str(executable), "-c", script],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        payload = json.loads(completed.stdout)
+    except (OSError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+        raise SdkContractError(
+            f"Cannot probe Python interpreter {executable}: {exc}"
+        ) from exc
+    identity = PythonAbiIdentity.from_mapping(payload, source=str(executable))
+    return identity, payload.get("gil_enabled") is not False
+
+
+def verify_python_executable(root: Path, executable: Path) -> PythonAbiIdentity:
+    """Check an arbitrary interpreter against the SDK without importing the project in it."""
+
+    contract = _read_contract(root, interpreter_abi=None)
+    identity, gil_enabled = _probe_python_executable(executable)
+    if identity != contract.python_abi:
+        raise SdkContractError(
+            f"Python interpreter ABI is {identity}, SDK ABI is {contract.python_abi}"
+        )
+    if gil_enabled:
+        raise SdkContractError(
+            f"Python interpreter {executable} started with the GIL enabled"
+        )
+    return identity
+
+
+def sdk_python_executable(root: Path) -> Path:
+    """Return the SDK-owned interpreter after checking its ABI and runtime mode."""
+
+    root = _validate_sdk_layout(root)
+    executable = root / "bin" / (
+        "termin_python.exe" if os.name == "nt" else "termin_python"
+    )
+    if not executable.is_file():
+        raise SdkContractError(
+            f"Termin SDK is missing its canonical Python launcher: {executable}"
+        )
+    verify_python_executable(root, executable)
+    return executable
+
+
 def _native_sdk_build_id(version: str) -> str | None:
     _base, separator, local = version.partition("+")
     if separator and local.startswith("sdk"):
@@ -198,11 +371,19 @@ def read_wheel_metadata(path: Path) -> WheelMetadata:
         with ZipFile(path) as archive:
             names = archive.namelist()
             candidates = [name for name in names if name.endswith(".dist-info/METADATA")]
+            wheel_records = [name for name in names if name.endswith(".dist-info/WHEEL")]
             if len(candidates) != 1:
                 raise SdkContractError(
                     f"Wheel {path.name} has {len(candidates)} METADATA records"
                 )
+            if len(wheel_records) != 1:
+                raise SdkContractError(
+                    f"Wheel {path.name} has {len(wheel_records)} WHEEL records"
+                )
             parsed = Parser().parsestr(archive.read(candidates[0]).decode("utf-8"))
+            wheel_record = Parser().parsestr(
+                archive.read(wheel_records[0]).decode("utf-8")
+            )
             native_members = tuple(
                 name
                 for name in names
@@ -220,8 +401,22 @@ def read_wheel_metadata(path: Path) -> WheelMetadata:
         version=version,
         requires=tuple(parsed.get_all("Requires-Dist") or ()),
         native_members=native_members,
+        abi_tags=tuple(
+            tag.rsplit("-", 2)[1]
+            for tag in (wheel_record.get_all("Tag") or ())
+            if tag.count("-") == 2
+        ),
         path=path,
     )
+
+
+def _validate_wheel_abi(contract: SdkContract, wheel: WheelMetadata) -> None:
+    if wheel.native_members and contract.python_abi.wheel_abi_tag not in wheel.abi_tags:
+        rendered = ", ".join(wheel.abi_tags) or "<missing>"
+        raise SdkContractError(
+            f"Native wheel {wheel.path.name} has ABI tag(s) {rendered}; "
+            f"SDK requires {contract.python_abi.wheel_abi_tag}"
+        )
 
 
 def wheelhouse_metadata(contract: SdkContract) -> dict[tuple[str, str], WheelMetadata]:
@@ -272,6 +467,7 @@ def _select_sdk_wheel(
     ]
     exact = [wheel for wheel in candidates if wheel.version == manifest_version]
     if len(exact) == 1:
+        _validate_wheel_abi(contract, exact[0])
         return exact[0]
 
     # The current Termin build tags wheels from the latest artifact mtime. The
@@ -286,6 +482,7 @@ def _select_sdk_wheel(
         and _native_payload_matches_sdk(contract, wheel)
     ]
     if len(compatible) == 1:
+        _validate_wheel_abi(contract, compatible[0])
         return compatible[0]
 
     available = ", ".join(sorted(wheel.version for wheel in candidates)) or "<none>"
@@ -482,6 +679,27 @@ def build_parser() -> argparse.ArgumentParser:
     resolve = subparsers.add_parser("resolve", help="print the selected SDK root")
     add_sdk_options(resolve)
 
+    python_executable = subparsers.add_parser(
+        "python-executable",
+        help="print the validated canonical Python interpreter from the SDK",
+    )
+    add_sdk_options(python_executable)
+
+    verify_python = subparsers.add_parser(
+        "verify-python",
+        help="verify that the current interpreter exactly matches the SDK ABI",
+    )
+    add_sdk_options(verify_python)
+
+    verify_python_executable_parser = subparsers.add_parser(
+        "verify-python-executable",
+        help="verify another Python executable against the SDK ABI",
+    )
+    add_sdk_options(verify_python_executable_parser)
+    verify_python_executable_parser.add_argument(
+        "--python", required=True, help="Python executable to probe"
+    )
+
     requirements = subparsers.add_parser(
         "requirements", help="print the exact Termin wheel dependency closure"
     )
@@ -510,11 +728,25 @@ def main(argv: Iterable[str] | None = None) -> int:
         if args.command == "resolve":
             print(root)
             return 0
-
-        contract = load_contract(root)
+        if args.command == "python-executable":
+            print(sdk_python_executable(root))
+            return 0
+        if args.command == "verify-python-executable":
+            identity = verify_python_executable(root, Path(args.python))
+            print(f"Python runtime verified: {Path(args.python)} ({identity})")
+            return 0
         if args.command == "requirements":
+            # Resolving filenames does not execute wheel code. This command is
+            # intentionally usable from an ambient bootstrap Python before the
+            # SDK-owned virtual environment exists.
+            contract = _read_contract(root, interpreter_abi=None)
             for requirement in termin_requirement_closure(contract):
                 print(requirement)
+            return 0
+
+        contract = load_contract(root)
+        if args.command == "verify-python":
+            print(f"Python runtime verified: {sys.executable} ({contract.python_abi})")
             return 0
         if args.command == "verify-installed":
             # verify_installed also checks the wheelhouse closure, ensuring the
