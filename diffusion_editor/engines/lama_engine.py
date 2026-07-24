@@ -1,21 +1,18 @@
-from threading import Thread
 from PIL import Image
 from tcbase import log
 
-from ..generation.types import EnginePollEvent, LamaRequest, LamaResult
+from ..generation.types import LamaRequest, LamaResult
+from .threaded_lifecycle import EngineTaskQueue
 
 
 class LamaEngine:
     def __init__(self):
         self._model = None
-        self._busy = False
-        self._result = None   # PIL.Image or None
-        self._error = None
-        self._thread = None
+        self._tasks = EngineTaskQueue()
 
     @property
     def is_busy(self) -> bool:
-        return self._busy
+        return self._tasks.is_busy
 
     def _ensure_loaded(self):
         if self._model is None:
@@ -23,57 +20,32 @@ class LamaEngine:
             self._model = SimpleLama()
 
     def submit_request(self, request: LamaRequest):
-        if self._busy:
-            return False
-        self._busy = True
-        self._result = None
-        self._error = None
-        self._thread = Thread(
-            target=self._run,
-            args=(request.image, request.mask_image),
-            daemon=True,
+        return self._tasks.submit(
+            "inference",
+            lambda _cancel: self._run(request.image, request.mask_image),
+            name="lama-inference",
+            on_error=lambda _exc: log.exception("LaMa inference failed"),
         )
-        self._thread.start()
-        return True
 
     def _run(self, image: Image.Image, mask: Image.Image):
-        try:
-            log.debug("[LamaEngine] loading model...")
-            self._ensure_loaded()
-            log.debug("[LamaEngine] running inference...")
-            image = image.convert("RGB")
-            mask = mask.convert("L")
-            result = self._model(image, mask)
-            self._result = result
-            log.debug(f"[LamaEngine] done, result size: {result.size}")
-        except Exception as e:
-            log.exception("LaMa inference failed")
-            self._error = str(e)
-        self._busy = False
+        log.debug("[LamaEngine] loading model...")
+        self._ensure_loaded()
+        log.debug("[LamaEngine] running inference...")
+        image = image.convert("RGB")
+        mask = mask.convert("L")
+        result = self._model(image, mask)
+        log.debug(f"[LamaEngine] done, result size: {result.size}")
+        return LamaResult(image=result)
 
-    def poll_event(self) -> EnginePollEvent | None:
-        if self._busy:
-            return None
-        result, error = self._result, self._error
-        if result is None and error is None:
-            return None
-        self._result = None
-        self._error = None
-        event_result = None
-        if result is not None:
-            event_result = LamaResult(image=result)
-        return EnginePollEvent(
-            task_type="inference",
-            result=event_result,
-            error=error,
-        )
+    def poll_event(self):
+        return self._tasks.poll_event()
+
+    def cancel(self) -> bool:
+        return self._tasks.cancel()
 
     def unload(self):
         self._model = None
 
     def shutdown(self, timeout: float = 1.0):
-        """Best-effort engine shutdown for app exit."""
-        thread = self._thread
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=timeout)
-        self.unload()
+        if self._tasks.shutdown(timeout):
+            self.unload()

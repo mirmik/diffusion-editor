@@ -24,29 +24,33 @@ class AgentRunner:
         self._main_calls: Queue[tuple[Any, threading.Event, dict[str, Any]]] = Queue()
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
+        self._state_lock = threading.Lock()
+        self._accepting = True
 
     @property
     def is_busy(self) -> bool:
-        return self._thread is not None and self._thread.is_alive()
+        with self._state_lock:
+            return self._thread is not None
 
     def submit(self, user_input: str) -> None:
         """Submit a user message and start the agent loop in a thread."""
-        if self.is_busy:
-            return
-
-        self._stop_event.clear()
-        config = {
-            **self._base_config,
-            "_tool_registry": self._tool_registry,
-            "_run_on_main_thread": self.run_on_main_thread,
-        }
-
-        self._thread = threading.Thread(
-            target=self._run,
-            args=(user_input, config),
-            daemon=True,
-        )
-        self._thread.start()
+        with self._state_lock:
+            if not self._accepting or self._thread is not None:
+                return
+            self._stop_event.clear()
+            config = {
+                **self._base_config,
+                "_tool_registry": self._tool_registry,
+                "_run_on_main_thread": self.run_on_main_thread,
+            }
+            thread = threading.Thread(
+                target=self._run,
+                args=(user_input, config),
+                name="agent-runner",
+                daemon=True,
+            )
+            self._thread = thread
+            thread.start()
 
     def cancel(self) -> None:
         self._stop_event.set()
@@ -88,9 +92,12 @@ class AgentRunner:
                 done.set()
 
     def shutdown(self, timeout: float = 1.0) -> None:
-        self.cancel()
-        if self._thread is not None and self._thread.is_alive():
-            self._thread.join(timeout=timeout)
+        with self._state_lock:
+            self._accepting = False
+            self._stop_event.set()
+            thread = self._thread
+        if thread is not None:
+            thread.join(timeout=timeout)
 
     def _run(self, user_input: str, config: dict) -> None:
         try:
@@ -110,3 +117,8 @@ class AgentRunner:
             self._events.put(("done", None))
         except Exception as e:
             self._events.put(("error", str(e)))
+        finally:
+            current = threading.current_thread()
+            with self._state_lock:
+                if self._thread is current:
+                    self._thread = None

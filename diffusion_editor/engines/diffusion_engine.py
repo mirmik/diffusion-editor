@@ -1,14 +1,12 @@
-import gc
 import os
-import threading
 from PIL import Image
 from tcbase import log
 
 from ..generation.types import (
     DiffusionInferenceResult,
     DiffusionRequest,
-    EnginePollEvent,
 )
+from .threaded_lifecycle import EngineTaskQueue
 
 # Filename hints for v-prediction models
 _VPRED_HINTS = ("vpred", "v-pred", "v_pred", "vprediction", "v-prediction", "v_prediction")
@@ -50,12 +48,7 @@ class DiffusionEngine:
     def __init__(self):
         self._pipe = None
         self._model_path = None
-        self._busy = False
-        self._result = None
-        self._error = None
-        self._result_meta = None
-        self._task_type = None  # "inference", "load", or "load_ip_adapter"
-        self._thread = None
+        self._tasks = EngineTaskQueue()
         self._pipe_mode = None  # "img2img" или "inpaint"
         self._ip_adapter_loaded = False
         self.model_info = {}  # диагностика — заполняется после загрузки
@@ -66,7 +59,7 @@ class DiffusionEngine:
 
     @property
     def is_busy(self) -> bool:
-        return self._busy
+        return self._tasks.is_busy
 
     @property
     def model_path(self) -> str | None:
@@ -351,16 +344,9 @@ class DiffusionEngine:
         return result, seed
 
     def submit_request(self, request: DiffusionRequest, meta=None):
-        if self._busy:
-            return False
-        self._busy = True
-        self._result = None
-        self._error = None
-        self._result_meta = meta
-        self._task_type = "inference"
-        self._thread = threading.Thread(
-            target=self._run_inference,
-            args=(
+        return self._tasks.submit(
+            "inference",
+            lambda _cancel: self._run_inference(
                 request.image,
                 request.prompt,
                 request.negative_prompt,
@@ -376,132 +362,69 @@ class DiffusionEngine:
                 request.width,
                 request.height,
             ),
-            daemon=True,
+            meta=meta,
+            name="diffusion-inference",
+            on_error=lambda _exc: log.exception(
+                f"Diffusion inference failed (mode={request.mode})"
+            ),
         )
-        self._thread.start()
-        return True
 
     def _run_inference(self, image, prompt, negative_prompt, strength, steps,
                        guidance_scale, seed, mode, mask_image, masked_content,
                        ip_adapter_image, ip_adapter_scale, width, height):
         log.debug(f"[DiffusionEngine] _run_inference thread started, mode={mode}")
-        gc.disable()
-        try:
-            if mode == "txt2img":
-                result_image, used_seed = self._txt2img(
-                    prompt, negative_prompt, width, height,
-                    steps, guidance_scale, seed,
-                    ip_adapter_image, ip_adapter_scale)
-            elif mode == "inpaint" and mask_image is not None:
-                result_image, used_seed = self._inpaint(
-                    image, mask_image, prompt, negative_prompt,
-                    strength, steps, guidance_scale, seed,
-                    ip_adapter_image, ip_adapter_scale,
-                    masked_content=masked_content)
-            else:
-                result_image, used_seed = self._img2img(
-                    image, prompt, negative_prompt,
-                    strength, steps, guidance_scale, seed,
-                    ip_adapter_image, ip_adapter_scale)
-            self._result = (result_image, used_seed)
-            log.debug("[DiffusionEngine] _run_inference OK, result set")
-        except Exception as e:
-            log.exception(f"Diffusion inference failed (mode={mode})")
-            self._error = str(e)
-        finally:
-            gc.enable()
-        self._busy = False
-        log.debug("[DiffusionEngine] _run_inference thread done, busy=False")
+        if mode == "txt2img":
+            result_image, used_seed = self._txt2img(
+                prompt, negative_prompt, width, height,
+                steps, guidance_scale, seed,
+                ip_adapter_image, ip_adapter_scale)
+        elif mode == "inpaint" and mask_image is not None:
+            result_image, used_seed = self._inpaint(
+                image, mask_image, prompt, negative_prompt,
+                strength, steps, guidance_scale, seed,
+                ip_adapter_image, ip_adapter_scale,
+                masked_content=masked_content)
+        else:
+            result_image, used_seed = self._img2img(
+                image, prompt, negative_prompt,
+                strength, steps, guidance_scale, seed,
+                ip_adapter_image, ip_adapter_scale)
+        log.debug("[DiffusionEngine] _run_inference OK")
+        return DiffusionInferenceResult(image=result_image, seed=used_seed)
 
     def submit_load_ip_adapter(self):
-        if self._busy:
-            return False
         if self._pipe is None:
             return False
-        self._busy = True
-        self._result = None
-        self._error = None
-        self._result_meta = None
-        self._task_type = "load_ip_adapter"
-        self._thread = threading.Thread(
-            target=self._run_load_ip_adapter, daemon=True,
+        return self._tasks.submit(
+            "load_ip_adapter",
+            lambda _cancel: self._run_load_ip_adapter(),
+            name="diffusion-ip-adapter-load",
+            on_error=lambda _exc: log.exception("IP-Adapter load failed"),
         )
-        self._thread.start()
-        return True
 
     def _run_load_ip_adapter(self):
-        gc.disable()
-        try:
-            self.load_ip_adapter()
-            self._result = True
-        except Exception as e:
-            log.exception("IP-Adapter load failed")
-            self._error = str(e)
-        finally:
-            gc.enable()
-        self._busy = False
-
-    def submit_load(self, path: str, prediction_type: str | None = None):
-        if self._busy:
-            return False
-        self._busy = True
-        self._result = None
-        self._error = None
-        self._result_meta = path
-        self._task_type = "load"
-        self._thread = threading.Thread(
-            target=self._run_load, args=(path, prediction_type), daemon=True,
-        )
-        self._thread.start()
+        self.load_ip_adapter()
         return True
 
-    def _run_load(self, path, prediction_type):
-        # Disable GC during model load: safetensors allocates large tensors
-        # which can trigger GC in this thread. GC may try to finalize objects
-        # with native resources (OpenGL/CUDA) from the main thread → segfault.
-        gc.disable()
-        try:
-            self.load_model(path, prediction_type)
-            self._result = path
-        except Exception as e:
-            log.exception(f"Model load failed: {path}")
-            self._error = str(e)
-        finally:
-            gc.enable()
-        self._busy = False
-
-    def poll_event(self) -> EnginePollEvent | None:
-        if self._busy:
-            return None
-
-        task_type = self._task_type
-        result = self._result
-        error = self._error
-        meta = self._result_meta
-
-        if result is None and error is None:
-            return None
-
-        self._result = None
-        self._error = None
-        self._result_meta = None
-        self._task_type = None
-        if task_type == "inference" and result is not None:
-            result_image, used_seed = result
-            result = DiffusionInferenceResult(
-                image=result_image,
-                seed=used_seed,
-            )
-        return EnginePollEvent(
-            task_type=task_type,
-            result=result,
-            error=error,
-            meta=meta,
+    def submit_load(self, path: str, prediction_type: str | None = None):
+        return self._tasks.submit(
+            "load",
+            lambda _cancel: self._run_load(path, prediction_type),
+            meta=path,
+            name="diffusion-model-load",
+            on_error=lambda _exc: log.exception(f"Model load failed: {path}"),
         )
 
+    def _run_load(self, path, prediction_type):
+        self.load_model(path, prediction_type)
+        return path
+
+    def poll_event(self):
+        return self._tasks.poll_event()
+
+    def cancel(self) -> bool:
+        return self._tasks.cancel()
+
     def shutdown(self, timeout: float = 1.0):
-        """Best-effort engine shutdown for app exit."""
-        thread = self._thread
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=timeout)
-        self.unload()
+        if self._tasks.shutdown(timeout):
+            self.unload()

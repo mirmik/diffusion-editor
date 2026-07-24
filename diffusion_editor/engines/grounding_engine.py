@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from queue import Empty, Queue
-from threading import Thread
 import time
 
 import numpy as np
@@ -15,6 +13,7 @@ from ..grounding.types import (
     GroundingRequest,
     GroundingResult,
 )
+from .threaded_lifecycle import SingleWorkerEventQueue
 
 
 def _import_torch():
@@ -24,9 +23,9 @@ def _import_torch():
 
 class GroundingEngine:
     def __init__(self):
-        self._busy = False
-        self._thread: Thread | None = None
-        self._events: Queue[GroundingEngineEvent] = Queue()
+        self._tasks: SingleWorkerEventQueue[GroundingEngineEvent] = (
+            SingleWorkerEventQueue()
+        )
         self._dino_model = None
         self._dino_proc = None
         self._dino_model_id: str | None = None
@@ -38,7 +37,7 @@ class GroundingEngine:
 
     @property
     def is_busy(self) -> bool:
-        return self._busy
+        return self._tasks.is_busy
 
     def gpu_available(self) -> bool:
         try:
@@ -49,29 +48,17 @@ class GroundingEngine:
             return False
 
     def submit_request(self, request: GroundingRequest) -> bool:
-        if self._busy:
-            return False
-        self._busy = True
-        self._drain_events()
-        self._thread = Thread(target=self._run, args=(request,), daemon=True)
-        self._thread.start()
-        return True
+        return self._tasks.submit(
+            lambda _cancel: self._run(request),
+            name="grounding-inference",
+            discard_pending=True,
+        )
 
     def poll_event(self) -> GroundingEngineEvent | None:
-        try:
-            return self._events.get_nowait()
-        except Empty:
-            return None
-
-    def _drain_events(self) -> None:
-        while True:
-            try:
-                self._events.get_nowait()
-            except Empty:
-                return
+        return self._tasks.poll_event()
 
     def _status(self, message: str) -> None:
-        self._events.put(GroundingEngineEvent(status=message))
+        self._tasks.emit(GroundingEngineEvent(status=message))
 
     def _run(self, request: GroundingRequest) -> None:
         params = request.params
@@ -117,7 +104,7 @@ class GroundingEngine:
 
             if not boxes:
                 log.info(f"Grounding: nothing found for prompt='{params.prompt}'")
-                self._events.put(
+                self._tasks.emit(
                     GroundingEngineEvent(status="Grounding: nothing found")
                 )
                 return
@@ -152,7 +139,7 @@ class GroundingEngine:
                     )
                 except Exception as exc:
                     log.error(f"SAM 2.1: {exc}")
-                    self._events.put(
+                    self._tasks.emit(
                         GroundingEngineEvent(status=f"SAM 2.1 error: {exc}")
                     )
 
@@ -175,7 +162,7 @@ class GroundingEngine:
                 f"Grounding: {len(detections)} hit(s) - {found} "
                 f"(total {time.time() - t0:.1f}s)"
             )
-            self._events.put(
+            self._tasks.emit(
                 GroundingEngineEvent(
                     status=f"Grounding: {len(detections)} hit(s): {found}",
                     result=GroundingResult(detections=detections),
@@ -183,9 +170,7 @@ class GroundingEngine:
             )
         except Exception as exc:
             log.error(f"Grounding: {exc}")
-            self._events.put(GroundingEngineEvent(error=str(exc)))
-        finally:
-            self._busy = False
+            self._tasks.emit(GroundingEngineEvent(error=str(exc)))
 
     def _get_dino_model(self, model_id: str, use_gpu: bool, status_fn=None):
         device = "cuda" if use_gpu else "cpu"
@@ -436,8 +421,9 @@ class GroundingEngine:
         self._sam2_model_id = None
         self._sam2_device = None
 
+    def cancel(self) -> bool:
+        return self._tasks.cancel()
+
     def shutdown(self, timeout: float = 1.0) -> None:
-        thread = self._thread
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=timeout)
-        self.unload()
+        if self._tasks.shutdown(timeout):
+            self.unload()

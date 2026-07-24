@@ -1,12 +1,11 @@
-import threading
 from PIL import Image
 from tcbase import log
 
 from ..generation.types import (
-    EnginePollEvent,
     InstructInferenceResult,
     InstructRequest,
 )
+from .threaded_lifecycle import EngineTaskQueue
 
 
 def _import_torch():
@@ -17,12 +16,7 @@ def _import_torch():
 class InstructEngine:
     def __init__(self):
         self._pipe = None
-        self._busy = False
-        self._result = None
-        self._error = None
-        self._result_meta = None
-        self._task_type = None  # "inference" or "load"
-        self._thread = None
+        self._tasks = EngineTaskQueue()
 
     @property
     def is_loaded(self) -> bool:
@@ -30,7 +24,7 @@ class InstructEngine:
 
     @property
     def is_busy(self) -> bool:
-        return self._busy
+        return self._tasks.is_busy
 
     def load_model(self):
         torch = _import_torch()
@@ -54,37 +48,21 @@ class InstructEngine:
             torch.cuda.empty_cache()
 
     def submit_load(self):
-        if self._busy:
-            return False
-        self._busy = True
-        self._result = None
-        self._error = None
-        self._result_meta = None
-        self._task_type = "load"
-        self._thread = threading.Thread(target=self._run_load, daemon=True)
-        self._thread.start()
-        return True
+        return self._tasks.submit(
+            "load",
+            lambda _cancel: self._run_load(),
+            name="instruct-load",
+            on_error=lambda _exc: log.exception("InstructPix2Pix load failed"),
+        )
 
     def _run_load(self):
-        try:
-            self.load_model()
-            self._result = True
-        except Exception as e:
-            log.exception("InstructPix2Pix load failed")
-            self._error = str(e)
-        self._busy = False
+        self.load_model()
+        return True
 
     def submit_request(self, request: InstructRequest, meta=None):
-        if self._busy:
-            return False
-        self._busy = True
-        self._result = None
-        self._error = None
-        self._result_meta = meta
-        self._task_type = "inference"
-        self._thread = threading.Thread(
-            target=self._run_inference,
-            args=(
+        return self._tasks.submit(
+            "inference",
+            lambda _cancel: self._run_inference(
                 request.image,
                 request.instruction,
                 request.guidance_scale,
@@ -92,77 +70,48 @@ class InstructEngine:
                 request.steps,
                 request.seed,
             ),
-            daemon=True,
+            meta=meta,
+            name="instruct-inference",
+            on_error=lambda _exc: log.exception(
+                "InstructPix2Pix inference failed"
+            ),
         )
-        self._thread.start()
-        return True
 
     def _run_inference(self, image, instruction, guidance_scale,
                        image_guidance_scale, steps, seed):
-        try:
-            if self._pipe is None:
-                raise RuntimeError("Model not loaded")
+        if self._pipe is None:
+            raise RuntimeError("Model not loaded")
 
-            image = image.convert("RGB")
+        image = image.convert("RGB")
 
-            torch = _import_torch()
-            if seed == -1:
-                seed = torch.randint(0, 2**32, (1,)).item()
-            generator = torch.Generator(device="cpu").manual_seed(seed)
+        torch = _import_torch()
+        if seed == -1:
+            seed = torch.randint(0, 2**32, (1,)).item()
+        generator = torch.Generator(device="cpu").manual_seed(seed)
 
-            log.debug(
-                "[InstructEngine] instruction=%r image_size=%s guidance_scale=%s image_guidance_scale=%s steps=%s seed=%s"
-                % (instruction, image.size, guidance_scale, image_guidance_scale, steps, seed)
-            )
-
-            result = self._pipe(
-                prompt=instruction,
-                image=image,
-                num_inference_steps=steps,
-                guidance_scale=guidance_scale,
-                image_guidance_scale=image_guidance_scale,
-                generator=generator,
-            ).images[0]
-
-            log.debug(f"[InstructEngine] done, result size: {result.size}")
-            self._result = (result, seed)
-        except Exception as e:
-            log.exception("InstructPix2Pix inference failed")
-            self._error = str(e)
-        self._busy = False
-
-    def poll_event(self) -> EnginePollEvent | None:
-        if self._busy:
-            return None
-
-        task_type = self._task_type
-        result = self._result
-        error = self._error
-        meta = self._result_meta
-
-        if result is None and error is None:
-            return None
-
-        self._result = None
-        self._error = None
-        self._result_meta = None
-        self._task_type = None
-        if task_type == "inference" and result is not None:
-            result_image, used_seed = result
-            result = InstructInferenceResult(
-                image=result_image,
-                seed=used_seed,
-            )
-        return EnginePollEvent(
-            task_type=task_type,
-            result=result,
-            error=error,
-            meta=meta,
+        log.debug(
+            "[InstructEngine] instruction=%r image_size=%s guidance_scale=%s image_guidance_scale=%s steps=%s seed=%s"
+            % (instruction, image.size, guidance_scale, image_guidance_scale, steps, seed)
         )
 
+        result = self._pipe(
+            prompt=instruction,
+            image=image,
+            num_inference_steps=steps,
+            guidance_scale=guidance_scale,
+            image_guidance_scale=image_guidance_scale,
+            generator=generator,
+        ).images[0]
+
+        log.debug(f"[InstructEngine] done, result size: {result.size}")
+        return InstructInferenceResult(image=result, seed=seed)
+
+    def poll_event(self):
+        return self._tasks.poll_event()
+
+    def cancel(self) -> bool:
+        return self._tasks.cancel()
+
     def shutdown(self, timeout: float = 1.0):
-        """Best-effort engine shutdown for app exit."""
-        thread = self._thread
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=timeout)
-        self.unload()
+        if self._tasks.shutdown(timeout):
+            self.unload()
