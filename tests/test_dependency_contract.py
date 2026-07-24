@@ -135,3 +135,53 @@ def test_segmentation_worker_has_a_separate_binary_only_lock():
         assert "requirements-segmentation-worker.txt" in installer
         assert "--only-binary=:all:" in installer
         assert "--no-binary" not in installer
+
+
+def test_ml_worker_has_a_separate_exact_binary_only_lock():
+    runtime = tuple(item.lower() for item in _requirements(
+        "requirements-runtime.txt"
+    ))
+    worker = tuple(item.lower() for item in _requirements(
+        "requirements-ml-worker.txt"
+    ))
+    core = tuple(item.lower() for item in _requirements(
+        "requirements-ml-worker-core.txt"
+    ))
+
+    expected = (
+        "torch==2.13.0+cpu",
+        "torchvision==0.28.0+cpu",
+        "diffusers==0.39.0",
+        "transformers==5.14.1",
+        "accelerate==1.14.0",
+        "safetensors==0.8.0",
+        "tokenizers==0.22.2",
+    )
+    for requirement in expected:
+        assert requirement.lower() in worker
+    assert all("==" in item for item in worker)
+    assert all("==" in item for item in core)
+    assert not any(
+        item.startswith(("torch==", "torchvision=="))
+        for item in core
+    )
+    assert all(
+        not any(item.startswith(f"{package}==") for item in runtime)
+        for package in (
+            "torch",
+            "torchvision",
+            "diffusers",
+            "transformers",
+            "accelerate",
+            "safetensors",
+            "tokenizers",
+        )
+    )
+
+    for name in ("setup-ml-worker.sh", "setup-ml-worker.ps1"):
+        installer = (PROJECT_ROOT / name).read_text(encoding="utf-8")
+        assert "requirements-ml-worker.txt" in installer
+        assert "requirements-ml-worker-core.txt" in installer
+        assert "--only-binary=:all:" in installer
+        assert "pip check" in installer
+        assert "ML_TORCH_INDEX_URL" in installer

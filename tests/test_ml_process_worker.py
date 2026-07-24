@@ -1,0 +1,272 @@
+from __future__ import annotations
+
+import sys
+import threading
+import time
+
+import numpy as np
+from PIL import Image
+import pytest
+
+from diffusion_editor.engines.diffusion_engine import DiffusionEngine
+from diffusion_editor.engines.grounding_engine import GroundingEngine
+from diffusion_editor.engines.instruct_engine import InstructEngine
+from diffusion_editor.generation.types import (
+    DiffusionInferenceResult,
+    DiffusionRequest,
+    InstructInferenceResult,
+    InstructRequest,
+)
+from diffusion_editor.grounding.types import GroundingParams, GroundingRequest
+from diffusion_editor.workers.ml_process import MlProcessClient
+from diffusion_editor.workers.ml_protocol import MlProtocolError
+
+
+def _client(backend: str = "fake", timeout: float = 2.0) -> MlProcessClient:
+    return MlProcessClient(
+        python=sys.executable,
+        backend=backend,
+        startup_timeout=timeout,
+        request_timeout=timeout,
+    )
+
+
+def _image(color: str = "red") -> Image.Image:
+    return Image.new("RGB", (8, 6), color)
+
+
+def _diffusion_data(mode: str = "img2img") -> dict:
+    return {
+        "prompt": "test",
+        "negative_prompt": "",
+        "strength": 0.5,
+        "steps": 2,
+        "guidance_scale": 1.0,
+        "seed": -1,
+        "mode": mode,
+        "masked_content": "original",
+        "ip_adapter_scale": 0.6,
+        "width": 8,
+        "height": 6,
+    }
+
+
+def _grounding_data() -> dict:
+    return {
+        "prompt": "object",
+        "model_id": "fake/dino",
+        "box_threshold": 0.3,
+        "text_threshold": 0.25,
+        "use_gpu": False,
+        "sam2_model_id": "fake/sam",
+        "sam2_mask_channel": 0,
+        "mask_threshold": 0.0,
+        "max_hole_area": 0,
+        "max_sprinkle_area": 0,
+        "multimask": False,
+        "non_overlap": False,
+    }
+
+
+def _poll(engine, timeout: float = 2.0):
+    deadline = time.monotonic() + timeout
+    event = None
+    while event is None and time.monotonic() < deadline:
+        event = engine.poll_event()
+        time.sleep(0.001)
+    assert event is not None
+    return event
+
+
+def test_fake_worker_smokes_all_three_model_families_without_main_imports():
+    client = _client()
+    before = sys._is_gil_enabled()
+    progress: list[str] = []
+    try:
+        loaded = client.request(
+            "load_diffusion",
+            {"model_path": "fake.safetensors", "prediction_type": None},
+            threading.Event(),
+            on_progress=progress.append,
+        )
+        assert loaded["model_path"] == "fake.safetensors"
+        diffusion = client.request(
+            "diffusion",
+            _diffusion_data(),
+            threading.Event(),
+            images={"image": _image(), "mask": None, "ip_adapter": None},
+        )
+        assert diffusion["image"].size == (8, 6)
+        assert diffusion["seed"] == 4242
+
+        client.request("load_instruct", {}, threading.Event())
+        instruct = client.request(
+            "instruct",
+            {
+                "instruction": "make blue",
+                "guidance_scale": 7.5,
+                "image_guidance_scale": 1.5,
+                "steps": 2,
+                "seed": -1,
+            },
+            threading.Event(),
+            images={"image": _image()},
+        )
+        assert instruct["seed"] == 4343
+
+        grounding = client.request(
+            "grounding",
+            _grounding_data(),
+            threading.Event(),
+            images={"image": np.asarray(_image().convert("RGBA"))},
+        )
+        assert grounding["detections"][0]["label"] == "object"
+        assert grounding["detections"][0]["mask"].shape == (6, 8)
+        assert client.is_running
+        assert sys._is_gil_enabled() is before is False
+        for module in ("torch", "diffusers", "transformers", "tokenizers"):
+            assert module not in sys.modules
+    finally:
+        client.shutdown()
+    assert not client.is_running
+
+
+@pytest.mark.parametrize(
+    ("backend", "error"),
+    [("crash", "exited with code 39"), ("malformed", "malformed JSON")],
+)
+def test_ml_crash_and_malformed_response_are_restartable(backend, error):
+    client = _client(backend)
+    with pytest.raises((RuntimeError, MlProtocolError), match=error):
+        client.request("gpu_available", {}, threading.Event())
+    assert not client.is_running
+    client._backend = "fake"
+    try:
+        assert client.request(
+            "gpu_available", {}, threading.Event()
+        ) == {"available": False}
+    finally:
+        client.shutdown()
+
+
+def test_ml_cancel_and_timeout_stop_hung_process():
+    client = _client("hang", timeout=5.0)
+    cancel = threading.Event()
+    timer = threading.Timer(0.1, cancel.set)
+    timer.start()
+    try:
+        with pytest.raises(RuntimeError, match="cancelled"):
+            client.request("gpu_available", {}, cancel)
+    finally:
+        timer.cancel()
+        client.shutdown()
+    assert not client.is_running
+
+    client = _client("hang", timeout=0.15)
+    with pytest.raises(TimeoutError, match="timed out"):
+        client.request("gpu_available", {}, threading.Event())
+    assert not client.is_running
+
+
+def test_diffusion_engine_maps_process_result_and_state():
+    engine = DiffusionEngine(client=_client())
+    try:
+        assert engine.submit_load("fake.safetensors")
+        load = _poll(engine)
+        assert load.result == "fake.safetensors"
+        assert engine.is_loaded
+
+        request = DiffusionRequest(
+            image=_image(),
+            mask_image=None,
+            prompt="test",
+            negative_prompt="",
+            strength=0.5,
+            steps=2,
+            guidance_scale=1.0,
+            seed=-1,
+            mode="img2img",
+            masked_content="original",
+            ip_adapter_image=None,
+            ip_adapter_scale=0.6,
+            width=8,
+            height=6,
+        )
+        assert engine.submit_request(request)
+        event = _poll(engine)
+        assert isinstance(event.result, DiffusionInferenceResult)
+        assert event.result.seed == 4242
+    finally:
+        engine.shutdown()
+
+
+def test_diffusion_engine_clears_loaded_state_after_worker_restart():
+    client = _client()
+    engine = DiffusionEngine(client=client)
+    try:
+        assert engine.submit_load("fake.safetensors")
+        assert _poll(engine).error is None
+        assert engine.model_path == "fake.safetensors"
+
+        # Simulate an externally lost worker. The restarted fake backend has no
+        # model, so inference fails and the facade must forget stale model state.
+        client.shutdown()
+        request = DiffusionRequest(
+            image=_image(),
+            mask_image=None,
+            prompt="test",
+            negative_prompt="",
+            strength=0.5,
+            steps=2,
+            guidance_scale=1.0,
+            seed=1,
+            mode="img2img",
+            masked_content="original",
+            ip_adapter_image=None,
+            ip_adapter_scale=0.6,
+            width=8,
+            height=6,
+        )
+        assert engine.submit_request(request)
+        assert _poll(engine).error is not None
+        assert engine.model_path is None
+        assert not engine.is_loaded
+    finally:
+        engine.shutdown()
+
+
+def test_instruct_and_grounding_engines_map_process_results():
+    instruct = InstructEngine(client=_client())
+    try:
+        assert instruct.submit_load()
+        assert _poll(instruct).error is None
+        assert instruct.submit_request(
+            InstructRequest(_image(), "test", 7.5, 1.5, 2, -1)
+        )
+        event = _poll(instruct)
+        assert isinstance(event.result, InstructInferenceResult)
+        assert event.result.seed == 4343
+    finally:
+        instruct.shutdown()
+
+    grounding = GroundingEngine(client=_client())
+    params = GroundingParams(**_grounding_data())
+    try:
+        assert grounding.submit_request(
+            GroundingRequest(
+                image=np.asarray(_image().convert("RGBA")),
+                params=params,
+            )
+        )
+        result_event = None
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            event = grounding.poll_event()
+            if event is not None and event.result is not None:
+                result_event = event
+                break
+            time.sleep(0.001)
+        assert result_event is not None
+        assert result_event.result.detections[0].label == "object"
+    finally:
+        grounding.shutdown()

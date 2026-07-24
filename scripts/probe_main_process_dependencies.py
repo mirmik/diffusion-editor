@@ -16,6 +16,16 @@ IMPORTS = (
     ("diffusion_editor.app.main", "diffusion-editor"),
 )
 
+WORKER_ONLY = (
+    "accelerate",
+    "diffusers",
+    "safetensors",
+    "tokenizers",
+    "torch",
+    "torchvision",
+    "transformers",
+)
+
 
 def _gil_enabled() -> bool:
     probe = getattr(sys, "_is_gil_enabled", None)
@@ -32,6 +42,26 @@ def main() -> int:
         if _gil_enabled():
             raise RuntimeError(f"importing {module_name} enabled the GIL")
         imported.append(f"{distribution_name}=={metadata.version(distribution_name)}")
+
+    loaded = sorted(name for name in WORKER_ONLY if name in sys.modules)
+    if loaded:
+        raise RuntimeError(
+            "worker-only modules leaked into the UI process: "
+            + ", ".join(loaded)
+        )
+    installed = []
+    for distribution_name in WORKER_ONLY:
+        try:
+            installed.append(
+                f"{distribution_name}=={metadata.version(distribution_name)}"
+            )
+        except metadata.PackageNotFoundError:
+            pass
+    if installed:
+        raise RuntimeError(
+            "worker-only distributions are installed in the UI environment: "
+            + ", ".join(installed)
+        )
 
     print("Main-process imports verified with the GIL disabled:")
     for item in imported:

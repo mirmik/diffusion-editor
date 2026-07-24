@@ -1,75 +1,47 @@
-from PIL import Image
+"""Main-process facade for InstructPix2Pix inference."""
+
+from __future__ import annotations
+
 from tcbase import log
 
-from ..generation.types import (
-    InstructInferenceResult,
-    InstructRequest,
-)
+from ..generation.types import InstructInferenceResult, InstructRequest
+from ..workers.ml_process import MlProcessClient
 from .threaded_lifecycle import EngineTaskQueue
 
 
-def _import_torch():
-    import torch
-    return torch
-
-
 class InstructEngine:
-    def __init__(self):
-        self._pipe = None
+    def __init__(self, client: MlProcessClient | None = None):
+        self._client = client or MlProcessClient()
         self._tasks = EngineTaskQueue()
+        self._loaded = False
 
     @property
     def is_loaded(self) -> bool:
-        return self._pipe is not None
+        return self._loaded and self._client.is_running
 
     @property
     def is_busy(self) -> bool:
         return self._tasks.is_busy
 
-    def load_model(self):
-        torch = _import_torch()
-        from diffusers import StableDiffusionInstructPix2PixPipeline, EulerAncestralDiscreteScheduler
-        self._pipe = StableDiffusionInstructPix2PixPipeline.from_pretrained(
-            "timbrooks/instruct-pix2pix",
-            torch_dtype=torch.float16,
-            safety_checker=None,
-        )
-        self._pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(
-            self._pipe.scheduler.config
-        )
-        self._pipe.to("cuda")
-        log.info("[InstructEngine] Model loaded: timbrooks/instruct-pix2pix")
-
-    def unload(self):
-        if self._pipe is not None:
-            torch = _import_torch()
-            del self._pipe
-            self._pipe = None
-            torch.cuda.empty_cache()
-
     def submit_load(self):
         return self._tasks.submit(
             "load",
-            lambda _cancel: self._run_load(),
+            lambda cancel: self._load(cancel),
             name="instruct-load",
-            on_error=lambda _exc: log.exception("InstructPix2Pix load failed"),
+            on_error=lambda _exc: log.exception(
+                "InstructPix2Pix load failed"
+            ),
         )
 
-    def _run_load(self):
-        self.load_model()
+    def _load(self, cancel):
+        self._client.request("load_instruct", {}, cancel)
+        self._loaded = True
         return True
 
     def submit_request(self, request: InstructRequest, meta=None):
         return self._tasks.submit(
             "inference",
-            lambda _cancel: self._run_inference(
-                request.image,
-                request.instruction,
-                request.guidance_scale,
-                request.image_guidance_scale,
-                request.steps,
-                request.seed,
-            ),
+            lambda cancel: self._run_inference(request, cancel),
             meta=meta,
             name="instruct-inference",
             on_error=lambda _exc: log.exception(
@@ -77,34 +49,23 @@ class InstructEngine:
             ),
         )
 
-    def _run_inference(self, image, instruction, guidance_scale,
-                       image_guidance_scale, steps, seed):
-        if self._pipe is None:
-            raise RuntimeError("Model not loaded")
-
-        image = image.convert("RGB")
-
-        torch = _import_torch()
-        if seed == -1:
-            seed = torch.randint(0, 2**32, (1,)).item()
-        generator = torch.Generator(device="cpu").manual_seed(seed)
-
-        log.debug(
-            "[InstructEngine] instruction=%r image_size=%s guidance_scale=%s image_guidance_scale=%s steps=%s seed=%s"
-            % (instruction, image.size, guidance_scale, image_guidance_scale, steps, seed)
+    def _run_inference(self, request: InstructRequest, cancel):
+        result = self._client.request(
+            "instruct",
+            {
+                "instruction": request.instruction,
+                "guidance_scale": request.guidance_scale,
+                "image_guidance_scale": request.image_guidance_scale,
+                "steps": request.steps,
+                "seed": request.seed,
+            },
+            cancel,
+            images={"image": request.image},
         )
-
-        result = self._pipe(
-            prompt=instruction,
-            image=image,
-            num_inference_steps=steps,
-            guidance_scale=guidance_scale,
-            image_guidance_scale=image_guidance_scale,
-            generator=generator,
-        ).images[0]
-
-        log.debug(f"[InstructEngine] done, result size: {result.size}")
-        return InstructInferenceResult(image=result, seed=seed)
+        return InstructInferenceResult(
+            image=result["image"],
+            seed=int(result["seed"]),
+        )
 
     def poll_event(self):
         return self._tasks.poll_event()
@@ -114,4 +75,5 @@ class InstructEngine:
 
     def shutdown(self, timeout: float = 1.0):
         if self._tasks.shutdown(timeout):
-            self.unload()
+            self._client.shutdown(timeout)
+            self._loaded = False

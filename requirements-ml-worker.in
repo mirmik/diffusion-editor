@@ -1,0 +1,10 @@
+# Default CPU runtime for the isolated CPython 3.11 ML worker.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+torch==2.13.0+cpu
+torchvision==0.28.0+cpu
+diffusers==0.39.0
+transformers==5.14.1
+accelerate==1.14.0
+safetensors==0.8.0
+tokenizers==0.22.2

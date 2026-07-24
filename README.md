@@ -56,6 +56,8 @@ LaMa has a separate regular-CPython environment; install and lifecycle details
 are in [the isolated LaMa worker guide](docs/lama-worker.md).
 Background segmentation uses another isolated environment documented in
 [the rembg worker guide](docs/segmentation-worker.md).
+Diffusion, InstructPix2Pix, Grounding DINO, and SAM use the regular-CPython
+runtime described in [the Diffusers/Transformers worker guide](docs/ml-worker.md).
 
 Termin wheels are force-refreshed from that SDK even when their version string
 has not changed. This matters for pure-Python packages such as `tcgui`: an SDK
