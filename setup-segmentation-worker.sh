@@ -6,7 +6,10 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 SEGMENTATION_VENV="${SEGMENTATION_VENV:-./.venv-segmentation}"
-SEGMENTATION_BOOTSTRAP_PYTHON="${SEGMENTATION_BOOTSTRAP_PYTHON:-python3.11}"
+source scripts/resolve_worker_python.sh
+SEGMENTATION_BOOTSTRAP_PYTHON="$(
+    resolve_worker_python "${SEGMENTATION_BOOTSTRAP_PYTHON:-}"
+)"
 SEGMENTATION_PYTHON="$SEGMENTATION_VENV/bin/python"
 
 verify_python() {

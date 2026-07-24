@@ -19,6 +19,9 @@ Linux:
 ./setup-ml-worker.sh
 ```
 
+On Linux the installer automatically finds a regular CPython 3.11 from
+`PATH` or `pyenv` without changing the selected project interpreter.
+
 Windows:
 
 ```powershell

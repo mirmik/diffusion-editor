@@ -6,7 +6,10 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 LAMA_VENV="${LAMA_VENV:-./.venv-lama}"
-LAMA_BOOTSTRAP_PYTHON="${LAMA_BOOTSTRAP_PYTHON:-python3.11}"
+source scripts/resolve_worker_python.sh
+LAMA_BOOTSTRAP_PYTHON="$(
+    resolve_worker_python "${LAMA_BOOTSTRAP_PYTHON:-}"
+)"
 LAMA_PYTHON="$LAMA_VENV/bin/python"
 
 verify_python() {

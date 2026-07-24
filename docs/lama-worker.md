@@ -14,8 +14,10 @@ Create the separately locked worker environment:
 
 On Windows use `./setup-lama-worker.ps1`.
 
-The default interpreter command is `python3.11` and the destination is
-`.venv-lama`. Override them when needed:
+The installer automatically finds a regular CPython 3.11 from `PATH` or an
+installed `pyenv` 3.11 version. It does not change the project's local or
+global `pyenv` selection. The destination is `.venv-lama`. Override discovery
+when needed:
 
 ```bash
 LAMA_BOOTSTRAP_PYTHON=/path/to/python3.11 \

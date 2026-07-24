@@ -6,7 +6,10 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 ML_VENV="${ML_VENV:-./.venv-ml}"
-ML_BOOTSTRAP_PYTHON="${ML_BOOTSTRAP_PYTHON:-python3.11}"
+source scripts/resolve_worker_python.sh
+ML_BOOTSTRAP_PYTHON="$(
+    resolve_worker_python "${ML_BOOTSTRAP_PYTHON:-}"
+)"
 ML_ACCELERATOR="${ML_ACCELERATOR:-cpu}"
 ML_PYTHON="$ML_VENV/bin/python"
 

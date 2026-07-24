@@ -10,7 +10,9 @@ forks the multithreaded Termin process.
 ./setup-segmentation-worker.sh
 ```
 
-On Windows use `./setup-segmentation-worker.ps1`. The default environment is
+On Windows use `./setup-segmentation-worker.ps1`. On Linux the installer
+automatically finds a regular CPython 3.11 from `PATH` or `pyenv` without
+changing the selected project interpreter. The default environment is
 `.venv-segmentation`. Override the bootstrap interpreter or destination with
 `SEGMENTATION_BOOTSTRAP_PYTHON` and `SEGMENTATION_VENV`.
 

@@ -108,6 +108,7 @@ def test_lama_worker_has_a_separate_exact_lock_and_installer():
         assert "--no-binary=fire" in installer
         assert "--no-build-isolation" in installer
         assert "download.pytorch.org/whl/cpu" in installer
+    assert "source scripts/resolve_worker_python.sh" in shell_installer
 
 
 def test_segmentation_worker_has_a_separate_binary_only_lock():
@@ -135,6 +136,7 @@ def test_segmentation_worker_has_a_separate_binary_only_lock():
         assert "requirements-segmentation-worker.txt" in installer
         assert "--only-binary=:all:" in installer
         assert "--no-binary" not in installer
+    assert "source scripts/resolve_worker_python.sh" in shell_installer
 
 
 def test_ml_worker_has_a_separate_exact_binary_only_lock():
@@ -185,3 +187,6 @@ def test_ml_worker_has_a_separate_exact_binary_only_lock():
         assert "--only-binary=:all:" in installer
         assert "pip check" in installer
         assert "ML_TORCH_INDEX_URL" in installer
+    assert "source scripts/resolve_worker_python.sh" in (
+        PROJECT_ROOT / "setup-ml-worker.sh"
+    ).read_text(encoding="utf-8")
