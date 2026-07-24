@@ -18,6 +18,7 @@ from termin.gui_native import (
 )
 
 from diffusion_editor.app.application import EditorApplication, EngineSet
+from diffusion_editor.app.dialogs import FileDialogKind
 from diffusion_editor.app.generation_panels import GenerationPanelKind
 from diffusion_editor.app.layer_tree import LayerTreeAction, LayerTreeIntent
 from diffusion_editor.app.native_root import NativeEditorRoot, WindowedNativeComposition
@@ -289,6 +290,19 @@ def test_real_offscreen_root_binds_application_and_renders(
             "diffusion-editor.agent-panel")
         assert root.view.agent_chat_view is root.agent_chat
         assert root.agent_chat_coordinator.state.status == "Unavailable"
+        assert root.dialogs is not None
+        assert root.dialog_coordinator is not None
+        assert root.view.activate_command("edit.settings")
+        assert root.dialogs.settings_dialog.open
+        assert root.composition.document.overlay_count == 1
+        assert root.tick().rendered is True
+        assert root.dialogs.settings_dialog.activate("cancel")
+        assert root.composition.document.overlay_count == 0
+        assert root.view.activate_command("file.open")
+        file_dialog = root.dialogs._file_dialogs[
+            FileDialogKind.OPEN_FILE]
+        assert file_dialog.open
+        assert file_dialog.activate("cancel")
 
         root.composition.resize(160, 96)
         resized = root.tick()
@@ -308,6 +322,11 @@ def test_real_offscreen_root_binds_application_and_renders(
     assert (
         application.shutdown_trace.index("native-agent-chat")
         < application.shutdown_trace.index("native-agent-chat-view")
+        < application.shutdown_trace.index("diffusion-engine")
+    )
+    assert (
+        application.shutdown_trace.index("native-dialog-coordinator")
+        < application.shutdown_trace.index("native-dialogs")
         < application.shutdown_trace.index("diffusion-engine")
     )
 

@@ -370,6 +370,12 @@ class GenerationPanelsCoordinator:
         if self._view is not None:
             self._view.apply_generation_panels_state(self._state)
 
+    def refresh_models(self) -> None:
+        if self._closed:
+            return
+        self._models = self._scan_models()
+        self.refresh()
+
     def close(self) -> None:
         if self._closed:
             return

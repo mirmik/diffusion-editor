@@ -1,0 +1,361 @@
+from __future__ import annotations
+
+from dataclasses import replace
+
+import numpy as np
+from PIL import Image
+import pytest
+from termin.gui_native import (
+    EventResult,
+    KeyCode,
+    KeyEvent,
+    KeyEventType,
+    PointerEvent,
+    PointerEventType,
+    Rect,
+    tc_ui_document_create,
+    tc_ui_document_destroy,
+)
+
+from diffusion_editor.app.application import EditorApplication, EngineSet
+from diffusion_editor.app.dialogs import (
+    ApplicationDialogCoordinator,
+    FileDialogKind,
+    SettingsState,
+)
+from diffusion_editor.app.native_dialogs import NativeApplicationDialogs
+
+
+class _Settings:
+    def __init__(self, tmp_path):
+        self.values = {
+            "models_dir": str(tmp_path),
+            "last_dir": str(tmp_path),
+        }
+
+    def get(self, key, default=None):
+        return self.values.get(key, default)
+
+    def set(self, key, value):
+        self.values[key] = value
+
+
+class _Engine:
+    model_info = {}
+    is_busy = False
+
+    def __init__(self):
+        self.requests = []
+
+    def poll_event(self):
+        return None
+
+    def shutdown(self):
+        pass
+
+    def gpu_available(self):
+        return False
+
+    def submit_request(self, request):
+        self.requests.append(request)
+        return True
+
+
+class _Canvas:
+    def __init__(self):
+        self.fit_calls = 0
+
+    def fit_in_view(self):
+        self.fit_calls += 1
+
+
+class _Dialogs:
+    def __init__(self):
+        self.files = []
+        self.settings = []
+        self.grounding = []
+        self.errors = []
+
+    def show_file_dialog(self, spec, callback):
+        self.files.append((spec, callback))
+
+    def show_settings_dialog(self, state, callback):
+        self.settings.append((state, callback))
+
+    def show_grounding_dialog(self, gpu_available, callback):
+        self.grounding.append((gpu_available, callback))
+
+    def show_error(self, title, message):
+        self.errors.append((title, message))
+
+
+def _application(tmp_path):
+    engines = [_Engine() for _ in range(5)]
+    app = EditorApplication(
+        settings=_Settings(tmp_path),
+        engines=EngineSet(*engines),
+    )
+    image = np.zeros((8, 10, 4), dtype=np.uint8)
+    image[:, :, 3] = 255
+    app.layer_stack.init_from_image(image)
+    return app, engines[-1]
+
+
+def test_dialog_coordinator_file_specs_cancel_and_last_directory(tmp_path):
+    app, _grounding = _application(tmp_path)
+    canvas = _Canvas()
+    view = _Dialogs()
+    coordinator = ApplicationDialogCoordinator(app, canvas)
+    coordinator.bind_view(view)
+
+    coordinator.open_project()
+    spec, callback = view.files[-1]
+    assert spec.kind == FileDialogKind.OPEN_FILE
+    assert spec.directory == str(tmp_path)
+    assert "*.deproj" in spec.filters
+    callback(None)
+    assert app.project_path is None
+
+    image_path = tmp_path / "inputs" / "source.png"
+    image_path.parent.mkdir()
+    Image.fromarray(
+        np.full((5, 7, 4), 128, dtype=np.uint8), "RGBA",
+    ).save(image_path)
+    coordinator.import_image()
+    import_spec, callback = view.files[-1]
+    assert import_spec.kind == FileDialogKind.OPEN_FILE
+    assert "*.webp" in import_spec.filters
+    callback(str(image_path))
+
+    assert (app.layer_stack.width, app.layer_stack.height) == (7, 5)
+    assert app.last_dir == str(image_path.parent)
+    assert app.settings.values["last_dir"] == str(image_path.parent)
+    assert canvas.fit_calls == 1
+    assert app.status_text == "Imported: source.png"
+    coordinator.close()
+    app.close()
+
+
+def test_dialog_coordinator_save_export_and_errors(tmp_path):
+    app, _grounding = _application(tmp_path)
+    view = _Dialogs()
+    coordinator = ApplicationDialogCoordinator(app, _Canvas())
+    coordinator.bind_view(view)
+
+    coordinator.save_project_as()
+    spec, callback = view.files[-1]
+    assert spec.kind == FileDialogKind.SAVE_FILE
+    assert spec.file_name == "project.deproj"
+    callback(str(tmp_path / "scene"))
+    project_path = tmp_path / "scene.deproj"
+    assert project_path.is_file()
+    assert app.project_path == str(project_path)
+
+    coordinator.export_image()
+    spec, callback = view.files[-1]
+    assert "*.jpeg" in spec.filters
+    callback(str(tmp_path / "render"))
+    assert (tmp_path / "render.png").is_file()
+    assert app.status_text == "Exported: render.png"
+
+    coordinator.export_image_path(str(tmp_path / "bad.gif"))
+    assert view.errors[-1][0] == "Export Image"
+    assert "Unknown export extension" in view.errors[-1][1]
+    coordinator.close()
+    app.close()
+
+
+def test_dialog_coordinator_settings_and_grounding(tmp_path):
+    app, grounding = _application(tmp_path)
+    refreshed = []
+    view = _Dialogs()
+    coordinator = ApplicationDialogCoordinator(
+        app, _Canvas(), on_models_dir_changed=lambda: refreshed.append(True))
+    coordinator.bind_view(view)
+
+    coordinator.show_settings()
+    state, callback = view.settings[-1]
+    assert state.models_dir == str(tmp_path)
+    callback(replace(
+        state,
+        models_dir=str(tmp_path / "models"),
+        history_limit_gib=1.5,
+        agent_model="local",
+        agent_temperature=0.2,
+        agent_stream=False,
+    ))
+    assert app.models_dir == str(tmp_path / "models")
+    assert app.last_dir == str(tmp_path / "models")
+    assert app.history_memory_limit_bytes == int(1.5 * 1024**3)
+    assert app.settings.values["agent_model"] == "local"
+    assert app.settings.values["agent_temperature"] == 0.2
+    assert app.settings.values["agent_stream"] is False
+    assert refreshed == [True]
+
+    coordinator.show_grounding()
+    available, callback = view.grounding[-1]
+    assert available is False
+    from diffusion_editor.grounding.types import GroundingParams
+    params = GroundingParams(
+        prompt="cat.",
+        model_id="dino",
+        box_threshold=0.4,
+        text_threshold=0.3,
+        use_gpu=False,
+        sam2_model_id=None,
+        sam2_mask_channel=0,
+        mask_threshold=0.0,
+        max_hole_area=0,
+        max_sprinkle_area=0,
+        multimask=True,
+        non_overlap=False,
+    )
+    callback(params)
+    assert grounding.requests[-1].params == params
+    assert app.status_text == "Grounding: detecting..."
+    coordinator.close()
+    app.close()
+
+
+def _settings_state(tmp_path):
+    return SettingsState(
+        models_dir=str(tmp_path),
+        history_limit_gib=5.0,
+        agent_base_url="http://localhost:8080",
+        agent_api_key="",
+        agent_model="default",
+        agent_temperature=0.7,
+        agent_max_tokens=1024,
+        agent_timeout_seconds=60,
+        agent_stream=True,
+    )
+
+
+def test_native_settings_accept_cancel_reopen_and_destroy(tmp_path):
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    document = tc_ui_document_create()
+    service = NativeApplicationDialogs(
+        document,
+        lambda: Rect(0.0, 0.0, 800.0, 700.0),
+        lambda: None,
+    )
+    results = []
+    try:
+        state = replace(
+            _settings_state(tmp_path), models_dir=str(models_dir))
+        service.show_settings_dialog(state, results.append)
+        assert service.settings_dialog.open
+        assert document.overlay_count == 1
+        service._browse_models_directory()
+        directory_dialog = service._file_dialogs[
+            FileDialogKind.OPEN_DIRECTORY]
+        assert directory_dialog.open
+        assert document.overlay_count == 2
+        assert directory_dialog.activate("accept")
+        assert service.settings_models_dir.text == str(models_dir)
+        assert document.overlay_count == 1
+        assert service.settings_dialog.activate("cancel")
+        assert results == [None]
+        assert document.overlay_count == 0
+
+        service.show_settings_dialog(state, results.append)
+        service.settings_agent_model.text = "native-model"
+        service.settings_history.value = 2.0
+        assert service.settings_dialog.activate("ok")
+        assert results[-1].agent_model == "native-model"
+        assert results[-1].history_limit_gib == 2.0
+
+        service.show_settings_dialog(state, results.append)
+        service.close()
+        assert not service.settings_dialog.open
+        assert document.overlay_count == 0
+    finally:
+        tc_ui_document_destroy(document)
+
+
+def test_native_file_dialog_modal_routing_cancel_accept_and_reopen(tmp_path):
+    text_path = tmp_path / "readme.txt"
+    text_path.write_text("hello", encoding="utf-8")
+    document = tc_ui_document_create()
+    root = document.create_vstack("UnderlyingRoot")
+    button = document.create_button("Under")
+    activations = []
+    button.connect_clicked(lambda: activations.append(True))
+    root.add_flex_child(button.widget, 1.0)
+    assert document.add_root(root.handle)
+    document.layout_roots(Rect(0.0, 0.0, 800.0, 600.0))
+    service = NativeApplicationDialogs(
+        document,
+        lambda: Rect(0.0, 0.0, 800.0, 600.0),
+        lambda: None,
+    )
+    results = []
+    from diffusion_editor.app.dialogs import FileDialogSpec
+    spec = FileDialogSpec(
+        FileDialogKind.OPEN_FILE,
+        "Open",
+        str(tmp_path),
+        "Text | *.txt",
+    )
+    try:
+        service.show_file_dialog(spec, results.append)
+        assert document.overlay_count == 1
+        event = PointerEvent()
+        event.type = PointerEventType.Down
+        event.x = 10.0
+        event.y = 10.0
+        assert document.dispatch_pointer_event(event) == EventResult.Handled
+        event.type = PointerEventType.Up
+        assert document.dispatch_pointer_event(event) == EventResult.Handled
+        assert activations == []
+
+        escape = KeyEvent()
+        escape.type = KeyEventType.Down
+        escape.key = KeyCode.Escape
+        assert document.dispatch_key_event(escape) == EventResult.Handled
+        assert results == [None]
+
+        service.show_file_dialog(spec, results.append)
+        dialog = service._file_dialogs[FileDialogKind.OPEN_FILE]
+        index = next(
+            index for index, entry in enumerate(dialog.model.entries)
+            if entry.name == "readme.txt")
+        assert dialog.model.select(index)
+        assert dialog.activate("accept")
+        assert results[-1] == str(text_path)
+    finally:
+        service.close()
+        assert document.overlay_count == 0
+        tc_ui_document_destroy(document)
+
+
+def test_native_grounding_accept_cancel_validation_and_reopen(tmp_path):
+    document = tc_ui_document_create()
+    service = NativeApplicationDialogs(
+        document,
+        lambda: Rect(0.0, 0.0, 800.0, 700.0),
+        lambda: None,
+    )
+    results = []
+    try:
+        service.show_grounding_dialog(False, results.append)
+        assert not service.grounding_gpu.widget.enabled
+        service.grounding_prompt.text = "cat"
+        assert service.grounding_dialog.activate("detect")
+        assert results[-1].prompt == "cat."
+        assert not results[-1].use_gpu
+
+        service.show_grounding_dialog(True, results.append)
+        assert service.grounding_gpu.widget.enabled
+        assert service.grounding_dialog.activate("cancel")
+        assert results[-1] is None
+
+        service.show_grounding_dialog(True, results.append)
+        assert service.grounding_dialog.activate("detect")
+        assert results[-1] is None
+        assert document.overlay_count == 1
+    finally:
+        service.close()
+        assert document.overlay_count == 0
+        tc_ui_document_destroy(document)

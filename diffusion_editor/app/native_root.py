@@ -27,6 +27,8 @@ from .canvas_controls import CanvasControlsCoordinator
 from .generation_panels import GenerationPanelsCoordinator
 from .native_canvas_controls import NativeCanvasControls
 from .native_generation_panels import NativeGenerationPanels
+from .dialogs import ApplicationDialogCoordinator
+from .native_dialogs import NativeApplicationDialogs
 from ..agent.chat import AgentChatCoordinator
 from .native_agent_chat import NativeAgentChatPanel
 from .layer_tree import LayerTreeCoordinator
@@ -253,6 +255,8 @@ class NativeEditorRoot:
         self.layer_tree_coordinator = None
         self.agent_chat = None
         self.agent_chat_coordinator = None
+        self.dialogs = None
+        self.dialog_coordinator = None
 
         try:
             self.view = view_factory(
@@ -403,12 +407,46 @@ class NativeEditorRoot:
                         "native-agent-chat-view",
                         self.agent_chat.close,
                     )
+                self.dialog_coordinator = ApplicationDialogCoordinator(
+                    application,
+                    self.canvas,
+                    on_models_dir_changed=(
+                        self.generation_panels_coordinator.refresh_models
+                        if self.generation_panels_coordinator is not None
+                        else None),
+                )
+                self.dialogs = NativeApplicationDialogs(
+                    composition.document,
+                    viewport_rect=lambda: self.view.root.bounds,
+                    request_repaint=composition.request_repaint,
+                )
+                self.dialog_coordinator.bind_view(self.dialogs)
+                for command_id, handler in (
+                        self.dialog_coordinator.command_handlers.items()):
+                    self.view.set_command_handler(command_id, handler)
+                if command_handlers is not None:
+                    for command_id, handler in command_handlers.items():
+                        self.view.set_command_handler(command_id, handler)
+                application.register_shutdown_resource(
+                    ShutdownPhase.VIEW_WORKERS,
+                    "native-dialog-coordinator",
+                    self.dialog_coordinator.close,
+                )
+                application.register_shutdown_resource(
+                    ShutdownPhase.VIEW_WORKERS,
+                    "native-dialogs",
+                    self.dialogs.close,
+                )
             else:
                 self.canvas = None
             composition.set_unhandled_key_handler(self.view.dispatch_shortcut)
             application.bind_view(self.view.ports())
             composition.request_repaint()
         except Exception:
+            if self.dialog_coordinator is not None:
+                self.dialog_coordinator.close()
+            if self.dialogs is not None:
+                self.dialogs.close()
             if self.agent_chat_coordinator is not None:
                 self.agent_chat_coordinator.close()
             if self.agent_chat is not None:

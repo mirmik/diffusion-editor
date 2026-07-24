@@ -81,6 +81,8 @@ def main() -> int:
             raise RuntimeError("native Agent Chat was not mounted")
         if root.agent_chat.widget.stable_id != "diffusion-editor.agent-panel":
             raise RuntimeError("native Agent Chat has the wrong stable ID")
+        if root.dialogs is None or root.dialog_coordinator is None:
+            raise RuntimeError("native application dialogs were not mounted")
         root.canvas_controls.brush.size.value = 9.0
         if root.canvas.controller.brush.size != 9:
             raise RuntimeError("native brush control did not update Canvas")
