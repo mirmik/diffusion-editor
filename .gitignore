@@ -1,4 +1,5 @@
 .venv/
+.venv-lama/
 venv/
 __pycache__/
 *.pyc

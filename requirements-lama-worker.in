@@ -1,0 +1,7 @@
+# LaMa is intentionally isolated from the CPython 3.14t UI environment.
+# This lock targets regular CPython 3.11 and CPU PyTorch wheels.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+simple-lama-inpainting==0.1.2
+torch==2.7.1+cpu
+torchvision==0.22.1+cpu

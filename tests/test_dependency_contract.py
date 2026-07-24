@@ -68,3 +68,43 @@ def test_developer_requirements_compose_the_two_authoritative_locks():
 
     installer = (PROJECT_ROOT / "install-deps.sh").read_text(encoding="utf-8")
     assert "--only-binary=:all:" in installer
+
+
+def test_lama_worker_has_a_separate_exact_lock_and_installer():
+    runtime = tuple(item.lower() for item in _requirements(
+        "requirements-runtime.txt"
+    ))
+    worker = tuple(item.lower() for item in _requirements(
+        "requirements-lama-worker.txt"
+    ))
+    build = tuple(item.lower() for item in _requirements(
+        "requirements-lama-worker-build.txt"
+    ))
+
+    assert "simple-lama-inpainting==0.1.2" in worker
+    assert "opencv-python==4.11.0.86" in worker
+    assert "torch==2.7.1+cpu" in worker
+    assert "torchvision==0.22.1+cpu" in worker
+    assert all("simple-lama" not in item for item in runtime)
+    assert all("opencv-python" not in item for item in runtime)
+    assert build == (
+        "pip==26.1.2",
+        "setuptools==83.0.0",
+        "wheel==0.47.0",
+        "packaging==26.2",
+    )
+    assert all("==" in item for item in worker)
+
+    shell_installer = (
+        PROJECT_ROOT / "setup-lama-worker.sh"
+    ).read_text(encoding="utf-8")
+    powershell_installer = (
+        PROJECT_ROOT / "setup-lama-worker.ps1"
+    ).read_text(encoding="utf-8")
+    for installer in (shell_installer, powershell_installer):
+        assert "requirements-lama-worker.txt" in installer
+        assert "requirements-lama-worker-build.txt" in installer
+        assert "--only-binary=:all:" in installer
+        assert "--no-binary=fire" in installer
+        assert "--no-build-isolation" in installer
+        assert "download.pytorch.org/whl/cpu" in installer

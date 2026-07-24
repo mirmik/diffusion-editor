@@ -52,6 +52,8 @@ Native ML packages without CPython 3.14t wheels are excluded from the UI
 process and will be hosted by isolated workers. The current compatibility
 matrix and ownership boundary are documented in
 [CPython 3.14t dependency contract](docs/cpython-314t-dependencies.md).
+LaMa has a separate regular-CPython environment; install and lifecycle details
+are in [the isolated LaMa worker guide](docs/lama-worker.md).
 
 Termin wheels are force-refreshed from that SDK even when their version string
 has not changed. This matters for pure-Python packages such as `tcgui`: an SDK

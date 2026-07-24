@@ -10,6 +10,18 @@ from diffusion_editor.engines.threaded_lifecycle import EngineTaskQueue
 from diffusion_editor.generation.types import LamaRequest, LamaResult
 
 
+class _FakeLamaClient:
+    def __init__(self, inference):
+        self._inference = inference
+        self.shutdown_calls = 0
+
+    def inpaint(self, image, mask, _cancel):
+        return self._inference(image, mask)
+
+    def shutdown(self, _timeout=1.0):
+        self.shutdown_calls += 1
+
+
 def _poll(queue: EngineTaskQueue, timeout: float = 1.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -115,7 +127,6 @@ def test_cancel_is_cooperative_and_publishes_no_result():
 
 
 def test_shutdown_timeout_does_not_unload_live_engine_state():
-    engine = LamaEngine()
     started = threading.Event()
     release = threading.Event()
 
@@ -124,7 +135,8 @@ def test_shutdown_timeout_does_not_unload_live_engine_state():
         release.wait(1.0)
         return Image.new("RGB", (1, 1))
 
-    engine._model = inference
+    client = _FakeLamaClient(inference)
+    engine = LamaEngine(client=client)
     request = LamaRequest(
         image=Image.new("RGB", (1, 1)),
         mask_image=Image.new("L", (1, 1)),
@@ -133,7 +145,7 @@ def test_shutdown_timeout_does_not_unload_live_engine_state():
     assert started.wait(1.0)
 
     engine.shutdown(timeout=0.001)
-    assert engine._model is inference
+    assert client.shutdown_calls == 0
     assert engine.is_busy
 
     release.set()
@@ -141,13 +153,14 @@ def test_shutdown_timeout_does_not_unload_live_engine_state():
     while engine.is_busy and time.monotonic() < deadline:
         time.sleep(0.001)
     engine.shutdown()
-    assert engine._model is None
+    assert client.shutdown_calls == 1
 
 
 def test_lama_result_is_published_once_through_the_queue():
-    engine = LamaEngine()
     expected = Image.new("RGB", (2, 2), "red")
-    engine._model = lambda _image, _mask: expected
+    engine = LamaEngine(
+        client=_FakeLamaClient(lambda _image, _mask: expected)
+    )
     request = LamaRequest(
         image=Image.new("RGB", (2, 2)),
         mask_image=Image.new("L", (2, 2)),
