@@ -19,9 +19,14 @@ from termin.gui_native import (
 from tgfx import configure_default_shader_runtime
 
 from ..sdk_runtime import resolve_sdk
+from ..document.layer import Layer
+from ..document.tool import DiffusionTool, InstructTool, LamaTool
+from ..generation.patch_resolver import source_patch_at_center
 from .application import EditorApplication, ShutdownPhase
 from .canvas_controls import CanvasControlsCoordinator
 from .native_canvas_controls import NativeCanvasControls
+from .layer_tree import LayerTreeCoordinator
+from .native_layer_panel import NativeLayerPanel
 from .native_shell import CommandHandler, NativeEditorView
 from ..canvas.native_editor_canvas import NativeEditorCanvas
 
@@ -238,6 +243,8 @@ class NativeEditorRoot:
         self.canvas = None
         self.canvas_controls = None
         self.canvas_controls_coordinator = None
+        self.layer_panel = None
+        self.layer_tree_coordinator = None
 
         try:
             self.view = view_factory(
@@ -298,12 +305,44 @@ class NativeEditorRoot:
                         "native-canvas-controls",
                         self.canvas_controls_coordinator.close,
                     )
+                mount_layer_panel = getattr(
+                    self.view, "mount_layer_panel", None)
+                if mount_layer_panel is not None:
+                    self.layer_tree_coordinator = LayerTreeCoordinator(
+                        application.layer_stack,
+                        application.document,
+                        tool_factory=self._create_default_layer_tool,
+                        before_detach_tool=self._before_detach_layer_tool,
+                        set_status=application.set_status,
+                    )
+                    self.layer_panel = NativeLayerPanel(
+                        composition.document,
+                        self.layer_tree_coordinator.state,
+                        self.layer_tree_coordinator.handle_intent,
+                        viewport_rect=lambda: self.view.root.bounds,
+                    )
+                    self.layer_tree_coordinator.bind_view(self.layer_panel)
+                    mount_layer_panel(self.layer_panel)
+                    application.register_shutdown_resource(
+                        ShutdownPhase.VIEW_WORKERS,
+                        "native-layer-panel-view",
+                        self.layer_panel.close,
+                    )
+                    application.register_shutdown_resource(
+                        ShutdownPhase.VIEW_WORKERS,
+                        "native-layer-tree",
+                        self.layer_tree_coordinator.close,
+                    )
             else:
                 self.canvas = None
             composition.set_unhandled_key_handler(self.view.dispatch_shortcut)
             application.bind_view(self.view.ports())
             composition.request_repaint()
         except Exception:
+            if self.layer_panel is not None:
+                self.layer_panel.close()
+            if self.layer_tree_coordinator is not None:
+                self.layer_tree_coordinator.close()
             if self.canvas_controls is not None:
                 self.canvas_controls.close()
             if self.canvas_controls_coordinator is not None:
@@ -314,6 +353,54 @@ class NativeEditorRoot:
             self.dispatcher.discard_pending()
             composition.close()
             raise
+
+    def _create_default_layer_tool(
+            self, layer: Layer, tool_type: str):
+        if self.canvas is None:
+            return None
+        composite = self.canvas.get_composite_below(layer)
+        if composite is None:
+            composite = self.canvas.controller.get_composite()
+        if composite is None:
+            return None
+        center_x, center_y = self.canvas.view_center_image()
+        patch = source_patch_at_center(composite, center_x, center_y)
+        x0, y0, x1, y1 = patch.canvas_rect
+        common = {
+            "source_patch": patch.image,
+            "patch_x": x0,
+            "patch_y": y0,
+            "patch_w": x1 - x0,
+            "patch_h": y1 - y0,
+        }
+        if tool_type == "diffusion":
+            engine = self.application.engines.diffusion
+            return DiffusionTool(
+                **common,
+                prompt="",
+                negative_prompt="",
+                strength=0.3,
+                guidance_scale=7.0,
+                steps=20,
+                seed=-1,
+                model_path=str(getattr(engine, "model_path", "") or ""),
+                prediction_type="",
+                mode="inpaint",
+            )
+        if tool_type == "lama":
+            return LamaTool(**common)
+        if tool_type == "instruct":
+            return InstructTool(**common)
+        return None
+
+    def _before_detach_layer_tool(self, layer: Layer) -> None:
+        for controller in (
+                self.application.diffusion_controller,
+                self.application.lama_controller,
+                self.application.instruct_controller,
+                self.application.segmentation_controller,
+                self.application.grounding_controller):
+            controller.clear_pending_layer(layer)
 
     @classmethod
     def create_headless(

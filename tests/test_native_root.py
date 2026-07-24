@@ -18,6 +18,7 @@ from termin.gui_native import (
 )
 
 from diffusion_editor.app.application import EditorApplication, EngineSet
+from diffusion_editor.app.layer_tree import LayerTreeAction, LayerTreeIntent
 from diffusion_editor.app.native_root import NativeEditorRoot, WindowedNativeComposition
 from diffusion_editor.app.presentation import ViewPorts
 from diffusion_editor.canvas.brush import BrushToolMode
@@ -321,6 +322,33 @@ def test_real_offscreen_canvas_renders_and_routes_image_space_paint(
         )
         assert root.canvas_controls.widget.stable_id == (
             "diffusion-editor.canvas-controls")
+        assert root.layer_panel.widget.stable_id == (
+            "diffusion-editor.layer-panel-content")
+        assert root.view.layer_panel_view is root.layer_panel
+        assert root.layer_panel.tree.selected_node == (
+            root.layer_panel._stable_to_node[
+                application.layer_stack.active_layer.id
+            ]
+        )
+        root.layer_panel.opacity.value = 0.45
+        assert application.layer_stack.active_layer.opacity == pytest.approx(
+            0.45)
+        root.layer_panel.visible.checked = False
+        assert not application.layer_stack.active_layer.visible
+        root.layer_panel.visible.checked = True
+        assert application.layer_stack.active_layer.visible
+        active_id = application.layer_stack.active_layer.id
+        root.layer_tree_coordinator.handle_intent(LayerTreeIntent(
+            LayerTreeAction.ATTACH_TOOL,
+            layer_id=active_id,
+            value="lama",
+        ))
+        assert application.layer_stack.active_layer.tool.tool_type == "lama"
+        root.layer_tree_coordinator.handle_intent(LayerTreeIntent(
+            LayerTreeAction.DETACH_TOOL,
+            layer_id=active_id,
+        ))
+        assert application.layer_stack.active_layer.tool is None
         root.canvas_controls.selection.rect_mode.checked = True
         assert root.canvas.widget.cursor_intent == CursorIntent.Crosshair
         root.canvas_controls.brush.tool_checkboxes[

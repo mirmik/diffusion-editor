@@ -460,6 +460,7 @@ class LayerStack:
             "canvas_height": self._height,
             "tile_size": self._tile_size,
             "active_layer_path": self._find_layer_path(self._active_layer),
+            "solo_layer_id": self.solo_layer_id,
             "selection_file": "selection.npy" if not self.selection.is_empty else None,
             "layers": [],
         }
@@ -519,6 +520,7 @@ class LayerStack:
 
         if self._active_layer is None and self._layers:
             self._active_layer = self._layers[0]
+        self.solo_layer_id = manifest.get("solo_layer_id")
         self.solo_layer()
         self._rebuild_caches()
         if self.on_changed:

@@ -197,12 +197,14 @@ class NativeEditorView:
         self.canvas_placeholder.stable_id = "diffusion-editor.canvas-host.label"
         self.canvas_host.add_preferred_child(self.canvas_placeholder)
         self.canvas_view = None
-        self.layer_panel = self._placeholder(
-            document,
-            "diffusion-editor.layer-panel",
-            "Layers",
-            "DiffusionEditorLayerPanel",
-        )
+        self.layer_panel = document.create_vstack("DiffusionEditorLayerPanel")
+        self.layer_panel.stable_id = "diffusion-editor.layer-panel"
+        self.layer_panel.set_layout_spacing(4.0)
+        self.layer_placeholder = document.create_label(
+            "Layers", "DiffusionEditorLayerPanelLabel")
+        self.layer_placeholder.stable_id = "diffusion-editor.layer-panel.label"
+        self.layer_panel.add_preferred_child(self.layer_placeholder)
+        self.layer_panel_view = None
         self.agent_panel = self._placeholder(
             document,
             "diffusion-editor.agent-panel",
@@ -329,6 +331,15 @@ class NativeEditorView:
         self.left_panel.remove_child(self.left_placeholder)
         self.left_panel.add_flex_child(controls_view.widget, 1.0)
         self.canvas_controls_view = controls_view
+        self._request_repaint()
+
+    def mount_layer_panel(self, layer_panel_view) -> None:
+        self._require_open()
+        if self.layer_panel_view is not None:
+            raise RuntimeError("native layer panel is already mounted")
+        self.layer_panel.remove_child(self.layer_placeholder)
+        self.layer_panel.add_flex_child(layer_panel_view.widget, 1.0)
+        self.layer_panel_view = layer_panel_view
         self._request_repaint()
 
     def ports(self) -> ViewPorts:

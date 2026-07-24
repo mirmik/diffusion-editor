@@ -73,9 +73,14 @@ def main() -> int:
     with factory(application, width=640, height=360, **options) as root:
         if root.canvas_controls is None:
             raise RuntimeError("native Canvas controls were not mounted")
+        if root.layer_panel is None:
+            raise RuntimeError("native layer panel was not mounted")
         root.canvas_controls.brush.size.value = 9.0
         if root.canvas.controller.brush.size != 9:
             raise RuntimeError("native brush control did not update Canvas")
+        root.layer_panel.opacity.value = 0.75
+        if application.layer_stack.active_layer.opacity != 0.75:
+            raise RuntimeError("native layer panel did not update the document")
         expected_ownership = (
             DynamicTextureOwnership.BORROWED
             if args.windowed

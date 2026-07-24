@@ -97,6 +97,15 @@ class NativeEditorCanvas:
         self._require_open()
         return self.controller.get_composite_below(layer)
 
+    def view_center_image(self) -> tuple[int, int]:
+        self._require_open()
+        bounds = self.widget.bounds
+        point = self.canvas.widget_to_image(Point(
+            bounds.x + bounds.width * 0.5,
+            bounds.y + bounds.height * 0.5,
+        ))
+        return int(point.x), int(point.y)
+
     def dispatch_shortcut(self, key: int, modifiers: int) -> bool:
         if modifiers != 0:
             return False

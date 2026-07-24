@@ -81,6 +81,15 @@ class SetLayerVisibilityCommand:
 
 
 @dataclass(frozen=True)
+class SetLayerSoloCommand:
+    layer: Layer | None
+    label: str = "Set Solo Layer"
+
+    def apply(self, layer_stack: LayerStack) -> None:
+        layer_stack.set_solo_layer(self.layer)
+
+
+@dataclass(frozen=True)
 class SetLayerOpacityCommand:
     layer: Layer
     opacity: float
