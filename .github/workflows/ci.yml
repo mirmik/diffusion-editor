@@ -89,6 +89,15 @@ jobs:
           LIBGL_ALWAYS_SOFTWARE: "1"
         run: xvfb-run -a python scripts/smoke_termin_runtime.py
 
+      - name: Exercise native editor OpenGL scenario
+        env:
+          TERMIN_SDK: ${{ runner.temp }}/termin-sdk
+          TERMIN_BACKEND: opengl
+          SDL_VIDEODRIVER: offscreen
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          TERMIN_SDK_SHADER_CACHE_ROOT: ${{ runner.temp }}/native-editor-shaders
+        run: python scripts/smoke_native_root.py --windowed --frames 3
+
       - name: Run tests
         env:
           TERMIN_SDK: ${{ runner.temp }}/termin-sdk

@@ -19,9 +19,10 @@ Graphics gates are explicit because CI hosts differ:
 ```sh
 # Hostless termin-gui-native composition:
 TERMIN_SDK_SHADER_CACHE_ROOT=/tmp/diffusion-editor-native-cache \
-  ./venv/bin/python scripts/smoke_native_root.py --frames 3
+  ./venv/bin/python scripts/smoke_native_root.py \
+  --backend vulkan --frames 3
 
-# Public WindowManager + GuiWindowAdapter composition:
+# Routine CI gate: public WindowManager + GuiWindowAdapter on OpenGL:
 TERMIN_BACKEND=opengl SDL_VIDEODRIVER=offscreen \
 TERMIN_SDK_SHADER_CACHE_ROOT=/tmp/diffusion-editor-native-window-cache \
   ./venv/bin/python scripts/smoke_native_root.py --windowed --frames 3
@@ -40,13 +41,23 @@ The render child checks `Py_GIL_DISABLED`, `cp314t` SOABI, and
 rendering. Shader/compiler errors and bounded subprocess timeouts fail the
 gate with their transition name.
 
+Both native scenarios import a real PNG through the application coordinator,
+route mask and image strokes, require non-empty image/overlay textures, render
+several frames, and verify idempotent shutdown plus released texture leases.
+The hostless Vulkan path additionally reads back the resized framebuffer and
+rejects a blank or non-finite result. The windowed OpenGL path requires the
+Canvas to borrow the live GPU compositor texture. CI runs the OpenGL scenario
+on every push and pull request. See
+[`native-ui-checklist.md`](native-ui-checklist.md) for real desktop input and
+visual verification, including the deterministic fake-generation path.
+
 ## Verified matrix (2026-07-25)
 
 | Path | Evidence | Status |
 | --- | --- | --- |
 | Main UI CPython 3.14t | import/ABI/wheel gate; 320 tests | automated, passing |
-| Native headless root | `OffscreenGuiComposition`, native Canvas, owned texture leases, input/resize, bounded Vulkan render | automated, passing |
-| Native windowed root | public `WindowManager` + borrowed `GuiWindowAdapter`, borrowed GPU Canvas texture, offscreen SDL/OpenGL smoke | migration gate |
+| Native headless root | `OffscreenGuiComposition`, snapshots, import/paint/mask, framebuffer readback, owned leases, resize/shutdown, bounded Vulkan render | automated, passing |
+| Native windowed root | public `WindowManager` + borrowed `GuiWindowAdapter`, borrowed GPU Canvas texture, import/paint/mask/shutdown, offscreen SDL/OpenGL smoke | routine CI gate |
 | OpenGL | 16-frame Xvfb render, GPU compositor + tcgui | passing with llvmpipe |
 | Vulkan device | `vulkaninfo --summary` | passing with llvmpipe 1.4 |
 | Vulkan presentation | 16-frame render command above | manual gate; current Xvfb has no DRI3/present queue |
