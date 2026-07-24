@@ -24,7 +24,9 @@ from ..document.tool import DiffusionTool, InstructTool, LamaTool
 from ..generation.patch_resolver import source_patch_at_center
 from .application import EditorApplication, ShutdownPhase
 from .canvas_controls import CanvasControlsCoordinator
+from .generation_panels import GenerationPanelsCoordinator
 from .native_canvas_controls import NativeCanvasControls
+from .native_generation_panels import NativeGenerationPanels
 from .layer_tree import LayerTreeCoordinator
 from .native_layer_panel import NativeLayerPanel
 from .native_shell import CommandHandler, NativeEditorView
@@ -243,6 +245,8 @@ class NativeEditorRoot:
         self.canvas = None
         self.canvas_controls = None
         self.canvas_controls_coordinator = None
+        self.generation_panels = None
+        self.generation_panels_coordinator = None
         self.layer_panel = None
         self.layer_tree_coordinator = None
 
@@ -305,6 +309,29 @@ class NativeEditorRoot:
                         "native-canvas-controls",
                         self.canvas_controls_coordinator.close,
                     )
+                mount_generation_panels = getattr(
+                    self.view, "mount_generation_panels", None)
+                if mount_generation_panels is not None:
+                    self.generation_panels_coordinator = (
+                        GenerationPanelsCoordinator(
+                            application,
+                            self.canvas.controller,
+                            canvas_controls=(
+                                self.canvas_controls_coordinator),
+                        )
+                    )
+                    self.generation_panels = NativeGenerationPanels(
+                        composition.document,
+                        self.generation_panels_coordinator.state,
+                        self.generation_panels_coordinator.handle_intent,
+                        composition.request_repaint,
+                    )
+                    self.generation_panels_coordinator.bind_view(
+                        self.generation_panels)
+                    mount_generation_panels(
+                        self.generation_panels,
+                        self.generation_panels_coordinator,
+                    )
                 mount_layer_panel = getattr(
                     self.view, "mount_layer_panel", None)
                 if mount_layer_panel is not None:
@@ -333,6 +360,17 @@ class NativeEditorRoot:
                         "native-layer-tree",
                         self.layer_tree_coordinator.close,
                     )
+                if self.generation_panels is not None:
+                    application.register_shutdown_resource(
+                        ShutdownPhase.VIEW_WORKERS,
+                        "native-generation-panels-view",
+                        self.generation_panels.close,
+                    )
+                    application.register_shutdown_resource(
+                        ShutdownPhase.VIEW_WORKERS,
+                        "native-generation-panels",
+                        self.generation_panels_coordinator.close,
+                    )
             else:
                 self.canvas = None
             composition.set_unhandled_key_handler(self.view.dispatch_shortcut)
@@ -343,6 +381,10 @@ class NativeEditorRoot:
                 self.layer_panel.close()
             if self.layer_tree_coordinator is not None:
                 self.layer_tree_coordinator.close()
+            if self.generation_panels is not None:
+                self.generation_panels.close()
+            if self.generation_panels_coordinator is not None:
+                self.generation_panels_coordinator.close()
             if self.canvas_controls is not None:
                 self.canvas_controls.close()
             if self.canvas_controls_coordinator is not None:

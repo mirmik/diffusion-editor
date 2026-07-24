@@ -75,6 +75,8 @@ def main() -> int:
             raise RuntimeError("native Canvas controls were not mounted")
         if root.layer_panel is None:
             raise RuntimeError("native layer panel was not mounted")
+        if root.generation_panels is None:
+            raise RuntimeError("native generation panels were not mounted")
         root.canvas_controls.brush.size.value = 9.0
         if root.canvas.controller.brush.size != 9:
             raise RuntimeError("native brush control did not update Canvas")

@@ -9,7 +9,7 @@ import numpy as np
 from PIL import Image, ImageFilter
 
 from .layer import Layer
-from .tool import Tool, DiffusionTool
+from .tool import DiffusionTool, InstructTool, Tool
 from .layer_stack import LayerStack
 from .result_paste import paste_result
 from .mask import Selection, coerce_mask_data
@@ -327,6 +327,66 @@ class ClearIpAdapterReferenceLayerCommand:
         if isinstance(tool, DiffusionTool):
             tool.ip_adapter_layer_id = None
             tool.ip_adapter_layer_name_hint = ""
+        if layer_stack.on_changed:
+            layer_stack.on_changed()
+
+
+@dataclass(frozen=True)
+class UpdateDiffusionToolCommand:
+    layer: Layer
+    prompt: str
+    negative_prompt: str
+    strength: float
+    guidance_scale: float
+    steps: int
+    seed: int
+    mode: str
+    masked_content: str
+    ip_adapter_scale: float
+    resize_to_model_resolution: bool
+    model_path: str
+    prediction_type: str
+    label: str = "Update Diffusion Settings"
+
+    def apply(self, layer_stack: LayerStack) -> None:
+        tool = self.layer.tool
+        if not isinstance(tool, DiffusionTool):
+            return
+        tool.prompt = self.prompt
+        tool.negative_prompt = self.negative_prompt
+        tool.strength = self.strength
+        tool.guidance_scale = self.guidance_scale
+        tool.steps = self.steps
+        tool.seed = self.seed
+        tool.mode = self.mode
+        tool.masked_content = self.masked_content
+        tool.ip_adapter_scale = self.ip_adapter_scale
+        tool.resize_to_model_resolution = self.resize_to_model_resolution
+        tool.model_path = self.model_path
+        tool.prediction_type = self.prediction_type
+        if layer_stack.on_changed:
+            layer_stack.on_changed()
+
+
+@dataclass(frozen=True)
+class UpdateInstructToolCommand:
+    layer: Layer
+    instruction: str
+    image_guidance_scale: float
+    guidance_scale: float
+    steps: int
+    seed: int
+    label: str = "Update Instruct Settings"
+
+    def apply(self, layer_stack: LayerStack) -> None:
+        tool = self.layer.tool
+        if not isinstance(tool, InstructTool):
+            return
+        tool.instruction = self.instruction
+        tool.image_guidance_scale = self.image_guidance_scale
+        tool.guidance_scale = self.guidance_scale
+        tool.steps = self.steps
+        tool.seed = self.seed
         if layer_stack.on_changed:
             layer_stack.on_changed()
 

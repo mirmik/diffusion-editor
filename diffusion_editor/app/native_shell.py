@@ -189,6 +189,8 @@ class NativeEditorView:
         self.left_placeholder.stable_id = "diffusion-editor.left-panel.label"
         self.left_panel.add_preferred_child(self.left_placeholder)
         self.canvas_controls_view = None
+        self.generation_panels_view = None
+        self.panel_presentation = None
         self.canvas_host = document.create_vstack(
             "DiffusionEditorCanvasHost")
         self.canvas_host.stable_id = "diffusion-editor.canvas-host"
@@ -333,6 +335,16 @@ class NativeEditorView:
         self.canvas_controls_view = controls_view
         self._request_repaint()
 
+    def mount_generation_panels(
+            self, panels_view, panel_presentation) -> None:
+        self._require_open()
+        if self.generation_panels_view is not None:
+            raise RuntimeError("native generation panels are already mounted")
+        self.left_panel.add_flex_child(panels_view.widget, 1.0)
+        self.generation_panels_view = panels_view
+        self.panel_presentation = panel_presentation
+        self._request_repaint()
+
     def mount_layer_panel(self, layer_panel_view) -> None:
         self._require_open()
         if self.layer_panel_view is not None:
@@ -347,6 +359,7 @@ class NativeEditorView:
             status=self,
             commands=self,
             window=self,
+            panels=self.panel_presentation,
             canvas=self.canvas_view,
         )
 

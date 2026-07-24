@@ -18,6 +18,7 @@ from termin.gui_native import (
 )
 
 from diffusion_editor.app.application import EditorApplication, EngineSet
+from diffusion_editor.app.generation_panels import GenerationPanelKind
 from diffusion_editor.app.layer_tree import LayerTreeAction, LayerTreeIntent
 from diffusion_editor.app.native_root import NativeEditorRoot, WindowedNativeComposition
 from diffusion_editor.app.presentation import ViewPorts
@@ -322,6 +323,9 @@ def test_real_offscreen_canvas_renders_and_routes_image_space_paint(
         )
         assert root.canvas_controls.widget.stable_id == (
             "diffusion-editor.canvas-controls")
+        assert root.generation_panels.widget.stable_id == (
+            "diffusion-editor.generation-panels")
+        assert root.view.generation_panels_view is root.generation_panels
         assert root.layer_panel.widget.stable_id == (
             "diffusion-editor.layer-panel-content")
         assert root.view.layer_panel_view is root.layer_panel
@@ -344,11 +348,25 @@ def test_real_offscreen_canvas_renders_and_routes_image_space_paint(
             value="lama",
         ))
         assert application.layer_stack.active_layer.tool.tool_type == "lama"
+        assert (
+            root.generation_panels_coordinator.state.active_kind
+            == GenerationPanelKind.LAMA
+        )
+        assert root.generation_panels.lama_group.widget.visible
+        root.generation_panels.mask_eraser.checked = True
+        assert (
+            root.canvas.controller.brush_tool_mode
+            == BrushToolMode.MASK_ERASER
+        )
+        assert root.canvas_controls.brush.tool_checkboxes[
+            BrushToolMode.MASK_ERASER
+        ].checked
         root.layer_tree_coordinator.handle_intent(LayerTreeIntent(
             LayerTreeAction.DETACH_TOOL,
             layer_id=active_id,
         ))
         assert application.layer_stack.active_layer.tool is None
+        assert root.generation_panels.empty_label.visible
         root.canvas_controls.selection.rect_mode.checked = True
         assert root.canvas.widget.cursor_intent == CursorIntent.Crosshair
         root.canvas_controls.brush.tool_checkboxes[

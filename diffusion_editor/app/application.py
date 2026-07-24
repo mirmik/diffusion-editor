@@ -324,7 +324,13 @@ class EditorApplication:
             command, status = map_lama_result(layer, result_image)
             if command is not None:
                 self.document.execute(command)
+            self.update_panel("lama", "result")
             self.set_status(status)
+        elif event.inference_error is not None:
+            self.update_panel(
+                "lama", "error", error=event.inference_error)
+            if event.status:
+                self.set_status(event.status)
         elif event.status:
             self.set_status(event.status)
 
@@ -338,12 +344,32 @@ class EditorApplication:
             self.update_panel("instruct", "model-error", error=event.model_error)
         elif event.model_loaded:
             self.update_panel("instruct", "model-loaded")
+        if (
+                event.status
+                and event.inference_result is None
+                and event.inference_error is None
+                and getattr(
+                    self.instruct_controller,
+                    "pending_layer",
+                    None,
+                ) is not None):
+            self.update_panel(
+                "instruct", "running", status=event.status)
         if event.inference_result is not None:
             layer, result_image, used_seed = event.inference_result
             command, status = map_instruct_result(layer, result_image, used_seed)
             if command is not None:
                 self.document.execute(command)
+            self.update_panel("instruct", "result")
             self.set_status(status)
+        elif event.inference_error is not None:
+            self.update_panel(
+                "instruct",
+                "inference-error",
+                error=event.inference_error,
+            )
+            if event.status:
+                self.set_status(event.status)
         elif event.status:
             self.set_status(event.status)
 
@@ -364,12 +390,32 @@ class EditorApplication:
             self.update_panel("diffusion", "ip-adapter-error", error=event.ip_adapter_error)
         elif event.ip_adapter_loaded:
             self.update_panel("diffusion", "ip-adapter-loaded")
+        if (
+                event.status
+                and event.inference_result is None
+                and event.inference_error is None
+                and getattr(
+                    self.diffusion_controller,
+                    "pending_layer",
+                    None,
+                ) is not None):
+            self.update_panel(
+                "diffusion", "running", status=event.status)
         if event.inference_result is not None:
             pending, result_image, used_seed = event.inference_result
             command, status = map_diffusion_result(pending, result_image, used_seed)
             if command is not None:
                 self.document.execute(command)
+            self.update_panel("diffusion", "result")
             self.set_status(status)
+        elif event.inference_error is not None:
+            self.update_panel(
+                "diffusion",
+                "inference-error",
+                error=event.inference_error,
+            )
+            if event.status is not None:
+                self.set_status(event.status)
         elif event.status is not None:
             self.set_status(event.status)
 

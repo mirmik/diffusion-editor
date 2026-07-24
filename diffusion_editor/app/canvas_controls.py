@@ -232,6 +232,32 @@ class CanvasControlsCoordinator:
         self._selection_state = state
         self._publish()
 
+    def apply_generation_mask_brush(
+            self,
+            size: int,
+            hardness: float,
+            flow: float,
+            eraser: bool) -> None:
+        """Synchronize generation-panel mask controls with Canvas controls."""
+        self._require_open()
+        size = max(1, min(int(size), 500))
+        hardness = max(0.0, min(float(hardness), 1.0))
+        flow = max(0.0, min(float(flow), 1.0))
+        mode = (
+            BrushToolMode.MASK_ERASER
+            if eraser else BrushToolMode.MASK
+        )
+        self._canvas.set_mask_brush(size, hardness, flow)
+        self._canvas.set_mask_eraser(eraser)
+        self._deactivate_selection_modes()
+        self._brush_state = self._replace_brush(
+            tool=mode,
+            size=size,
+            hardness=hardness,
+            flow=flow,
+        )
+        self._publish()
+
     def close(self) -> None:
         if self._closed:
             return
