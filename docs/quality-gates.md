@@ -40,11 +40,11 @@ The render child checks `Py_GIL_DISABLED`, `cp314t` SOABI, and
 rendering. Shader/compiler errors and bounded subprocess timeouts fail the
 gate with their transition name.
 
-## Verified matrix (2026-07-24)
+## Verified matrix (2026-07-25)
 
 | Path | Evidence | Status |
 | --- | --- | --- |
-| Main UI CPython 3.14t | import/ABI/wheel gate; 307 tests | automated, passing |
+| Main UI CPython 3.14t | import/ABI/wheel gate; 314 tests | automated, passing |
 | Native headless root | `OffscreenGuiComposition`, native Canvas, owned texture leases, input/resize, bounded Vulkan render | automated, passing |
 | Native windowed root | public `WindowManager` + borrowed `GuiWindowAdapter`, borrowed GPU Canvas texture, offscreen SDL/OpenGL smoke | migration gate |
 | OpenGL | 16-frame Xvfb render, GPU compositor + tcgui | passing with llvmpipe |

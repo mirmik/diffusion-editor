@@ -27,6 +27,8 @@ from .canvas_controls import CanvasControlsCoordinator
 from .generation_panels import GenerationPanelsCoordinator
 from .native_canvas_controls import NativeCanvasControls
 from .native_generation_panels import NativeGenerationPanels
+from ..agent.chat import AgentChatCoordinator
+from .native_agent_chat import NativeAgentChatPanel
 from .layer_tree import LayerTreeCoordinator
 from .native_layer_panel import NativeLayerPanel
 from .native_shell import CommandHandler, NativeEditorView
@@ -249,6 +251,8 @@ class NativeEditorRoot:
         self.generation_panels_coordinator = None
         self.layer_panel = None
         self.layer_tree_coordinator = None
+        self.agent_chat = None
+        self.agent_chat_coordinator = None
 
         try:
             self.view = view_factory(
@@ -371,12 +375,44 @@ class NativeEditorRoot:
                         "native-generation-panels",
                         self.generation_panels_coordinator.close,
                     )
+                mount_agent_chat = getattr(
+                    self.view, "mount_agent_chat", None)
+                if mount_agent_chat is not None:
+                    self.agent_chat_coordinator = AgentChatCoordinator(
+                        application.settings,
+                        application.agent_tool_registry,
+                        application.layer_stack,
+                        application.document,
+                        defer=self.defer,
+                    )
+                    self.agent_chat = NativeAgentChatPanel(
+                        composition.document,
+                        self.agent_chat_coordinator.state,
+                        self.agent_chat_coordinator.handle_intent,
+                        composition.request_repaint,
+                    )
+                    self.agent_chat_coordinator.bind_view(self.agent_chat)
+                    mount_agent_chat(self.agent_chat)
+                    application.register_shutdown_resource(
+                        ShutdownPhase.VIEW_WORKERS,
+                        "native-agent-chat",
+                        self.agent_chat_coordinator.close,
+                    )
+                    application.register_shutdown_resource(
+                        ShutdownPhase.VIEW_WORKERS,
+                        "native-agent-chat-view",
+                        self.agent_chat.close,
+                    )
             else:
                 self.canvas = None
             composition.set_unhandled_key_handler(self.view.dispatch_shortcut)
             application.bind_view(self.view.ports())
             composition.request_repaint()
         except Exception:
+            if self.agent_chat_coordinator is not None:
+                self.agent_chat_coordinator.close()
+            if self.agent_chat is not None:
+                self.agent_chat.close()
             if self.layer_panel is not None:
                 self.layer_panel.close()
             if self.layer_tree_coordinator is not None:
@@ -517,6 +553,8 @@ class NativeEditorRoot:
             self.application.request_stop()
         if self.application.running:
             self.application.poll()
+        if self.agent_chat is not None:
+            self.agent_chat.poll()
         rendered = bool(self.composition.render_frame())
         return NativeTickResult(
             dispatched=stats.executed,

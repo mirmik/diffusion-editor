@@ -213,6 +213,7 @@ class NativeEditorView:
             "Agent",
             "DiffusionEditorAgentPanel",
         )
+        self.agent_chat_view = None
 
         self.right_splitter = document.create_splitter(
             False,
@@ -352,6 +353,14 @@ class NativeEditorView:
         self.layer_panel.remove_child(self.layer_placeholder)
         self.layer_panel.add_flex_child(layer_panel_view.widget, 1.0)
         self.layer_panel_view = layer_panel_view
+        self._request_repaint()
+
+    def mount_agent_chat(self, agent_chat_view) -> None:
+        self._require_open()
+        if self.agent_chat_view is not None:
+            raise RuntimeError("native agent chat is already mounted")
+        self.right_splitter.set_second(agent_chat_view.widget)
+        self.agent_chat_view = agent_chat_view
         self._request_repaint()
 
     def ports(self) -> ViewPorts:

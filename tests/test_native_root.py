@@ -284,6 +284,11 @@ def test_real_offscreen_root_binds_application_and_renders(
         assert root.view.menu_bar.widget.stable_id == "diffusion-editor.menu-bar"
         assert root.view.toolbar.widget.stable_id == "diffusion-editor.toolbar"
         assert root.view.status_bar.text == "Dispatched"
+        assert root.agent_chat is not None
+        assert root.agent_chat.widget.stable_id == (
+            "diffusion-editor.agent-panel")
+        assert root.view.agent_chat_view is root.agent_chat
+        assert root.agent_chat_coordinator.state.status == "Unavailable"
 
         root.composition.resize(160, 96)
         resized = root.tick()
@@ -300,6 +305,11 @@ def test_real_offscreen_root_binds_application_and_renders(
 
     assert application.closed
     assert root.composition.closed
+    assert (
+        application.shutdown_trace.index("native-agent-chat")
+        < application.shutdown_trace.index("native-agent-chat-view")
+        < application.shutdown_trace.index("diffusion-engine")
+    )
 
 
 def test_real_offscreen_canvas_renders_and_routes_image_space_paint(

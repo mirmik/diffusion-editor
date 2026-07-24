@@ -92,7 +92,7 @@ F   ← начало
 
 **EditorWindow** — временный tcgui-адаптер. Он собирает legacy UI и связывает его с тем же `EditorApplication`, который будет использовать native shell. Compatibility aliases внутри `EditorWindow` существуют только для поэтапной миграции и не являются новым публичным API.
 
-**NativeEditorView** — параллельный native shell с app-owned command inventory/handlers и Termin `CommandModel`-проекциями. Root layout, menu bar, toolbar, splitters, native Canvas, brush/selection controls, generation/layer panels, оставшиеся panel hosts и status bar имеют стабильные IDs и создаются только публичными `TcDocument` factories. Agent host остаётся точкой для следующего вертикального среза миграции.
+**NativeEditorView** — параллельный native shell с app-owned command inventory/handlers и Termin `CommandModel`-проекциями. Root layout, menu bar, toolbar, splitters, native Canvas, brush/selection controls, generation/layer panels, Agent Chat и status bar имеют стабильные IDs и создаются только публичными `TcDocument` factories.
 
 **Presentation ports** — узкие интерфейсы для статуса, заголовка окна, состояния команд и панелей, диалогов и Canvas-взаимодействий. `EditorApplication` хранит presentation state и повторяет его при привязке новой view; headless и native-проекции используют одни контракты.
 
@@ -107,6 +107,8 @@ F   ← начало
 **NativeCanvasControls** — тонкие native-проекции поверх публичных `GroupBox`, `Checkbox`, `SliderEdit`, `Button` и `ColorDialog`. Они не мутируют Canvas напрямую и не обращаются к приватным полям widgets.
 
 **LayerTreeCoordinator / NativeLayerPanel** — toolkit-neutral проекция дерева слоёв и native-представление на публичных `TreeModel`, `TreeExpansionModel` и `TreeWidget`. Между пересборками модели сохраняются app-owned stable layer IDs, selection и expansion; все изменения документа (включая drag/drop, solo и attach/detach tools) проходят через typed commands `DocumentService`, а переименование и удаление — через native keyboard-operable dialogs.
+
+**AgentChatCoordinator / NativeAgentChatPanel** — toolkit-neutral состояние сессии и native-представление на `RichTextView`, `TextInput` и `Button`. `AgentRunner` отправляет streaming/tool/lifecycle events через app-owned `Dispatcher`, а editor tools возвращаются на UI-поток тем же `defer`-контрактом. Transcript автоматически следует за концом только при уже включённом follow-mode; пользовательские selection и ручной scroll сохраняются. Runner завершается в `VIEW_WORKERS` до закрытия native view и уничтожения документа.
 
 **GenerationPanelsCoordinator / NativeGenerationPanels** — immutable snapshots и typed intents для Diffusion, LaMa и InstructPix2Pix поверх существующих toolkit-neutral controllers. Черновики параметров привязаны к stable layer ID, tool updates проходят typed `DocumentService` commands, а model/inference worker events проецируются главным циклом через `EditorApplication.poll`. Native view использует только публичные `GroupBox`, `ScrollArea`, `TextArea`, `TextInput`, `ComboBox`, `SliderEdit` и `Checkbox`.
 

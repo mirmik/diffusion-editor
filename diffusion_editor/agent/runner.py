@@ -1,4 +1,4 @@
-"""Threaded bridge between nemor's synchronous agent loop and SDL2 event loop."""
+"""Threaded bridge between nemor's synchronous loop and a UI dispatcher."""
 
 from __future__ import annotations
 
@@ -11,12 +11,20 @@ from nemor.core.agent import agent_loop
 
 
 class AgentRunner:
-    """Runs nemor's agent_loop in a daemon thread, emits events to a queue.
+    """Runs nemor's agent loop and emits events through defer or a queue.
 
-    The main loop calls poll() every frame to drain events.
+    Native hosts pass ``defer``/``on_event``. Legacy hosts keep calling
+    :meth:`poll` every frame.
     """
 
-    def __init__(self, tool_registry, session: Session, config: dict):
+    def __init__(
+            self,
+            tool_registry,
+            session: Session,
+            config: dict,
+            *,
+            defer=None,
+            on_event=None):
         self._tool_registry = tool_registry
         self._session = session
         self._base_config = config
@@ -26,6 +34,8 @@ class AgentRunner:
         self._stop_event = threading.Event()
         self._state_lock = threading.Lock()
         self._accepting = True
+        self._defer = defer
+        self._on_event = on_event
 
     @property
     def is_busy(self) -> bool:
@@ -56,7 +66,7 @@ class AgentRunner:
         self._stop_event.set()
 
     def poll(self) -> list[tuple[str, Any]]:
-        """Drain all pending events. Call from main loop each frame."""
+        """Drain pending events for legacy hosts without a dispatcher."""
         self._drain_main_calls()
         events: list[tuple[str, Any]] = []
         while True:
@@ -70,7 +80,14 @@ class AgentRunner:
         """Run func from the UI polling thread and return its result."""
         done = threading.Event()
         box: dict[str, Any] = {}
-        self._main_calls.put((func, done, box))
+        if self._defer is None:
+            self._main_calls.put((func, done, box))
+        else:
+            try:
+                self._defer(lambda: self._run_deferred_call(func, done, box))
+            except RuntimeError as exc:
+                box["error"] = exc
+                done.set()
         while not done.wait(0.02):
             if self._stop_event.is_set():
                 raise RuntimeError("Agent operation cancelled")
@@ -99,6 +116,36 @@ class AgentRunner:
         if thread is not None:
             thread.join(timeout=timeout)
 
+    def _run_deferred_call(self, func, done, box) -> None:
+        with self._state_lock:
+            accepting = self._accepting
+        if not accepting or self._stop_event.is_set():
+            box["error"] = RuntimeError("Agent operation cancelled")
+            done.set()
+            return
+        try:
+            box["result"] = func()
+        except Exception as exc:
+            box["error"] = exc
+        finally:
+            done.set()
+
+    def _emit(self, kind: str, value: Any) -> None:
+        if self._defer is None or self._on_event is None:
+            self._events.put((kind, value))
+            return
+        try:
+            self._defer(lambda: self._deliver(kind, value))
+        except RuntimeError:
+            # Host shutdown closes the dispatcher before any view is destroyed.
+            return
+
+    def _deliver(self, kind: str, value: Any) -> None:
+        with self._state_lock:
+            accepting = self._accepting
+        if accepting:
+            self._on_event(kind, value)
+
     def _run(self, user_input: str, config: dict) -> None:
         try:
             result = agent_loop(
@@ -106,17 +153,16 @@ class AgentRunner:
                 user_input=user_input,
                 silent=True,
                 stop_event=self._stop_event,
-                on_token=lambda t: self._events.put(("delta", t)),
-                on_update=lambda: self._events.put(("update", None)),
-                on_tool=lambda name, args, result: self._events.put(
-                    ("tool", {"name": name, "args": args, "result": result})
-                ),
-                on_thinking=lambda t: self._events.put(("thinking", t)),
+                on_token=lambda t: self._emit("delta", t),
+                on_update=lambda: self._emit("update", None),
+                on_tool=lambda name, args, result: self._emit(
+                    "tool", {"name": name, "args": args, "result": result}),
+                on_thinking=lambda t: self._emit("thinking", t),
             )
-            self._events.put(("result", result or ""))
-            self._events.put(("done", None))
+            self._emit("result", result or "")
+            self._emit("done", None)
         except Exception as e:
-            self._events.put(("error", str(e)))
+            self._emit("error", str(e))
         finally:
             current = threading.current_thread()
             with self._state_lock:

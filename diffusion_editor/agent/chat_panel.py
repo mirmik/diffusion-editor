@@ -15,6 +15,11 @@ from tcgui.widgets.units import pct, px
 from tcgui.widgets.vstack import VStack
 
 from ..app.settings import Settings
+from .config import (
+    DEFAULT_AGENT_BASE_URL,
+    DEFAULT_AGENT_MODEL,
+    SYSTEM_PROMPT,
+)
 
 try:
     from nemor.core.session import Session
@@ -22,19 +27,6 @@ try:
 except ImportError:  # pragma: no cover - depends on optional local install
     Session = None
     AgentRunner = None
-
-
-DEFAULT_AGENT_BASE_URL = "http://localhost:8080"
-DEFAULT_AGENT_MODEL = "default"
-
-SYSTEM_PROMPT = (
-    "You are a built-in agent of Diffusion Editor — a layer-based image and texture "
-    "generation tool. You can inspect and manipulate the document using the available "
-    "tools: list layers, add/remove layers, toggle visibility, adjust opacity, "
-    "query canvas info, and view the canvas as an image. "
-    "All mutations go through the undo system. Be concise."
-    "P.S. The project is in a prototype and experimental state, so we are mostly not drawing, but testing tools."
-)
 
 
 class AgentChatPanel(Panel):

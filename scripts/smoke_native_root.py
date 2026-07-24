@@ -77,6 +77,10 @@ def main() -> int:
             raise RuntimeError("native layer panel was not mounted")
         if root.generation_panels is None:
             raise RuntimeError("native generation panels were not mounted")
+        if root.agent_chat is None:
+            raise RuntimeError("native Agent Chat was not mounted")
+        if root.agent_chat.widget.stable_id != "diffusion-editor.agent-panel":
+            raise RuntimeError("native Agent Chat has the wrong stable ID")
         root.canvas_controls.brush.size.value = 9.0
         if root.canvas.controller.brush.size != 9:
             raise RuntimeError("native brush control did not update Canvas")
