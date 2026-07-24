@@ -99,6 +99,9 @@ class EditorApplication:
         self.engines = engines if engines is not None else EngineSet.create_default()
         self.running = True
         self.closed = False
+        self.status_text = "Ready"
+        self.window_title = "Diffusion Editor"
+        self.command_states: dict[str, tuple[bool, bool]] = {}
         self.project_path: str | None = None
         self.last_dir = str(self.settings.get("last_dir", ""))
         self.models_dir = self._load_models_dir()
@@ -162,7 +165,16 @@ class EditorApplication:
     def bind_view(self, ports: ViewPorts) -> None:
         self._view = ports
         if ports.status is not None:
-            ports.status.set_status("Ready")
+            ports.status.set_status(self.status_text)
+        if ports.window is not None:
+            ports.window.set_window_title(self.window_title)
+        if ports.commands is not None:
+            for command_id, (enabled, checked) in self.command_states.items():
+                ports.commands.set_command_state(
+                    command_id,
+                    enabled=enabled,
+                    checked=checked,
+                )
 
     def unbind_view(self) -> None:
         self._view = ViewPorts()
@@ -186,8 +198,28 @@ class EditorApplication:
         self._next_shutdown_order += 1
 
     def set_status(self, text: str) -> None:
+        self.status_text = text
         if self._view.status is not None:
             self._view.status.set_status(text)
+
+    def set_window_title(self, title: str) -> None:
+        self.window_title = title
+        if self._view.window is not None:
+            self._view.window.set_window_title(title)
+
+    def set_command_state(
+            self,
+            command_id: str,
+            *,
+            enabled: bool,
+            checked: bool = False) -> None:
+        self.command_states[command_id] = (enabled, checked)
+        if self._view.commands is not None:
+            self._view.commands.set_command_state(
+                command_id,
+                enabled=enabled,
+                checked=checked,
+            )
 
     def update_panel(self, panel_id: str, state: str, **payload: Any) -> None:
         if self._view.panels is not None:

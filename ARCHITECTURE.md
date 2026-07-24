@@ -86,13 +86,17 @@ F   ← начало
 
 ## Слои приложения
 
-**Точка входа / host** инициализирует окно и графический контекст, запускает главный цикл и уничтожается последним. Сейчас это временный legacy SDL host; после миграции эту роль выполняет публичный application host из Termin.
+**Точка входа / root** владеет главным циклом и объектами интеграции с Termin. Сейчас production entrypoint всё ещё использует legacy SDL host. Параллельный `NativeEditorRoot` уже собирает hostless native-путь из публичных пакетов: приложение владеет `Dispatcher`, а графическая композиция — `WindowManager` + `GuiWindowAdapter` для окна либо `OffscreenGuiComposition` для headless-тестов.
 
 **EditorApplication** — toolkit-neutral владелец настроек, `LayerStack`, `DocumentService`, истории, ML-движков и контроллеров. Он принимает явные presentation ports, опрашивает контроллеры и преобразует их события в состояние документа, статус и panel updates. Модуль не импортирует `tcgui` или внутренности Termin-приложений.
 
 **EditorWindow** — временный tcgui-адаптер. Он собирает legacy UI и связывает его с тем же `EditorApplication`, который будет использовать native shell. Compatibility aliases внутри `EditorWindow` существуют только для поэтапной миграции и не являются новым публичным API.
 
-**Presentation ports** — узкие интерфейсы для статуса, состояния команд и панелей, диалогов и Canvas-взаимодействий. Headless-проекция позволяет создавать и проверять application/controller слой без UI toolkit; native-проекция должна использовать те же контракты.
+**NativeEditorView** — параллельный native shell с app-owned command inventory/handlers и Termin `CommandModel`-проекциями. Root layout, menu bar, toolbar, splitters, panel hosts и status bar имеют стабильные IDs и создаются только публичными `TcDocument` factories. До финального переключения места будущих Canvas/панелей остаются явными hosts.
+
+**Presentation ports** — узкие интерфейсы для статуса, заголовка окна, состояния команд и панелей, диалогов и Canvas-взаимодействий. `EditorApplication` хранит presentation state и повторяет его при привязке новой view; headless и native-проекции используют одни контракты.
+
+Глобальные accelerators должны проходить через публичную Termin-маршрутизацию после local handling сфокусированного виджета. Пока этот контракт не реализован в Termin, прямой `MenuBar.dispatch_shortcut()` проверяет command model, но не считается готовой production-маршрутизацией.
 
 **Панели** (`BrushPanel`, `DiffusionPanel`, `LayerPanel` и т.д.) — UI-компоненты без прямого доступа к документу. Общаются с оркестратором через колбеки.
 
@@ -112,9 +116,11 @@ Application-owned: настройки и состояние документа, 
 
 View-owned: widgets, panel projections, agent chat view/runner и Canvas GPU-ресурсы.
 
-Termin-owned: platform window, event routing, render target/present, clipboard/cursor services, defer/repaint и host loop.
+Application-root-owned: `Dispatcher`, порядок фаз кадра (`pump events` → deferred callbacks → controller poll → render) и политика остановки.
 
-`EditorApplication.close()` выполняет зарегистрированную очистку по фазам: view workers, engine workers, затем GPU resources. После этого точка входа уничтожает Termin host/window. Ошибки очистки логируются, повторный `close()` безопасен.
+Termin-composition-owned: platform window, event routing, render target/present, clipboard/cursor services и repaint.
+
+`EditorApplication.close()` выполняет зарегистрированную очистку по фазам: view workers, engine workers, затем GPU resources. После остановки производителей root закрывает dispatcher и отбрасывает оставшиеся UI callbacks, уничтожает view/document, окно, `WindowManager` и graphics session. Ошибки очистки логируются, повторный `close()` безопасен.
 
 ---
 

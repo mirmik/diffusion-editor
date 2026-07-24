@@ -17,6 +17,16 @@ for an offline repetition after the networked gate has already passed.
 Graphics gates are explicit because CI hosts differ:
 
 ```sh
+# Hostless termin-gui-native composition:
+TERMIN_SDK_SHADER_CACHE_ROOT=/tmp/diffusion-editor-native-cache \
+  ./venv/bin/python scripts/smoke_native_root.py --frames 3
+
+# Public WindowManager + GuiWindowAdapter composition:
+TERMIN_BACKEND=opengl SDL_VIDEODRIVER=offscreen \
+TERMIN_SDK_SHADER_CACHE_ROOT=/tmp/diffusion-editor-native-window-cache \
+  ./venv/bin/python scripts/smoke_native_root.py --windowed --frames 3
+
+# Legacy production entrypoint:
 xvfb-run -a ./run-quality-gates.sh --skip-resolver \
   --render-backend opengl --frames 16
 
@@ -34,7 +44,9 @@ gate with their transition name.
 
 | Path | Evidence | Status |
 | --- | --- | --- |
-| Main UI CPython 3.14t | import/ABI/wheel gate; 259 tests | automated, passing |
+| Main UI CPython 3.14t | import/ABI/wheel gate; 276 tests | automated, passing |
+| Native headless root | `OffscreenGuiComposition`, app-owned dispatcher, bounded render | automated, passing |
+| Native windowed root | public `WindowManager` + borrowed `GuiWindowAdapter`, offscreen SDL/OpenGL smoke | migration gate |
 | OpenGL | 16-frame Xvfb render, GPU compositor + tcgui | passing with llvmpipe |
 | Vulkan device | `vulkaninfo --summary` | passing with llvmpipe 1.4 |
 | Vulkan presentation | 16-frame render command above | manual gate; current Xvfb has no DRI3/present queue |

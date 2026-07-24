@@ -54,7 +54,9 @@ def test_main_process_lock_excludes_unavailable_native_ml_stack():
     assert project == (
         "tcbase",
         "tcgui",
+        "termin-dispatch",
         "termin-display",
+        "termin-gui-native",
         "tgfx",
         *runtime,
     )

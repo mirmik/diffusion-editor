@@ -23,6 +23,8 @@ IMPORTS = (
     ("PIL", "Pillow"),
     ("sdl2", "PySDL2"),
     ("yaml", "PyYAML"),
+    ("termin.dispatch", "termin-dispatch"),
+    ("termin.gui_native", "termin-gui-native"),
     ("diffusion_editor.app.main", "diffusion-editor"),
 )
 

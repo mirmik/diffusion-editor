@@ -31,6 +31,8 @@ RUNTIME_MANIFEST = "python-runtime-manifest.json"
 DIRECT_TERMIN_DISTRIBUTIONS = (
     "tcbase",
     "tcgui",
+    "termin-dispatch",
+    "termin-gui-native",
     "tgfx",
     "termin-display",
 )
@@ -645,12 +647,19 @@ def verify_imports(contract: SdkContract) -> None:
     import tcbase  # noqa: F401
     import tcgui
     import tgfx
+    import termin.dispatch
     import termin.display
+    import termin.gui_native
+    from termin.dispatch import Dispatcher
     from termin.display import WindowedGraphicsSession
+    from termin.gui_native import GuiWindowAdapter, OffscreenGuiComposition
     from tgfx import Tgfx2Context, configure_default_shader_runtime
 
     required = (
         tcgui,
+        Dispatcher,
+        GuiWindowAdapter,
+        OffscreenGuiComposition,
         WindowedGraphicsSession,
         Tgfx2Context,
         configure_default_shader_runtime,
@@ -661,7 +670,14 @@ def verify_imports(contract: SdkContract) -> None:
         raise SdkContractError(
             "Tgfx2Context.from_runtime is required by the windowed graphics contract"
         )
-    for module in (tcbase, tcgui, tgfx, termin.display):
+    for module in (
+        tcbase,
+        tcgui,
+        tgfx,
+        termin.dispatch,
+        termin.display,
+        termin.gui_native,
+    ):
         _require_module_from_runtime_environment(module)
 
 

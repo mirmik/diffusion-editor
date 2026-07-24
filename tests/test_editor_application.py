@@ -82,11 +82,16 @@ def test_headless_presentation_binds_to_application_owner():
     application = _application()
     presentation = HeadlessEditorPresentation()
 
+    application.set_status("Before bind")
+    application.set_window_title("Untitled — Diffusion Editor")
+    application.set_command_state("file.save", enabled=False)
     application.bind_view(presentation.ports())
     application.set_status("Bound")
     application.update_panel("layers", "ready", count=3)
 
     assert presentation.status == "Bound"
+    assert presentation.window_title == "Untitled — Diffusion Editor"
+    assert presentation.command_states["file.save"] == (False, False)
     assert presentation.panel_updates[-1].panel_id == "layers"
     assert presentation.panel_updates[-1].payload == {"count": 3}
 

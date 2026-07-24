@@ -23,6 +23,12 @@ class CommandPresentation(Protocol):
             self, command_id: str, *, enabled: bool, checked: bool = False) -> None: ...
 
 
+class WindowPresentation(Protocol):
+    """Receives application-owned window presentation state."""
+
+    def set_window_title(self, title: str) -> None: ...
+
+
 @dataclass(frozen=True)
 class PanelUpdate:
     panel_id: str
@@ -62,6 +68,7 @@ class ViewPorts:
 
     status: StatusPresentation | None = None
     commands: CommandPresentation | None = None
+    window: WindowPresentation | None = None
     panels: PanelPresentation | None = None
     dialogs: DialogPresentation | None = None
     canvas: CanvasPresentation | None = None
@@ -72,6 +79,7 @@ class HeadlessEditorPresentation:
 
     def __init__(self) -> None:
         self.status = "Ready"
+        self.window_title = "Diffusion Editor"
         self.command_states: dict[str, tuple[bool, bool]] = {}
         self.panel_updates: list[PanelUpdate] = []
         self.dialog_requests: list[DialogRequest] = []
@@ -83,6 +91,9 @@ class HeadlessEditorPresentation:
             self, command_id: str, *, enabled: bool, checked: bool = False) -> None:
         self.command_states[command_id] = (enabled, checked)
 
+    def set_window_title(self, title: str) -> None:
+        self.window_title = title
+
     def update_panel(self, update: PanelUpdate) -> None:
         self.panel_updates.append(update)
 
@@ -93,6 +104,7 @@ class HeadlessEditorPresentation:
         return ViewPorts(
             status=self,
             commands=self,
+            window=self,
             panels=self,
             dialogs=self,
         )

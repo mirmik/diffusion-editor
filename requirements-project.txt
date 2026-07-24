@@ -5,7 +5,9 @@
 # file with PyPI; it installs the SDK closure separately.
 tcbase
 tcgui
+termin-dispatch
 termin-display
+termin-gui-native
 tgfx
 numpy==2.5.1
 Pillow==12.3.0

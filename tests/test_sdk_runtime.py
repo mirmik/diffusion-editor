@@ -74,7 +74,10 @@ def _make_sdk(tmp_path: Path, *, stale_tgfx: bool = False) -> Path:
         "tcbase": NATIVE_VERSION,
         "tcgui": "0.1.0",
         "tgfx": NATIVE_VERSION,
+        "termin-dispatch": NATIVE_VERSION,
         "termin-display": NATIVE_VERSION,
+        "termin-gui-native": NATIVE_VERSION,
+        "termin-nanobind": "0.1.0",
         "termin-scene": NATIVE_VERSION,
     }
     payload = {
@@ -98,6 +101,23 @@ def _make_sdk(tmp_path: Path, *, stale_tgfx: bool = False) -> Path:
     _write_wheel(sdk, "tcgui", "0.1.0", "tcbase", "tgfx")
     _write_wheel(
         sdk,
+        "termin-dispatch",
+        NATIVE_VERSION,
+        "termin-nanobind",
+        "tcbase",
+    )
+    _write_wheel(
+        sdk,
+        "termin-gui-native",
+        NATIVE_VERSION,
+        "PyYAML",
+        "termin-nanobind",
+        "tcbase",
+        "tgfx",
+    )
+    _write_wheel(sdk, "termin-nanobind", "0.1.0")
+    _write_wheel(
+        sdk,
         "tgfx",
         "0.1.0+sdk-old" if stale_tgfx else NATIVE_VERSION,
         "tcbase",
@@ -117,7 +137,10 @@ def test_requirement_closure_is_exact_and_includes_sdk_transitives(tmp_path: Pat
     assert termin_requirement_closure(contract) == (
         f"tcbase=={NATIVE_VERSION}",
         "tcgui==0.1.0",
+        f"termin-dispatch=={NATIVE_VERSION}",
         f"termin-display=={NATIVE_VERSION}",
+        f"termin-gui-native=={NATIVE_VERSION}",
+        "termin-nanobind==0.1.0",
         f"termin-scene=={NATIVE_VERSION}",
         f"tgfx=={NATIVE_VERSION}",
     )
@@ -136,7 +159,10 @@ def test_installed_native_build_must_match_manifest(tmp_path: Path):
         "tcbase": NATIVE_VERSION,
         "tcgui": "0.1.0",
         "tgfx": "0.1.0+sdk-other",
+        "termin-dispatch": NATIVE_VERSION,
         "termin-display": NATIVE_VERSION,
+        "termin-gui-native": NATIVE_VERSION,
+        "termin-nanobind": "0.1.0",
         "termin-scene": NATIVE_VERSION,
     }
 
@@ -271,7 +297,14 @@ def test_retagged_wheel_is_accepted_only_when_native_payload_matches(tmp_path: P
     dependencies = {
         "tcbase": (),
         "tgfx": ("tcbase",),
+        "termin-dispatch": ("termin-nanobind", "tcbase"),
         "termin-display": ("termin-scene", "tgfx"),
+        "termin-gui-native": (
+            "PyYAML",
+            "termin-nanobind",
+            "tcbase",
+            "tgfx",
+        ),
         "termin-scene": ("tcbase",),
     }
     for name, requires in dependencies.items():
