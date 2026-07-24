@@ -39,6 +39,8 @@ class DiffusionGenerationController:
         self._layer_stack = layer_stack
         self._composite_below = composite_below
         self._pending_layer: Layer | None = None
+        self._queued_layer: Layer | None = None
+        self._active_task: str | None = None
 
     @property
     def pending_layer(self) -> Layer | None:
@@ -47,6 +49,8 @@ class DiffusionGenerationController:
     def clear_pending_layer(self, layer: Layer) -> None:
         if self._pending_layer is layer:
             self._pending_layer = None
+        if self._queued_layer is layer:
+            self._queued_layer = None
 
     def submit_load_model(
             self,
@@ -58,6 +62,7 @@ class DiffusionGenerationController:
         submitted = self._engine.submit_load(path, pred)
         if not submitted:
             return DiffusionControllerEvent()
+        self._active_task = "load"
         return DiffusionControllerEvent(status="Loading model...")
 
     def submit_load_ip_adapter(self) -> DiffusionControllerEvent:
@@ -66,11 +71,20 @@ class DiffusionGenerationController:
         submitted = self._engine.submit_load_ip_adapter()
         if not submitted:
             return DiffusionControllerEvent()
+        self._active_task = "load_ip_adapter"
         return DiffusionControllerEvent(status="Loading IP-Adapter...")
 
     def start_regeneration(self, layer: Layer) -> DiffusionControllerEvent:
         if self._engine.is_busy:
-            return DiffusionControllerEvent()
+            # Keep the latest request made while a model load or inference is
+            # running. Tool settings (including a newly selected seed) are
+            # read when the queued request is submitted.
+            if not (
+                self._active_task == "load"
+                and self._pending_layer is layer
+            ):
+                self._queued_layer = layer
+            return DiffusionControllerEvent(status="Regeneration queued...")
         tool = layer.tool
         if not isinstance(tool, DiffusionTool):
             return DiffusionControllerEvent()
@@ -82,6 +96,7 @@ class DiffusionGenerationController:
             if not submitted:
                 self._pending_layer = None
                 return DiffusionControllerEvent()
+            self._active_task = "load"
             return DiffusionControllerEvent(status="Loading model for regeneration...")
 
         if not self._engine.is_loaded:
@@ -119,12 +134,14 @@ class DiffusionGenerationController:
             if not submitted:
                 self._pending_layer = None
                 return DiffusionControllerEvent(status="Could not load IP-Adapter")
+            self._active_task = "load_ip_adapter"
             return DiffusionControllerEvent(status="Loading IP-Adapter...")
 
         submitted = self._engine.submit_request(request)
         if not submitted:
             self._pending_layer = None
             return DiffusionControllerEvent()
+        self._active_task = "inference"
 
         return DiffusionControllerEvent(
             status=f"Regenerating ({request.width}x{request.height})..."
@@ -134,6 +151,7 @@ class DiffusionGenerationController:
         engine_event = self._engine.poll_event()
         if engine_event is None:
             return None
+        self._active_task = None
 
         log.debug(
             f"[DiffusionGenerationController] task_type={engine_event.task_type}, "
@@ -164,6 +182,12 @@ class DiffusionGenerationController:
             if pending is not None and isinstance(pending.tool, DiffusionTool):
                 return replace(
                     self._submit_regeneration(pending),
+                    model_loaded_path=model_path,
+                )
+            queued = self._take_queued_layer()
+            if queued is not None:
+                return replace(
+                    self.start_regeneration(queued),
                     model_loaded_path=model_path,
                 )
             return event
@@ -212,6 +236,9 @@ class DiffusionGenerationController:
                 return DiffusionControllerEvent(
                     status="Diffusion result ignored: invalid result"
                 )
+            queued = self._take_queued_layer()
+            if queued is not None:
+                self.start_regeneration(queued)
             log.debug(
                 "[DiffusionGenerationController] inference OK, "
                 f"seed={result.seed}, pending={type(pending).__name__}"
@@ -221,3 +248,8 @@ class DiffusionGenerationController:
             )
 
         return DiffusionControllerEvent()
+
+    def _take_queued_layer(self) -> Layer | None:
+        layer = self._queued_layer
+        self._queued_layer = None
+        return layer

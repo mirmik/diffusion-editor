@@ -13,6 +13,7 @@ import time
 import uuid
 
 from PIL import Image
+from tcbase import log
 
 from .lama_protocol import (
     MAX_MESSAGE_BYTES,
@@ -152,12 +153,16 @@ class LamaProcessClient:
                 "--backend",
                 self._backend,
             ]
+            log.info(
+                f"[LaMa worker] Starting process "
+                f"(python={self._python}, backend={self._backend})"
+            )
             process = subprocess.Popen(
                 command,
                 cwd=project_root,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=None,
                 start_new_session=(os.name != "nt"),
             )
             responses: Queue[bytes | None] = Queue(maxsize=4)

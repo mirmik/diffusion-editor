@@ -145,18 +145,28 @@ def main() -> int:
             _run(label, command, timeout=args.timeout)
 
     for backend in args.render_backend:
-        environment = os.environ.copy()
-        environment["TERMIN_BACKEND"] = backend
-        _run(
-            f"Termin {backend} render smoke",
-            _python_script(
-                "scripts/smoke_termin_runtime.py",
-                "--frames",
-                str(args.frames),
-            ),
-            env=environment,
-            timeout=args.timeout,
-        )
+        with tempfile.TemporaryDirectory(
+            prefix=f"diffusion-editor-{backend}-shader-cache-"
+        ) as shader_cache:
+            environment = os.environ.copy()
+            environment["TERMIN_BACKEND"] = backend
+            environment["TERMIN_SDK_SHADER_CACHE_ROOT"] = shader_cache
+            _run(
+                f"Termin {backend} render smoke",
+                _python_script(
+                    "scripts/smoke_termin_runtime.py",
+                    "--frames",
+                    str(args.frames),
+                ),
+                env=environment,
+                timeout=args.timeout,
+            )
+            _run(
+                f"production editor {backend} startup smoke",
+                _python_script("scripts/smoke_editor_startup.py"),
+                env=environment,
+                timeout=args.timeout,
+            )
     verify_runtime_identity("quality runner completion")
     print("All requested CPython 3.14t quality gates passed.")
     return 0

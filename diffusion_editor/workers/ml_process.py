@@ -16,6 +16,7 @@ from typing import Any
 
 import numpy as np
 from PIL import Image
+from tcbase import log
 
 from .ml_protocol import (
     MAX_MESSAGE_BYTES,
@@ -222,12 +223,19 @@ class MlProcessClient:
                 "--backend",
                 self._backend,
             ]
+            log.info(
+                f"[ML worker] Starting process "
+                f"(python={self._python}, backend={self._backend})"
+            )
             process = subprocess.Popen(
                 command,
                 cwd=project_root,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                # stdout is the framed IPC channel. Worker/library diagnostics
+                # are deliberately redirected to stderr and should remain
+                # visible in the editor's terminal.
+                stderr=None,
                 start_new_session=(os.name != "nt"),
             )
             responses: Queue[bytes | None] = Queue(maxsize=8)

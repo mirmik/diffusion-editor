@@ -58,6 +58,31 @@ class _Status:
     text = ""
 
 
+class _CloseRecorder:
+    def __init__(self, calls, name):
+        self._calls = calls
+        self._name = name
+
+    def close(self):
+        self._calls.append(self._name)
+
+
+class _RecordingUI:
+    def __init__(self, calls):
+        self._calls = calls
+        self._root = object()
+        self._renderer = _CloseRecorder(calls, "ui-renderer")
+
+    @property
+    def root(self):
+        return self._root
+
+    @root.setter
+    def root(self, value):
+        self._root = value
+        self._calls.append("ui-root")
+
+
 def _export_window(image):
     window = object.__new__(EditorWindow)
     window._layer_stack = LayerStack()
@@ -103,3 +128,16 @@ def test_export_image_path_uses_layer_stack_composite_not_canvas_buffer(tmp_path
 
     out = np.array(Image.open(path).convert("RGBA"))
     assert tuple(out[0, 0]) == (255, 0, 0, 255)
+
+
+def test_close_releases_legacy_ui_before_host_graphics_shutdown():
+    calls = []
+    window = object.__new__(EditorWindow)
+    window._closed = False
+    window.application = _CloseRecorder(calls, "application")
+    window.ui = _RecordingUI(calls)
+
+    window.close()
+    window.close()
+
+    assert calls == ["application", "ui-root", "ui-renderer"]

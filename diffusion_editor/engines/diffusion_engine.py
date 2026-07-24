@@ -44,14 +44,19 @@ class DiffusionEngine:
 
     def _load(self, path, prediction_type, cancel):
         self._clear_state()
+        log.info(f"[Diffusion worker] Loading model: {path}")
         result = self._client.request(
             "load_diffusion",
             {"model_path": path, "prediction_type": prediction_type},
             cancel,
+            on_progress=lambda message: log.info(
+                f"[Diffusion worker] {message}"
+            ),
         )
         self._model_path = str(result["model_path"])
         self.model_info = dict(result.get("model_info", {}))
         self._ip_adapter_loaded = False
+        log.info(f"[Diffusion worker] Model loaded: {self.model_info}")
         return self._model_path
 
     def submit_load_ip_adapter(self):
@@ -87,6 +92,11 @@ class DiffusionEngine:
 
     def _run_inference(self, request: DiffusionRequest, cancel):
         try:
+            log.info(
+                "[Diffusion worker] Starting generation "
+                f"(mode={request.mode}, seed={request.seed}, "
+                f"size={request.width}x{request.height})"
+            )
             result = self._client.request(
                 "diffusion",
                 {
@@ -108,15 +118,23 @@ class DiffusionEngine:
                     "mask": request.mask_image,
                     "ip_adapter": request.ip_adapter_image,
                 },
+                on_progress=lambda message: log.info(
+                    f"[Diffusion worker] {message}"
+                ),
             )
         except Exception:
             if not self._client.is_running:
                 self._clear_state()
             raise
-        return DiffusionInferenceResult(
+        inference_result = DiffusionInferenceResult(
             image=result["image"],
             seed=int(result["seed"]),
         )
+        log.info(
+            f"[Diffusion worker] Generation completed "
+            f"(seed={inference_result.seed})"
+        )
+        return inference_result
 
     def poll_event(self):
         return self._tasks.poll_event()

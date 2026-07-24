@@ -6,8 +6,9 @@ tgfx2 IRenderDevice is owned by the window; the UI borrows it via the
 shared ``Tgfx2Context`` so every renderer lands on the same device.
 """
 
-import sys
 import ctypes
+import os
+import sys
 import sdl2
 from sdl2 import video
 
@@ -137,6 +138,10 @@ def main():
 
     editor = EditorWindow(ctx=tgfx2_ctx)
     ui = editor.ui
+    smoke_frames = int(os.environ.get("DIFFUSION_EDITOR_SMOKE_FRAMES", "0"))
+    if smoke_frames < 0:
+        raise ValueError("DIFFUSION_EDITOR_SMOKE_FRAMES must be non-negative")
+    presented_frames = 0
 
     # Cursor support
     def on_cursor_changed(cursor_name: str):
@@ -193,8 +198,6 @@ def main():
                 while sdl2.SDL_PollEvent(ctypes.byref(event)) != 0:
                     dispatch(event)
 
-            ui.process_deferred()
-
             if not editor.running:
                 break
 
@@ -209,6 +212,10 @@ def main():
             tex = editor.render_compose(vw, vh)
             if tex is not None:
                 window.present(tex)
+                presented_frames += 1
+                if smoke_frames and presented_frames >= smoke_frames:
+                    editor.request_stop()
+                    window.set_should_close(True)
     finally:
         # Application shutdown stops view workers, inference workers and GPU
         # resources before the borrowed host/window leaves scope.

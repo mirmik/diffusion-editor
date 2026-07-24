@@ -145,3 +145,91 @@ def test_poll_inference_returns_pending_layer_and_clears_pending():
 
     assert event.inference_result == (layer, result_image, 123)
     assert controller.pending_layer is None
+
+
+def test_regeneration_requested_during_explicit_model_load_is_queued():
+    stack, layer = _stack_with_diff_layer()
+    engine = _Engine()
+    engine.is_busy = True
+    engine.is_loaded = False
+    controller = DiffusionGenerationController(
+        engine=engine,
+        layer_stack=stack,
+        composite_below=lambda _layer: None,
+    )
+
+    queued = controller.start_regeneration(layer)
+
+    assert queued.status == "Regeneration queued..."
+    engine.is_busy = False
+    engine.is_loaded = True
+    engine.poll_result = EnginePollEvent(
+        task_type="load",
+        result="loaded.safetensors",
+    )
+    resumed = controller.poll()
+
+    assert resumed.model_loaded_path == "loaded.safetensors"
+    assert resumed.status == "Regenerating (4x4)..."
+    assert engine.calls[-1][0] == "submit_request"
+
+
+def test_new_seed_requested_during_inference_runs_after_current_result():
+    stack, layer = _stack_with_diff_layer()
+    engine = _Engine()
+    controller = DiffusionGenerationController(
+        engine=engine,
+        layer_stack=stack,
+        composite_below=lambda _layer: None,
+    )
+    controller.start_regeneration(layer)
+    engine.is_busy = True
+    layer.tool.seed = 99
+
+    queued = controller.start_regeneration(layer)
+
+    assert queued.status == "Regeneration queued..."
+    engine.is_busy = False
+    engine.poll_result = EnginePollEvent(
+        task_type="inference",
+        result=DiffusionInferenceResult(
+            image=Image.fromarray(_rgba(4, 4, (5, 6, 7, 255)), "RGBA"),
+            seed=1,
+        ),
+    )
+    completed = controller.poll()
+
+    assert completed.inference_result[2] == 1
+    assert engine.calls[-1][0] == "submit_request"
+    assert engine.calls[-1][1].seed == 99
+
+
+def test_new_seed_during_automatic_model_load_updates_pending_request_once():
+    stack, layer = _stack_with_diff_layer()
+    layer.tool.model_path = "next.safetensors"
+    engine = _Engine()
+    controller = DiffusionGenerationController(
+        engine=engine,
+        layer_stack=stack,
+        composite_below=lambda _layer: None,
+    )
+    controller.start_regeneration(layer)
+    engine.is_busy = True
+    layer.tool.seed = 77
+
+    queued = controller.start_regeneration(layer)
+
+    assert queued.status == "Regeneration queued..."
+    engine.is_busy = False
+    engine.model_path = "next.safetensors"
+    engine.poll_result = EnginePollEvent(
+        task_type="load",
+        result="next.safetensors",
+    )
+    controller.poll()
+
+    inference_calls = [
+        call for call in engine.calls if call[0] == "submit_request"
+    ]
+    assert len(inference_calls) == 1
+    assert inference_calls[0][1].seed == 77

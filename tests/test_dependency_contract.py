@@ -70,6 +70,15 @@ def test_developer_requirements_compose_the_two_authoritative_locks():
     assert "--only-binary=:all:" in installer
 
 
+def test_legacy_host_does_not_use_the_removed_tcgui_dispatch_queue():
+    main_source = (
+        PROJECT_ROOT / "diffusion_editor" / "app" / "main.py"
+    ).read_text(encoding="utf-8")
+
+    assert "process_deferred" not in main_source
+    assert ".defer(" not in main_source
+
+
 def test_model_workers_share_one_exact_binary_only_lock_and_installer():
     runtime = tuple(item.lower() for item in _requirements(
         "requirements-runtime.txt"

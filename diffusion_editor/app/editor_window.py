@@ -136,6 +136,7 @@ class EditorWindow:
         self._clipboard = self.application.clipboard
         self._clipboard_pos = self.application.clipboard_pos
         self._external_edit_ctx: ExternalEditContext | None = None
+        self._closed = False
 
         # Explicit compatibility aliases while the tcgui view is migrated in
         # vertical slices. All of these objects are owned by EditorApplication.
@@ -1306,8 +1307,6 @@ class EditorWindow:
         layer = self._layer_stack.active_layer
         if layer is None or not isinstance(layer.tool, DiffusionTool):
             return
-        if self._engine.is_busy:
-            return
         tool = layer.tool
         self._sync_panel_to_layer(tool)
 
@@ -1575,4 +1574,11 @@ class EditorWindow:
 
     def close(self):
         """Release runtime resources (GPU/engines). Safe to call multiple times."""
+        if self._closed:
+            return
+        self._closed = True
         self.application.close()
+        # tcgui owns offscreen textures on the borrowed graphics context.
+        # Release them before the host destroys its window/session.
+        self.ui.root = None
+        self.ui._renderer.close()
