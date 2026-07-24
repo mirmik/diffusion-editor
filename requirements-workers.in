@@ -1,6 +1,8 @@
-# Default CPU runtime for the isolated CPython 3.11 ML worker.
+# Shared regular-CPython 3.11 runtime for all isolated model workers.
 --extra-index-url https://download.pytorch.org/whl/cpu
 
+rembg[cpu]==2.0.77
+opencv-python-headless==5.0.0.93
 torch==2.13.0+cpu
 torchvision==0.28.0+cpu
 diffusers==0.39.0

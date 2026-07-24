@@ -52,12 +52,15 @@ Native ML packages without CPython 3.14t wheels are excluded from the UI
 process and will be hosted by isolated workers. The current compatibility
 matrix and ownership boundary are documented in
 [CPython 3.14t dependency contract](docs/cpython-314t-dependencies.md).
-LaMa has a separate regular-CPython environment; install and lifecycle details
-are in [the isolated LaMa worker guide](docs/lama-worker.md).
-Background segmentation uses another isolated environment documented in
-[the rembg worker guide](docs/segmentation-worker.md).
-Diffusion, InstructPix2Pix, Grounding DINO, and SAM use the regular-CPython
-runtime described in [the Diffusers/Transformers worker guide](docs/ml-worker.md).
+Install the single shared regular-CPython environment for LaMa, segmentation,
+Diffusion, InstructPix2Pix, Grounding DINO, and SAM with:
+
+```bash
+./setup-workers.sh
+```
+
+Installation, accelerator selection, and feature-specific smoke tests are
+documented in the [model-worker guide](docs/model-workers.md).
 
 Termin wheels are force-refreshed from that SDK even when their version string
 has not changed. This matters for pure-Python packages such as `tcgui`: an SDK

@@ -36,11 +36,11 @@ MAX_DETECTIONS = 1024
 def default_worker_python() -> Path:
     configured = os.environ.get("DIFFUSION_EDITOR_ML_PYTHON")
     if configured:
-        return Path(configured).expanduser().resolve()
+        return Path(configured).expanduser().absolute()
     project_root = Path(__file__).resolve().parents[2]
     if os.name == "nt":
-        return project_root / ".venv-ml" / "Scripts" / "python.exe"
-    return project_root / ".venv-ml" / "bin" / "python"
+        return project_root / ".venv-workers" / "Scripts" / "python.exe"
+    return project_root / ".venv-workers" / "bin" / "python"
 
 
 class MlProcessClient:
@@ -207,8 +207,8 @@ class MlProcessClient:
             self._stop_process_locked()
             if not self._python.is_file():
                 raise RuntimeError(
-                    f"ML worker Python not found: {self._python}. "
-                    "Run ./setup-ml-worker.sh or set "
+                    f"Worker Python not found: {self._python}. "
+                    "Run ./setup-workers.sh or set "
                     "DIFFUSION_EDITOR_ML_PYTHON."
                 )
             project_root = Path(__file__).resolve().parents[2]

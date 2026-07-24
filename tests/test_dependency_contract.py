@@ -70,87 +70,21 @@ def test_developer_requirements_compose_the_two_authoritative_locks():
     assert "--only-binary=:all:" in installer
 
 
-def test_lama_worker_has_a_separate_exact_lock_and_installer():
+def test_model_workers_share_one_exact_binary_only_lock_and_installer():
     runtime = tuple(item.lower() for item in _requirements(
         "requirements-runtime.txt"
     ))
     worker = tuple(item.lower() for item in _requirements(
-        "requirements-lama-worker.txt"
-    ))
-    build = tuple(item.lower() for item in _requirements(
-        "requirements-lama-worker-build.txt"
-    ))
-
-    assert "simple-lama-inpainting==0.1.2" in worker
-    assert "opencv-python==4.11.0.86" in worker
-    assert "torch==2.7.1+cpu" in worker
-    assert "torchvision==0.22.1+cpu" in worker
-    assert all("simple-lama" not in item for item in runtime)
-    assert all("opencv-python" not in item for item in runtime)
-    assert build == (
-        "pip==26.1.2",
-        "setuptools==83.0.0",
-        "wheel==0.47.0",
-        "packaging==26.2",
-    )
-    assert all("==" in item for item in worker)
-
-    shell_installer = (
-        PROJECT_ROOT / "setup-lama-worker.sh"
-    ).read_text(encoding="utf-8")
-    powershell_installer = (
-        PROJECT_ROOT / "setup-lama-worker.ps1"
-    ).read_text(encoding="utf-8")
-    for installer in (shell_installer, powershell_installer):
-        assert "requirements-lama-worker.txt" in installer
-        assert "requirements-lama-worker-build.txt" in installer
-        assert "--only-binary=:all:" in installer
-        assert "--no-binary=fire" in installer
-        assert "--no-build-isolation" in installer
-        assert "download.pytorch.org/whl/cpu" in installer
-    assert "source scripts/resolve_worker_python.sh" in shell_installer
-
-
-def test_segmentation_worker_has_a_separate_binary_only_lock():
-    runtime = tuple(item.lower() for item in _requirements(
-        "requirements-runtime.txt"
-    ))
-    worker = tuple(item.lower() for item in _requirements(
-        "requirements-segmentation-worker.txt"
-    ))
-
-    assert "rembg==2.0.77" in worker
-    assert "onnxruntime==1.27.0" in worker
-    assert "opencv-python-headless==5.0.0.93" in worker
-    assert all("==" in item for item in worker)
-    assert all("rembg" not in item for item in runtime)
-    assert all("opencv-python" not in item for item in runtime)
-
-    shell_installer = (
-        PROJECT_ROOT / "setup-segmentation-worker.sh"
-    ).read_text(encoding="utf-8")
-    powershell_installer = (
-        PROJECT_ROOT / "setup-segmentation-worker.ps1"
-    ).read_text(encoding="utf-8")
-    for installer in (shell_installer, powershell_installer):
-        assert "requirements-segmentation-worker.txt" in installer
-        assert "--only-binary=:all:" in installer
-        assert "--no-binary" not in installer
-    assert "source scripts/resolve_worker_python.sh" in shell_installer
-
-
-def test_ml_worker_has_a_separate_exact_binary_only_lock():
-    runtime = tuple(item.lower() for item in _requirements(
-        "requirements-runtime.txt"
-    ))
-    worker = tuple(item.lower() for item in _requirements(
-        "requirements-ml-worker.txt"
+        "requirements-workers.txt"
     ))
     core = tuple(item.lower() for item in _requirements(
-        "requirements-ml-worker-core.txt"
+        "requirements-workers-core.txt"
     ))
 
     expected = (
+        "rembg==2.0.77",
+        "onnxruntime==1.27.0",
+        "opencv-python-headless==5.0.0.93",
         "torch==2.13.0+cpu",
         "torchvision==0.28.0+cpu",
         "diffusers==0.39.0",
@@ -160,13 +94,14 @@ def test_ml_worker_has_a_separate_exact_binary_only_lock():
         "tokenizers==0.22.2",
     )
     for requirement in expected:
-        assert requirement.lower() in worker
+        assert requirement in worker
     assert all("==" in item for item in worker)
     assert all("==" in item for item in core)
     assert not any(
         item.startswith(("torch==", "torchvision=="))
         for item in core
     )
+    assert not any("simple-lama-inpainting" in item for item in worker)
     assert all(
         not any(item.startswith(f"{package}==") for item in runtime)
         for package in (
@@ -177,16 +112,28 @@ def test_ml_worker_has_a_separate_exact_binary_only_lock():
             "accelerate",
             "safetensors",
             "tokenizers",
+            "rembg",
+            "opencv-python",
         )
     )
 
-    for name in ("setup-ml-worker.sh", "setup-ml-worker.ps1"):
+    for name in ("setup-workers.sh", "setup-workers.ps1"):
         installer = (PROJECT_ROOT / name).read_text(encoding="utf-8")
-        assert "requirements-ml-worker.txt" in installer
-        assert "requirements-ml-worker-core.txt" in installer
+        assert "requirements-workers.txt" in installer
+        assert "requirements-workers-core.txt" in installer
         assert "--only-binary=:all:" in installer
         assert "pip check" in installer
+        assert "download.pytorch.org/whl/cpu" in installer
         assert "ML_TORCH_INDEX_URL" in installer
-    assert "source scripts/resolve_worker_python.sh" in (
-        PROJECT_ROOT / "setup-ml-worker.sh"
-    ).read_text(encoding="utf-8")
+
+    shell_installer = (PROJECT_ROOT / "setup-workers.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "source scripts/resolve_worker_python.sh" in shell_installer
+
+    for worker_name in ("lama", "segmentation", "ml"):
+        for suffix in ("sh", "ps1"):
+            wrapper = (
+                PROJECT_ROOT / f"setup-{worker_name}-worker.{suffix}"
+            ).read_text(encoding="utf-8")
+            assert "setup-workers" in wrapper

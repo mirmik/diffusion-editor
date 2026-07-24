@@ -1,3 +1,0 @@
-# rembg/OpenCV are isolated from the CPython 3.14t UI environment.
-rembg[cpu]==2.0.77
-opencv-python-headless==5.0.0.93

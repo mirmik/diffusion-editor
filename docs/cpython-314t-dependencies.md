@@ -46,12 +46,12 @@ binary-only gate:
 - Diffusers, because it requires safetensors;
 - Transformers/Grounding DINO, because they require tokenizers and
   safetensors;
-- simple-lama-inpainting, because it requires OpenCV;
+- the LaMa TorchScript adapter, because model execution requires PyTorch;
 - rembg segmentation, because its runtime closure requires OpenCV.
 
 Their imports remain lazy in the current application, but they are no longer
 declared as unconditional main-process dependencies. The corresponding
-features must run in isolated workers with their own reviewed lock. Installing
+features must run in isolated workers with a shared reviewed lock. Installing
 an sdist or forcing a regular `abi3` wheel into the 3.14t environment is not an
 accepted workaround.
 

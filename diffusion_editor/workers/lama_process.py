@@ -31,11 +31,11 @@ DEFAULT_REQUEST_TIMEOUT = 300.0
 def default_worker_python() -> Path:
     configured = os.environ.get("DIFFUSION_EDITOR_LAMA_PYTHON")
     if configured:
-        return Path(configured).expanduser().resolve()
+        return Path(configured).expanduser().absolute()
     project_root = Path(__file__).resolve().parents[2]
     if os.name == "nt":
-        return project_root / ".venv-lama" / "Scripts" / "python.exe"
-    return project_root / ".venv-lama" / "bin" / "python"
+        return project_root / ".venv-workers" / "Scripts" / "python.exe"
+    return project_root / ".venv-workers" / "bin" / "python"
 
 
 class LamaProcessClient:
@@ -137,8 +137,8 @@ class LamaProcessClient:
             self._stop_process_locked()
             if not self._python.is_file():
                 raise RuntimeError(
-                    f"LaMa worker Python not found: {self._python}. "
-                    "Run ./setup-lama-worker.sh or set "
+                    f"Worker Python not found: {self._python}. "
+                    "Run ./setup-workers.sh or set "
                     "DIFFUSION_EDITOR_LAMA_PYTHON."
                 )
             project_root = Path(__file__).resolve().parents[2]

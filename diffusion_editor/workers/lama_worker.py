@@ -49,9 +49,9 @@ class _Backend:
         if self.name != "lama":
             raise RuntimeError(f"Unknown LaMa worker backend: {self.name}")
         if self._model is None:
-            from simple_lama_inpainting import SimpleLama
+            from .lama_model import LamaModel
 
-            self._model = SimpleLama()
+            self._model = LamaModel()
         return self._model(image, mask)
 
 
