@@ -44,9 +44,9 @@ gate with their transition name.
 
 | Path | Evidence | Status |
 | --- | --- | --- |
-| Main UI CPython 3.14t | import/ABI/wheel gate; 276 tests | automated, passing |
-| Native headless root | `OffscreenGuiComposition`, app-owned dispatcher, bounded render | automated, passing |
-| Native windowed root | public `WindowManager` + borrowed `GuiWindowAdapter`, offscreen SDL/OpenGL smoke | migration gate |
+| Main UI CPython 3.14t | import/ABI/wheel gate; 284 tests | automated, passing |
+| Native headless root | `OffscreenGuiComposition`, native Canvas, owned texture leases, input/resize, bounded Vulkan render | automated, passing |
+| Native windowed root | public `WindowManager` + borrowed `GuiWindowAdapter`, borrowed GPU Canvas texture, offscreen SDL/OpenGL smoke | migration gate |
 | OpenGL | 16-frame Xvfb render, GPU compositor + tcgui | passing with llvmpipe |
 | Vulkan device | `vulkaninfo --summary` | passing with llvmpipe 1.4 |
 | Vulkan presentation | 16-frame render command above | manual gate; current Xvfb has no DRI3/present queue |

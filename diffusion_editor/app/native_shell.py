@@ -187,12 +187,14 @@ class NativeEditorView:
             "Tool controls",
             "DiffusionEditorLeftPanel",
         )
-        self.canvas_host = self._placeholder(
-            document,
-            "diffusion-editor.canvas-host",
-            "Canvas",
-            "DiffusionEditorCanvasHost",
-        )
+        self.canvas_host = document.create_vstack(
+            "DiffusionEditorCanvasHost")
+        self.canvas_host.stable_id = "diffusion-editor.canvas-host"
+        self.canvas_placeholder = document.create_label(
+            "Canvas", "DiffusionEditorCanvasHostLabel")
+        self.canvas_placeholder.stable_id = "diffusion-editor.canvas-host.label"
+        self.canvas_host.add_preferred_child(self.canvas_placeholder)
+        self.canvas_view = None
         self.layer_panel = self._placeholder(
             document,
             "diffusion-editor.layer-panel",
@@ -300,8 +302,31 @@ class NativeEditorView:
         handler()
         return True
 
+    def dispatch_shortcut(self, key: int, modifiers: int) -> bool:
+        self._require_open()
+        if self.menu_bar.dispatch_shortcut(key, modifiers):
+            return True
+        return bool(
+            self.canvas_view is not None
+            and self.canvas_view.dispatch_shortcut(key, modifiers)
+        )
+
+    def mount_canvas(self, canvas_view) -> None:
+        self._require_open()
+        if self.canvas_view is not None:
+            raise RuntimeError("native canvas is already mounted")
+        self.canvas_host.remove_child(self.canvas_placeholder)
+        self.canvas_host.add_flex_child(canvas_view.widget, 1.0)
+        self.canvas_view = canvas_view
+        self._request_repaint()
+
     def ports(self) -> ViewPorts:
-        return ViewPorts(status=self, commands=self, window=self)
+        return ViewPorts(
+            status=self,
+            commands=self,
+            window=self,
+            canvas=self.canvas_view,
+        )
 
     def close(self) -> None:
         if self.closed:

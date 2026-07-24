@@ -20,9 +20,13 @@ class CanvasCompositeBridge:
             *,
             gpu_compositing: bool,
             graphics=None,
-            set_image: Callable[[np.ndarray], None]):
+            set_image: Callable[[np.ndarray | None], None],
+            update_image_region: (
+                Callable[[int, int, np.ndarray], None] | None
+            ) = None):
         self._layer_stack = layer_stack
         self._set_image = set_image
+        self._update_image_region = update_image_region
         self._gpu_compositing = gpu_compositing
         self._gpu_compositor = (
             GPUCompositor(layer_stack, graphics=graphics)
@@ -70,6 +74,11 @@ class CanvasCompositeBridge:
     def rebuild(self) -> None:
         if self._gpu_compositor is not None:
             self._gpu_compositor.rebuild()
+
+    def clear(self) -> None:
+        self._composite = None
+        self._composite_stale = True
+        self._set_image(None)
 
     def update_composite(self) -> np.ndarray | None:
         if self.using_gpu:
@@ -202,4 +211,11 @@ class CanvasCompositeBridge:
             out_rgb, 0, 255).astype(np.uint8)
         self._composite[cy0:cy1, cx0:cx1, 3:4] = np.clip(
             out_a * 255.0, 0, 255).astype(np.uint8)
-        self._set_image(self._composite)
+        if self._update_image_region is None:
+            self._set_image(self._composite)
+        else:
+            self._update_image_region(
+                cx0,
+                cy0,
+                np.ascontiguousarray(self._composite[cy0:cy1, cx0:cx1]),
+            )

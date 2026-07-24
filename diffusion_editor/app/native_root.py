@@ -19,8 +19,9 @@ from termin.gui_native import (
 from tgfx import configure_default_shader_runtime
 
 from ..sdk_runtime import resolve_sdk
-from .application import EditorApplication
+from .application import EditorApplication, ShutdownPhase
 from .native_shell import CommandHandler, NativeEditorView
+from ..canvas.native_editor_canvas import NativeEditorCanvas
 
 
 DEFAULT_NATIVE_WIDTH = 1280
@@ -40,6 +41,10 @@ class NativeComposition(Protocol):
     def pump_events(self) -> int: ...
 
     def request_repaint(self) -> None: ...
+
+    def set_unhandled_key_handler(
+            self,
+            callback: Callable[[int, int], bool] | None) -> None: ...
 
     def render_frame(self) -> bool: ...
 
@@ -123,6 +128,18 @@ class WindowedNativeComposition:
     def should_close(self) -> bool:
         return self._adapter is None or self._adapter.should_close
 
+    @property
+    def graphics(self):
+        if self._session is None:
+            raise RuntimeError("native window composition is closed")
+        return self._session.graphics
+
+    @property
+    def texture_lease_host(self):
+        if self._adapter is None:
+            raise RuntimeError("native window composition is closed")
+        return self._adapter
+
     def pump_events(self) -> int:
         if self._manager is None or self._adapter is None or self._handle is None:
             raise RuntimeError("native window composition is closed")
@@ -133,6 +150,13 @@ class WindowedNativeComposition:
         if self._adapter is None:
             raise RuntimeError("native window composition is closed")
         self._adapter.request_repaint()
+
+    def set_unhandled_key_handler(
+            self,
+            callback: Callable[[int, int], bool] | None) -> None:
+        if self._adapter is None:
+            raise RuntimeError("native window composition is closed")
+        self._adapter.set_unhandled_key_handler(callback)
 
     def set_window_title(self, title: str) -> None:
         if self._manager is None or self._handle is None:
@@ -209,6 +233,7 @@ class NativeEditorRoot:
         }
         if command_handlers is not None:
             handlers.update(command_handlers)
+        self.canvas = None
 
         try:
             self.view = view_factory(
@@ -217,9 +242,35 @@ class NativeEditorRoot:
                 self._set_window_title,
                 handlers,
             )
+            mount_canvas = getattr(self.view, "mount_canvas", None)
+            graphics = getattr(composition, "graphics", None)
+            if mount_canvas is not None and graphics is not None:
+                texture_lease_host = getattr(
+                    composition,
+                    "texture_lease_host",
+                    composition,
+                )
+                self.canvas = NativeEditorCanvas(
+                    composition.document,
+                    application.layer_stack,
+                    texture_lease_host=texture_lease_host,
+                    graphics_owner=graphics,
+                    request_repaint=composition.request_repaint,
+                )
+                mount_canvas(self.canvas)
+                application.register_shutdown_resource(
+                    ShutdownPhase.GPU_RESOURCES,
+                    "native-canvas",
+                    self.canvas.close,
+                )
+            else:
+                self.canvas = None
+            composition.set_unhandled_key_handler(self.view.dispatch_shortcut)
             application.bind_view(self.view.ports())
             composition.request_repaint()
         except Exception:
+            if self.canvas is not None:
+                self.canvas.close()
             self.dispatcher.close()
             self.dispatcher.discard_pending()
             composition.close()
@@ -317,6 +368,7 @@ class NativeEditorRoot:
         self.application.close()
         self.dispatcher.close()
         self.discarded_on_close = self.dispatcher.discard_pending()
+        self.composition.set_unhandled_key_handler(None)
         self.view.close()
         self.composition.close()
 

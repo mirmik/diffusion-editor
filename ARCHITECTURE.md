@@ -92,15 +92,19 @@ F   ← начало
 
 **EditorWindow** — временный tcgui-адаптер. Он собирает legacy UI и связывает его с тем же `EditorApplication`, который будет использовать native shell. Compatibility aliases внутри `EditorWindow` существуют только для поэтапной миграции и не являются новым публичным API.
 
-**NativeEditorView** — параллельный native shell с app-owned command inventory/handlers и Termin `CommandModel`-проекциями. Root layout, menu bar, toolbar, splitters, panel hosts и status bar имеют стабильные IDs и создаются только публичными `TcDocument` factories. До финального переключения места будущих Canvas/панелей остаются явными hosts.
+**NativeEditorView** — параллельный native shell с app-owned command inventory/handlers и Termin `CommandModel`-проекциями. Root layout, menu bar, toolbar, splitters, native Canvas, panel hosts и status bar имеют стабильные IDs и создаются только публичными `TcDocument` factories. Панели пока остаются явными hosts для следующих вертикальных срезов миграции.
 
 **Presentation ports** — узкие интерфейсы для статуса, заголовка окна, состояния команд и панелей, диалогов и Canvas-взаимодействий. `EditorApplication` хранит presentation state и повторяет его при привязке новой view; headless и native-проекции используют одни контракты.
 
-Глобальные accelerators должны проходить через публичную Termin-маршрутизацию после local handling сфокусированного виджета. Пока этот контракт не реализован в Termin, прямой `MenuBar.dispatch_shortcut()` проверяет command model, но не считается готовой production-маршрутизацией.
+Глобальные accelerators проходят через публичный `set_unhandled_key_handler`: сначала событие получает сфокусированный виджет и modal/overlay routing, затем оставшийся необработанным key-down передаётся app-owned `NativeEditorView.dispatch_shortcut()` и Termin `MenuBar`/`CommandModel`. Один контракт используется оконной и offscreen-композициями; при shutdown handler снимается до уничтожения view.
 
 **Панели** (`BrushPanel`, `DiffusionPanel`, `LayerPanel` и т.д.) — UI-компоненты без прямого доступа к документу. Общаются с оркестратором через колбеки.
 
-**EditorCanvas** — виджет холста. Реализует инструменты рисования и масштабирование. Делегирует изменения документа через колбеки, не трогает стек слоёв напрямую.
+**EditorCanvasController** — toolkit-neutral логика инструментов холста: кисть, ластик, smudge, маски, выделение, прямоугольники и пипетка. Контроллер оперирует image-space координатами и публикует полные либо региональные обновления изображения и overlay.
+
+**NativeEditorCanvas** — адаптер над публичным Termin `Canvas`. Сам виджет Termin владеет fit/zoom/pan и преобразованиями координат; приложение владеет двумя `DynamicTextureLease`. CPU-композит и overlay используют owned RGBA8 textures с региональными обновлениями, оконный GPU-композит передаётся как borrowed texture. В offscreen-композиции, где нельзя получить общий application `Tgfx2Context`, используется owned CPU-путь. Рамки активного слоя, выделения и patch рисуются через публичный `PaintContext`.
+
+**EditorCanvas** — временный legacy tcgui-адаптер и production fallback до финального переключения entrypoint.
 
 **DocumentService** — единая точка применения команд к документу. Всё, что меняет состояние, идёт через него.
 

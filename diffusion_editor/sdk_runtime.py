@@ -670,6 +670,12 @@ def verify_imports(contract: SdkContract) -> None:
         raise SdkContractError(
             "Tgfx2Context.from_runtime is required by the windowed graphics contract"
         )
+    for composition in (GuiWindowAdapter, OffscreenGuiComposition):
+        if not callable(getattr(composition, "set_unhandled_key_handler", None)):
+            raise SdkContractError(
+                f"{composition.__name__}.set_unhandled_key_handler is required "
+                "by the native command routing contract"
+            )
     for module in (
         tcbase,
         tcgui,

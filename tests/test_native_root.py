@@ -5,7 +5,16 @@ import subprocess
 import sys
 import threading
 
+import numpy as np
 import pytest
+from termin.gui_native import (
+    DynamicTextureOwnership,
+    ModifierFlag,
+    Point,
+    PointerEvent,
+    PointerEventType,
+    WindowKey,
+)
 
 from diffusion_editor.app.application import EditorApplication, EngineSet
 from diffusion_editor.app.native_root import NativeEditorRoot, WindowedNativeComposition
@@ -76,6 +85,12 @@ class _FakeComposition:
     def request_repaint(self):
         self.trace.append("request-repaint")
 
+    def set_unhandled_key_handler(self, callback):
+        self.trace.append(
+            "shortcut-handler-set" if callback is not None
+            else "shortcut-handler-clear"
+        )
+
     def render_frame(self):
         self.trace.append("render-frame")
         return True
@@ -91,6 +106,9 @@ class _FakeView:
 
     def ports(self):
         return ViewPorts()
+
+    def dispatch_shortcut(self, _key, _modifiers):
+        return False
 
     def close(self):
         self.trace.append("view-close")
@@ -173,6 +191,7 @@ def test_close_joins_application_then_discards_callbacks_before_view_teardown():
     assert root.discarded_on_close == 1
     assert trace == [
         "application-close",
+        "shortcut-handler-clear",
         "view-close",
         "composition-close",
     ]
@@ -277,3 +296,121 @@ def test_real_offscreen_root_binds_application_and_renders(
 
     assert application.closed
     assert root.composition.closed
+
+
+def test_real_offscreen_canvas_renders_and_routes_image_space_paint(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv(
+        "TERMIN_SDK_SHADER_CACHE_ROOT", str(tmp_path / "shader-cache"))
+    application = _application()
+    image = np.zeros((32, 32, 4), dtype=np.uint8)
+    application.layer_stack.init_from_image(image)
+
+    with NativeEditorRoot.create_headless(
+            application,
+            width=640,
+            height=360) as root:
+        root.tick()
+        assert root.canvas is not None
+        assert (
+            root.canvas.image_lease.ownership
+            == DynamicTextureOwnership.OWNED
+        )
+        root.canvas.controller.brush.set_size(5)
+        root.canvas.controller.brush.set_hardness(1.0)
+        root.canvas.controller.brush.set_color(255, 0, 0, 255)
+        brush_size = root.canvas.controller.brush.size
+        root.composition.push_key(WindowKey.RIGHT_BRACKET)
+        root.tick()
+        assert root.canvas.controller.brush.size == brush_size + 5
+        widget_point = root.canvas.canvas.image_to_widget(Point(8, 8))
+        zoom_before = root.canvas.canvas.zoom
+
+        event = PointerEvent()
+        event.x = widget_point.x
+        event.y = widget_point.y
+        event.type = PointerEventType.Wheel
+        event.wheel_y = 1.0
+        root.composition.document.dispatch_pointer_event(event)
+        assert root.canvas.canvas.zoom > zoom_before
+        assert not root.canvas.canvas.fit_mode
+
+        anchor_before = root.canvas.canvas.image_to_widget(Point(0, 0))
+        event.type = PointerEventType.Down
+        event.button = 2
+        root.composition.document.dispatch_pointer_event(event)
+        event.type = PointerEventType.Move
+        event.x = widget_point.x + 11
+        event.y = widget_point.y + 7
+        root.composition.document.dispatch_pointer_event(event)
+        event.type = PointerEventType.Up
+        root.composition.document.dispatch_pointer_event(event)
+        anchor_after = root.canvas.canvas.image_to_widget(Point(0, 0))
+        assert anchor_after.x == pytest.approx(anchor_before.x + 11)
+        assert anchor_after.y == pytest.approx(anchor_before.y + 7)
+
+        root.canvas.fit_in_view()
+        widget_point = root.canvas.canvas.image_to_widget(Point(8, 8))
+
+        event.button = root.canvas.controller.LEFT_BUTTON
+        event.x = widget_point.x
+        event.y = widget_point.y
+        event.type = PointerEventType.Down
+        root.composition.document.dispatch_pointer_event(event)
+        event.type = PointerEventType.Up
+        root.composition.document.dispatch_pointer_event(event)
+        root.composition.resize(800, 480)
+        root.tick()
+
+        assert application.layer_stack.active_layer.image[8, 8, 3] > 0
+        assert root.canvas.canvas.fit_mode
+        assert root.composition.latest_frame_size == [800, 480]
+
+    assert (
+        root.canvas.image_lease.ownership
+        == DynamicTextureOwnership.RELEASED
+    )
+    assert (
+        root.canvas.overlay_lease.ownership
+        == DynamicTextureOwnership.RELEASED
+    )
+
+
+def test_offscreen_routes_unhandled_shortcut_after_focused_widget(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("TERMIN_SDK_SHADER_CACHE_ROOT", str(tmp_path / "shader-cache"))
+    application = _application()
+    activated = []
+
+    with NativeEditorRoot.create_headless(
+        application,
+        width=320,
+        height=200,
+        command_handlers={
+            "edit.redo": lambda: activated.append("redo"),
+        },
+    ) as root:
+        text_input = root.composition.document.create_text_input("focus owner")
+        root.view.canvas_host.add_stretch_child(text_input.widget)
+        assert root.composition.document.set_focus(text_input.handle)
+        root.tick()
+
+        application.set_command_state("edit.redo", enabled=False)
+        root.composition.push_key(
+            WindowKey.Y,
+            modifiers=int(ModifierFlag.Ctrl),
+        )
+        root.tick()
+        assert activated == []
+
+        application.set_command_state("edit.redo", enabled=True)
+        root.composition.push_key(
+            WindowKey.Y,
+            modifiers=int(ModifierFlag.Ctrl),
+        )
+        result = root.tick()
+
+        assert result.events == 1
+        assert activated == ["redo"]

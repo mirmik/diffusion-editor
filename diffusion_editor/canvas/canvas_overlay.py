@@ -71,9 +71,13 @@ class CanvasOverlayBridge:
             self,
             layer_stack: LayerStack,
             *,
-            set_overlay: Callable[[np.ndarray | None], None]):
+            set_overlay: Callable[[np.ndarray | None], None],
+            update_overlay_region: (
+                Callable[[int, int, np.ndarray], None] | None
+            ) = None):
         self._layer_stack = layer_stack
         self._set_overlay = set_overlay
+        self._update_overlay_region = update_overlay_region
         self._overlay: np.ndarray | None = None
         self.show_mask = True
         self.show_selection = True
@@ -88,6 +92,10 @@ class CanvasOverlayBridge:
 
     def clear(self) -> None:
         self._overlay = None
+
+    def clear_output(self) -> None:
+        self._overlay = None
+        self._set_overlay(None)
 
     def rebuild(self) -> None:
         h, w = self._layer_stack.height, self._layer_stack.width
@@ -191,4 +199,11 @@ class CanvasOverlayBridge:
             self._overlay[cy0:cy1, cx0:cx1] = 0
         else:
             self._overlay[cy0:cy1, cx0:cx1] = region
-        self._set_overlay(self._overlay)
+        if self._update_overlay_region is None:
+            self._set_overlay(self._overlay)
+        else:
+            self._update_overlay_region(
+                cx0,
+                cy0,
+                np.ascontiguousarray(self._overlay[cy0:cy1, cx0:cx1]),
+            )

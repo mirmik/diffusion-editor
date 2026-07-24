@@ -5,6 +5,14 @@ from __future__ import annotations
 
 import argparse
 
+import numpy as np
+from termin.gui_native import (
+    DynamicTextureOwnership,
+    Point,
+    PointerEvent,
+    PointerEventType,
+)
+
 from diffusion_editor.app.application import EditorApplication, EngineSet
 from diffusion_editor.app.native_root import NativeEditorRoot
 
@@ -56,10 +64,50 @@ def main() -> int:
         else NativeEditorRoot.create_headless
     )
     options = {} if args.windowed else {"backend": args.backend}
-    with factory(application, width=160, height=100, **options) as root:
+    image = np.zeros((32, 48, 4), dtype=np.uint8)
+    image[:, :, 3] = 255
+    image[:, :, 0] = np.arange(48, dtype=np.uint8)[None, :] * 5
+    image[:, :, 1] = np.arange(32, dtype=np.uint8)[:, None] * 7
+    application.layer_stack.init_from_image(image)
+    application.layer_stack.active_layer.mask.data[8:16, 12:24] = 1.0
+    with factory(application, width=640, height=360, **options) as root:
+        expected_ownership = (
+            DynamicTextureOwnership.BORROWED
+            if args.windowed
+            else DynamicTextureOwnership.OWNED
+        )
+        if root.canvas.image_lease.ownership != expected_ownership:
+            raise RuntimeError(
+                "native Canvas image lease ownership mismatch: "
+                f"expected {expected_ownership}, "
+                f"got {root.canvas.image_lease.ownership}"
+            )
+        if (
+                root.canvas.overlay_lease.ownership
+                != DynamicTextureOwnership.OWNED):
+            raise RuntimeError("native Canvas overlay did not acquire an owned texture")
         root.defer(lambda: application.set_status("Native dispatcher ready"))
-        rendered = 0
-        for _ in range(args.frames):
+        first = root.tick()
+        rendered = int(first.rendered)
+
+        center = root.canvas.canvas.image_to_widget(Point(24, 16))
+        zoom_before = root.canvas.canvas.zoom
+        event = PointerEvent()
+        event.x = center.x
+        event.y = center.y
+        event.type = PointerEventType.Wheel
+        event.wheel_y = 1.0
+        root.composition.document.dispatch_pointer_event(event)
+        if root.canvas.canvas.zoom <= zoom_before:
+            raise RuntimeError("native Canvas wheel zoom did not change zoom")
+
+        event.type = PointerEventType.Down
+        event.button = root.canvas.controller.LEFT_BUTTON
+        root.composition.document.dispatch_pointer_event(event)
+        event.type = PointerEventType.Up
+        root.composition.document.dispatch_pointer_event(event)
+
+        for _ in range(args.frames - 1):
             result = root.tick()
             rendered += int(result.rendered)
             if not application.running:
