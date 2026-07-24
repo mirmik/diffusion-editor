@@ -9,6 +9,7 @@ from tcbase import log
 from termin.gui_native import (
     CanvasTextureLayer,
     Color,
+    CursorIntent,
     DynamicTextureLease,
     DynamicTextureOwnership,
     Point,
@@ -66,6 +67,7 @@ class NativeEditorCanvas:
             update_image_region=self._update_image_region,
             update_overlay_region=self._update_overlay_region,
             request_repaint=request_repaint,
+            set_cursor=self._set_cursor,
         )
         self._layer_stack = layer_stack
         self._previous_stack_changed = layer_stack.on_changed
@@ -216,6 +218,16 @@ class NativeEditorCanvas:
             return
         for annotation in self.controller.annotations():
             self._paint_annotation(context, annotation)
+
+    def _set_cursor(self, cursor: str) -> None:
+        if self._closed:
+            return
+        self.widget.cursor_intent = (
+            CursorIntent.Crosshair
+            if cursor == "crosshair"
+            else CursorIntent.Default
+        )
+        self._request_repaint()
 
     def _paint_annotation(
             self, context, annotation: CanvasAnnotation) -> None:

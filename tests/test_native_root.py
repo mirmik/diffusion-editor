@@ -8,6 +8,7 @@ import threading
 import numpy as np
 import pytest
 from termin.gui_native import (
+    CursorIntent,
     DynamicTextureOwnership,
     ModifierFlag,
     Point,
@@ -19,6 +20,7 @@ from termin.gui_native import (
 from diffusion_editor.app.application import EditorApplication, EngineSet
 from diffusion_editor.app.native_root import NativeEditorRoot, WindowedNativeComposition
 from diffusion_editor.app.presentation import ViewPorts
+from diffusion_editor.canvas.brush import BrushToolMode
 
 
 class _MemorySettings:
@@ -317,13 +319,27 @@ def test_real_offscreen_canvas_renders_and_routes_image_space_paint(
             root.canvas.image_lease.ownership
             == DynamicTextureOwnership.OWNED
         )
-        root.canvas.controller.brush.set_size(5)
+        assert root.canvas_controls.widget.stable_id == (
+            "diffusion-editor.canvas-controls")
+        root.canvas_controls.selection.rect_mode.checked = True
+        assert root.canvas.widget.cursor_intent == CursorIntent.Crosshair
+        root.canvas_controls.brush.tool_checkboxes[
+            BrushToolMode.SMUDGE
+        ].checked = True
+        assert root.canvas.controller.brush_tool_mode == BrushToolMode.SMUDGE
+        assert root.canvas.widget.cursor_intent == CursorIntent.Default
+        root.canvas_controls.brush.tool_checkboxes[
+            BrushToolMode.PAINT
+        ].checked = True
+        root.canvas_controls.brush.size.value = 5
+        assert root.canvas.controller.brush.size == 5
         root.canvas.controller.brush.set_hardness(1.0)
         root.canvas.controller.brush.set_color(255, 0, 0, 255)
         brush_size = root.canvas.controller.brush.size
         root.composition.push_key(WindowKey.RIGHT_BRACKET)
         root.tick()
         assert root.canvas.controller.brush.size == brush_size + 5
+        assert root.canvas_controls.brush.size.value == brush_size + 5
         widget_point = root.canvas.canvas.image_to_widget(Point(8, 8))
         zoom_before = root.canvas.canvas.zoom
 

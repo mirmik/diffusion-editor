@@ -20,6 +20,8 @@ from tgfx import configure_default_shader_runtime
 
 from ..sdk_runtime import resolve_sdk
 from .application import EditorApplication, ShutdownPhase
+from .canvas_controls import CanvasControlsCoordinator
+from .native_canvas_controls import NativeCanvasControls
 from .native_shell import CommandHandler, NativeEditorView
 from ..canvas.native_editor_canvas import NativeEditorCanvas
 
@@ -234,6 +236,8 @@ class NativeEditorRoot:
         if command_handlers is not None:
             handlers.update(command_handlers)
         self.canvas = None
+        self.canvas_controls = None
+        self.canvas_controls_coordinator = None
 
         try:
             self.view = view_factory(
@@ -263,12 +267,47 @@ class NativeEditorRoot:
                     "native-canvas",
                     self.canvas.close,
                 )
+                mount_controls = getattr(
+                    self.view, "mount_canvas_controls", None)
+                if mount_controls is not None:
+                    self.canvas_controls_coordinator = (
+                        CanvasControlsCoordinator(
+                            application.layer_stack,
+                            application.document,
+                            self.canvas.controller,
+                        )
+                    )
+                    self.canvas_controls = NativeCanvasControls(
+                        composition.document,
+                        self.canvas_controls_coordinator.brush_state,
+                        self.canvas_controls_coordinator.selection_state,
+                        self.canvas_controls_coordinator.handle_brush_intent,
+                        self.canvas_controls_coordinator.handle_selection_intent,
+                        viewport_rect=lambda: self.view.root.bounds,
+                    )
+                    self.canvas_controls_coordinator.bind_view(
+                        self.canvas_controls)
+                    mount_controls(self.canvas_controls)
+                    application.register_shutdown_resource(
+                        ShutdownPhase.VIEW_WORKERS,
+                        "native-canvas-controls-view",
+                        self.canvas_controls.close,
+                    )
+                    application.register_shutdown_resource(
+                        ShutdownPhase.VIEW_WORKERS,
+                        "native-canvas-controls",
+                        self.canvas_controls_coordinator.close,
+                    )
             else:
                 self.canvas = None
             composition.set_unhandled_key_handler(self.view.dispatch_shortcut)
             application.bind_view(self.view.ports())
             composition.request_repaint()
         except Exception:
+            if self.canvas_controls is not None:
+                self.canvas_controls.close()
+            if self.canvas_controls_coordinator is not None:
+                self.canvas_controls_coordinator.close()
             if self.canvas is not None:
                 self.canvas.close()
             self.dispatcher.close()

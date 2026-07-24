@@ -92,7 +92,7 @@ F   ← начало
 
 **EditorWindow** — временный tcgui-адаптер. Он собирает legacy UI и связывает его с тем же `EditorApplication`, который будет использовать native shell. Compatibility aliases внутри `EditorWindow` существуют только для поэтапной миграции и не являются новым публичным API.
 
-**NativeEditorView** — параллельный native shell с app-owned command inventory/handlers и Termin `CommandModel`-проекциями. Root layout, menu bar, toolbar, splitters, native Canvas, panel hosts и status bar имеют стабильные IDs и создаются только публичными `TcDocument` factories. Панели пока остаются явными hosts для следующих вертикальных срезов миграции.
+**NativeEditorView** — параллельный native shell с app-owned command inventory/handlers и Termin `CommandModel`-проекциями. Root layout, menu bar, toolbar, splitters, native Canvas, brush/selection controls, panel hosts и status bar имеют стабильные IDs и создаются только публичными `TcDocument` factories. Generation/layer/agent hosts остаются точками для следующих вертикальных срезов миграции.
 
 **Presentation ports** — узкие интерфейсы для статуса, заголовка окна, состояния команд и панелей, диалогов и Canvas-взаимодействий. `EditorApplication` хранит presentation state и повторяет его при привязке новой view; headless и native-проекции используют одни контракты.
 
@@ -101,6 +101,10 @@ F   ← начало
 **Панели** (`BrushPanel`, `DiffusionPanel`, `LayerPanel` и т.д.) — UI-компоненты без прямого доступа к документу. Общаются с оркестратором через колбеки.
 
 **EditorCanvasController** — toolkit-neutral логика инструментов холста: кисть, ластик, smudge, маски, выделение, прямоугольники и пипетка. Контроллер оперирует image-space координатами и публикует полные либо региональные обновления изображения и overlay.
+
+**CanvasControlsCoordinator** — toolkit-neutral состояние и типизированные intents панелей Brush/Selection. Он синхронизирует пользовательские и программные изменения с `EditorCanvasController`, выполняет patch/selection-команды через `DocumentService` и не допускает feedback loops при обратной проекции состояния.
+
+**NativeCanvasControls** — тонкие native-проекции поверх публичных `GroupBox`, `Checkbox`, `SliderEdit`, `Button` и `ColorDialog`. Они не мутируют Canvas напрямую и не обращаются к приватным полям widgets.
 
 **NativeEditorCanvas** — адаптер над публичным Termin `Canvas`. Сам виджет Termin владеет fit/zoom/pan и преобразованиями координат; приложение владеет двумя `DynamicTextureLease`. CPU-композит и overlay используют owned RGBA8 textures с региональными обновлениями, оконный GPU-композит передаётся как borrowed texture. В offscreen-композиции, где нельзя получить общий application `Tgfx2Context`, используется owned CPU-путь. Рамки активного слоя, выделения и patch рисуются через публичный `PaintContext`.
 

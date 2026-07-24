@@ -71,6 +71,11 @@ def main() -> int:
     application.layer_stack.init_from_image(image)
     application.layer_stack.active_layer.mask.data[8:16, 12:24] = 1.0
     with factory(application, width=640, height=360, **options) as root:
+        if root.canvas_controls is None:
+            raise RuntimeError("native Canvas controls were not mounted")
+        root.canvas_controls.brush.size.value = 9.0
+        if root.canvas.controller.brush.size != 9:
+            raise RuntimeError("native brush control did not update Canvas")
         expected_ownership = (
             DynamicTextureOwnership.BORROWED
             if args.windowed

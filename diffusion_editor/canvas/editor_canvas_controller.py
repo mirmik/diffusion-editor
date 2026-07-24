@@ -110,6 +110,7 @@ class EditorCanvasController:
         self.on_edit_end: (
             Callable[[Layer | None, str, Rect | None], None] | None
         ) = None
+        self.on_brush_size_changed: Callable[[int], None] | None = None
 
     @property
     def composite_bridge(self) -> CanvasCompositeBridge:
@@ -199,6 +200,8 @@ class EditorCanvasController:
 
     def adjust_brush_size(self, delta: int) -> None:
         self.brush.set_size(self.brush.size + delta)
+        if self.on_brush_size_changed is not None:
+            self.on_brush_size_changed(self.brush.size)
         self._request_repaint()
 
     def pointer_down(

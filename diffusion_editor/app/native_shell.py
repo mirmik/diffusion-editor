@@ -181,12 +181,14 @@ class NativeEditorView:
             self.toolbar.connect_activated(self._on_toolbar_activated)
         )
 
-        self.left_panel = self._placeholder(
-            document,
-            "diffusion-editor.left-panel",
-            "Tool controls",
-            "DiffusionEditorLeftPanel",
-        )
+        self.left_panel = document.create_vstack("DiffusionEditorLeftPanel")
+        self.left_panel.stable_id = "diffusion-editor.left-panel"
+        self.left_panel.set_layout_spacing(4.0)
+        self.left_placeholder = document.create_label(
+            "Tool controls", "DiffusionEditorLeftPanelLabel")
+        self.left_placeholder.stable_id = "diffusion-editor.left-panel.label"
+        self.left_panel.add_preferred_child(self.left_placeholder)
+        self.canvas_controls_view = None
         self.canvas_host = document.create_vstack(
             "DiffusionEditorCanvasHost")
         self.canvas_host.stable_id = "diffusion-editor.canvas-host"
@@ -318,6 +320,15 @@ class NativeEditorView:
         self.canvas_host.remove_child(self.canvas_placeholder)
         self.canvas_host.add_flex_child(canvas_view.widget, 1.0)
         self.canvas_view = canvas_view
+        self._request_repaint()
+
+    def mount_canvas_controls(self, controls_view) -> None:
+        self._require_open()
+        if self.canvas_controls_view is not None:
+            raise RuntimeError("native canvas controls are already mounted")
+        self.left_panel.remove_child(self.left_placeholder)
+        self.left_panel.add_flex_child(controls_view.widget, 1.0)
+        self.canvas_controls_view = controls_view
         self._request_repaint()
 
     def ports(self) -> ViewPorts:
