@@ -305,6 +305,14 @@ def test_real_offscreen_root_binds_application_and_renders(
             "diffusion-editor.agent-panel")
         assert root.view.agent_chat_view is root.agent_chat
         assert root.agent_chat_coordinator.state.status == "Unavailable"
+        assert not root.view.agent_panel_visible
+        assert not root.view.right_splitter.widget.visible
+        assert root.view.activate_command("view.agent_panel")
+        assert root.view.agent_panel_visible
+        assert root.view.right_splitter.widget.visible
+        assert root.view.activate_command("view.agent_panel")
+        assert not root.view.agent_panel_visible
+        assert not root.view.right_splitter.widget.visible
         assert root.dialogs is not None
         assert root.dialog_coordinator is not None
         assert root.view.activate_command("edit.settings")

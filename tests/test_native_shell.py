@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from termin.gui_native import (
     ModifierFlag,
     Rect,
@@ -35,6 +37,7 @@ EXPECTED_COMMANDS = (
     "layer.flatten",
     "layer.detect",
     "view.fit",
+    "view.agent_panel",
 )
 
 
@@ -69,6 +72,7 @@ def test_native_shell_snapshot_has_stable_layout_and_command_inventory():
             "diffusion-editor.left-panel",
             "diffusion-editor.workspace-splitter",
             "diffusion-editor.canvas-host",
+            "diffusion-editor.right-host",
             "diffusion-editor.right-splitter",
             "diffusion-editor.layer-panel",
             "diffusion-editor.agent-panel",
@@ -84,6 +88,7 @@ def test_native_shell_snapshot_has_stable_layout_and_command_inventory():
         canvas = snapshot["diffusion-editor.canvas-host"]["bounds"]
         layers = snapshot["diffusion-editor.layer-panel"]["bounds"]
         agent = snapshot["diffusion-editor.agent-panel"]["bounds"]
+        right_host = snapshot["diffusion-editor.right-host"]["bounds"]
         assert (root.width, root.height) == (1000.0, 700.0)
         assert (menu.y, menu.height) == (0.0, 28.0)
         assert (toolbar.y, toolbar.height) == (28.0, 36.0)
@@ -91,11 +96,64 @@ def test_native_shell_snapshot_has_stable_layout_and_command_inventory():
         assert (status.y, status.height) == (676.0, 24.0)
         assert left.x + left.width <= canvas.x
         assert canvas.x + canvas.width <= layers.x
+        assert (
+            layers.x,
+            layers.y,
+            layers.width,
+            layers.height,
+        ) == (
+            right_host.x,
+            right_host.y,
+            right_host.width,
+            right_host.height,
+        )
+        assert not view.agent_panel_visible
+        assert not view.right_splitter.widget.visible
+        assert agent.width == 0.0
+        assert right_host.width < canvas.width
+        assert view.workspace_splitter.split_fraction == pytest.approx(0.72)
+
+        assert view.activate_command("view.agent_panel")
+        document.layout_roots(Rect(0.0, 0.0, 1000.0, 700.0))
+        snapshot = _snapshot_by_id(document)
+        layers = snapshot["diffusion-editor.layer-panel"]["bounds"]
+        agent = snapshot["diffusion-editor.agent-panel"]["bounds"]
+        assert view.agent_panel_visible
+        assert view.right_splitter.widget.visible
+        assert view.workspace_splitter.split_fraction == pytest.approx(0.46)
         assert layers.x + layers.width <= agent.x
         assert (left.y, canvas.y, layers.y, agent.y) == (
             main.y, main.y, main.y, main.y)
         assert (left.height, canvas.height, layers.height, agent.height) == (
             main.height, main.height, main.height, main.height)
+
+        view_model = view.menu_models["view"]
+        agent_command = next(
+            command
+            for command in view_model.commands
+            if command.data.stable_id == "view.agent_panel"
+        )
+        assert agent_command.data.checked
+
+        assert view.activate_command("view.agent_panel")
+        document.layout_roots(Rect(0.0, 0.0, 1000.0, 700.0))
+        snapshot = _snapshot_by_id(document)
+        assert not view.agent_panel_visible
+        assert not view.right_splitter.widget.visible
+        assert view.workspace_splitter.split_fraction == pytest.approx(0.72)
+        layers = snapshot["diffusion-editor.layer-panel"]["bounds"]
+        right_host = snapshot["diffusion-editor.right-host"]["bounds"]
+        assert (
+            layers.x,
+            layers.y,
+            layers.width,
+            layers.height,
+        ) == (
+            right_host.x,
+            right_host.y,
+            right_host.width,
+            right_host.height,
+        )
     finally:
         view.close()
         tc_ui_document_destroy(document)

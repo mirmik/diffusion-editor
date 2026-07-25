@@ -64,6 +64,12 @@ COMMAND_SPECS = (
     NativeCommandSpec("layer.flatten", "Flatten"),
     NativeCommandSpec("layer.detect", "Detect Objects…"),
     NativeCommandSpec("view.fit", "Fit"),
+    NativeCommandSpec(
+        "view.agent_panel",
+        "Agent Panel",
+        checkable=True,
+        checked=False,
+    ),
 )
 
 COMMAND_SPEC_BY_ID = {spec.stable_id: spec for spec in COMMAND_SPECS}
@@ -120,6 +126,15 @@ MENU_COMMANDS = (
             "layer.flatten",
             None,
             "layer.detect",
+        ),
+    ),
+    (
+        "view",
+        "View",
+        (
+            "view.fit",
+            None,
+            "view.agent_panel",
         ),
     ),
 )
@@ -218,16 +233,27 @@ class NativeEditorView:
             "DiffusionEditorAgentPanel",
         )
         self.agent_chat_view = None
+        self.agent_panel_visible = False
+        self._agent_panel_parking = document.create_vstack(
+            "DiffusionEditorAgentPanelParking"
+        )
 
         self.right_splitter = document.create_splitter(
             True,
             "DiffusionEditorRightSplitter",
         )
         self.right_splitter.widget.stable_id = "diffusion-editor.right-splitter"
-        self.right_splitter.set_first(self.layer_panel)
+        self.right_splitter.set_first(self._agent_panel_parking)
         self.right_splitter.set_second(self.agent_panel)
         self.right_splitter.set_split_fraction(0.41)
         self.right_splitter.set_min_extents(180.0, 240.0)
+        self.right_splitter.widget.visible = False
+
+        self.right_host = document.create_hstack("DiffusionEditorRightHost")
+        self.right_host.stable_id = "diffusion-editor.right-host"
+        self.right_host.set_layout_spacing(0.0)
+        self.right_host.add_flex_child(self.layer_panel, 1.0)
+        self.right_host.add_flex_child(self.right_splitter.widget, 1.0)
 
         self.workspace_splitter = document.create_splitter(
             True,
@@ -237,9 +263,13 @@ class NativeEditorView:
             "diffusion-editor.workspace-splitter"
         )
         self.workspace_splitter.set_first(self.canvas_host)
-        self.workspace_splitter.set_second(self.right_splitter.widget)
-        self.workspace_splitter.set_split_fraction(0.46)
-        self.workspace_splitter.set_min_extents(320.0, 420.0)
+        self.workspace_splitter.set_second(self.right_host)
+        self._workspace_fraction_without_agent = 0.72
+        self._workspace_fraction_with_agent = 0.46
+        self.workspace_splitter.set_split_fraction(
+            self._workspace_fraction_without_agent
+        )
+        self.workspace_splitter.set_min_extents(320.0, 240.0)
 
         self.main_splitter = document.create_splitter(
             True,
@@ -260,6 +290,9 @@ class NativeEditorView:
         self.root.add_fixed_child(self.status_bar.widget, 24.0)
         if not document.add_root(self.root.handle):
             raise RuntimeError("failed to add the Diffusion Editor native root")
+        self._command_handlers["view.agent_panel"] = (
+            self.toggle_agent_panel
+        )
 
     @property
     def command_inventory(self) -> tuple[str, ...]:
@@ -320,6 +353,44 @@ class NativeEditorView:
         return bool(
             self.canvas_view is not None
             and self.canvas_view.dispatch_shortcut(key, modifiers)
+        )
+
+    def toggle_agent_panel(self) -> None:
+        self.set_agent_panel_visible(not self.agent_panel_visible)
+
+    def set_agent_panel_visible(self, visible: bool) -> None:
+        self._require_open()
+        visible = bool(visible)
+        if visible == self.agent_panel_visible:
+            return
+        if visible:
+            self._workspace_fraction_without_agent = (
+                self.workspace_splitter.split_fraction
+            )
+        else:
+            self._workspace_fraction_with_agent = (
+                self.workspace_splitter.split_fraction
+            )
+        self.agent_panel_visible = visible
+        if visible:
+            self.right_splitter.set_first(self.layer_panel)
+            self.right_splitter.widget.visible = True
+            self.workspace_splitter.set_min_extents(320.0, 420.0)
+            self.workspace_splitter.set_split_fraction(
+                self._workspace_fraction_with_agent
+            )
+        else:
+            self.right_splitter.set_first(self._agent_panel_parking)
+            self.right_host.add_flex_child(self.layer_panel, 1.0)
+            self.right_splitter.widget.visible = False
+            self.workspace_splitter.set_min_extents(320.0, 240.0)
+            self.workspace_splitter.set_split_fraction(
+                self._workspace_fraction_without_agent
+            )
+        self.set_command_state(
+            "view.agent_panel",
+            enabled=True,
+            checked=visible,
         )
 
     def mount_canvas(self, canvas_view) -> None:
