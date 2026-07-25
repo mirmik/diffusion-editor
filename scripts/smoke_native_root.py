@@ -18,6 +18,10 @@ from termin.gui_native import (
 )
 
 from diffusion_editor.app.application import EditorApplication, EngineSet
+from diffusion_editor.app.canvas_controls import (
+    BrushControlAction,
+    BrushControlsIntent,
+)
 from diffusion_editor.app.generation_panels import (
     GenerationAction,
     GenerationIntent,
@@ -26,6 +30,10 @@ from diffusion_editor.app.generation_panels import (
 from diffusion_editor.app.layer_tree import LayerTreeAction, LayerTreeIntent
 from diffusion_editor.app.native_root import NativeEditorRoot
 from diffusion_editor.canvas.brush import BrushToolMode
+from diffusion_editor.canvas.render_diagnostics import (
+    rgba_signature,
+    source_contribution_error,
+)
 from diffusion_editor.generation.types import (
     DiffusionInferenceResult,
     EnginePollEvent,
@@ -132,6 +140,11 @@ def _dispatch_pointer(root, image_point: Point) -> None:
     root.composition.document.dispatch_pointer_event(event)
 
 
+def _select_brush_mode(root, mode: BrushToolMode) -> None:
+    root.canvas_controls_coordinator.handle_brush_intent(
+        BrushControlsIntent(BrushControlAction.TOOL, mode))
+
+
 def _assert_contract_snapshot(root) -> None:
     stable_ids = {
         item["stable_id"]
@@ -217,6 +230,23 @@ def main() -> int:
                 raise RuntimeError("native import changed source pixels")
             # The first frame establishes final layout and Canvas transforms.
             rendered = int(root.tick().rendered)
+            composite = root.canvas.controller.get_composite()
+            contribution_error = source_contribution_error(
+                source_image, composite)
+            if contribution_error is not None:
+                bridge = root.canvas.controller.composite_bridge
+                stages = {}
+                if bridge.using_gpu:
+                    stages = bridge.gpu_compositor.diagnostic_readbacks(
+                        application.layer_stack.active_layer)
+                stage_details = "; ".join(
+                    f"{name}: {rgba_signature(pixels)}"
+                    for name, pixels in stages.items()
+                )
+                suffix = f"; stages: {stage_details}" if stage_details else ""
+                raise RuntimeError(
+                    "imported source did not reach Canvas composite: "
+                    f"{contribution_error}{suffix}")
 
             root.canvas_controls.brush.size.value = 9.0
             root.canvas_controls.brush.hardness.value = 1.0
@@ -245,9 +275,7 @@ def main() -> int:
                 raise RuntimeError("native Canvas image texture is blank")
 
             # Paint the mask and require an actual overlay texture.
-            root.canvas_controls.brush.tool_checkboxes[
-                BrushToolMode.MASK
-            ].checked = True
+            _select_brush_mode(root, BrushToolMode.MASK)
             _dispatch_pointer(root, Point(24, 16))
             mask = application.layer_stack.active_layer.mask.data
             if not np.any(mask > 0.0):
@@ -262,9 +290,7 @@ def main() -> int:
                     "native Canvas overlay did not acquire an owned texture")
 
             # Switch back to image paint and require a real pixel mutation.
-            root.canvas_controls.brush.tool_checkboxes[
-                BrushToolMode.PAINT
-            ].checked = True
+            _select_brush_mode(root, BrushToolMode.PAINT)
             root.canvas.controller.brush.set_color(0, 255, 255, 255)
             before_paint = (
                 application.layer_stack.active_layer.image.copy())

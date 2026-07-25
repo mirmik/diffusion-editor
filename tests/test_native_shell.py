@@ -3,6 +3,7 @@ from __future__ import annotations
 from termin.gui_native import (
     ModifierFlag,
     Rect,
+    Size,
     tc_ui_document_create,
     tc_ui_document_destroy,
 )
@@ -79,11 +80,57 @@ def test_native_shell_snapshot_has_stable_layout_and_command_inventory():
         toolbar = snapshot["diffusion-editor.toolbar"]["bounds"]
         main = snapshot["diffusion-editor.main-splitter"]["bounds"]
         status = snapshot["diffusion-editor.status"]["bounds"]
+        left = snapshot["diffusion-editor.left-panel"]["bounds"]
+        canvas = snapshot["diffusion-editor.canvas-host"]["bounds"]
+        layers = snapshot["diffusion-editor.layer-panel"]["bounds"]
+        agent = snapshot["diffusion-editor.agent-panel"]["bounds"]
         assert (root.width, root.height) == (1000.0, 700.0)
         assert (menu.y, menu.height) == (0.0, 28.0)
         assert (toolbar.y, toolbar.height) == (28.0, 36.0)
         assert (main.y, main.height) == (64.0, 612.0)
         assert (status.y, status.height) == (676.0, 24.0)
+        assert left.x + left.width <= canvas.x
+        assert canvas.x + canvas.width <= layers.x
+        assert layers.x + layers.width <= agent.x
+        assert (left.y, canvas.y, layers.y, agent.y) == (
+            main.y, main.y, main.y, main.y)
+        assert (left.height, canvas.height, layers.height, agent.height) == (
+            main.height, main.height, main.height, main.height)
+    finally:
+        view.close()
+        tc_ui_document_destroy(document)
+
+
+def test_native_left_panel_scrolls_preferred_sections_without_overlap():
+    document = tc_ui_document_create()
+    view = NativeEditorView(
+        document,
+        lambda: None,
+        lambda _title: None,
+        {},
+    )
+
+    class MountedView:
+        def __init__(self, widget):
+            self.widget = widget
+
+    controls = document.create_vstack("TestCanvasControls")
+    controls.stable_id = "test.canvas-controls"
+    controls.preferred_size = Size(240.0, 600.0)
+    generation = document.create_vstack("TestGenerationPanels")
+    generation.stable_id = "test.generation-panels"
+    generation.preferred_size = Size(240.0, 400.0)
+    try:
+        view.mount_canvas_controls(MountedView(controls))
+        view.mount_generation_panels(MountedView(generation), object())
+        document.layout_roots(Rect(0.0, 0.0, 1280.0, 800.0))
+        snapshot = _snapshot_by_id(document)
+        controls_bounds = snapshot["test.canvas-controls"]["bounds"]
+        generation_bounds = snapshot["test.generation-panels"]["bounds"]
+
+        assert controls_bounds.y + controls_bounds.height <= generation_bounds.y
+        assert view.left_scroll.content_size.height >= 1004.0
+        assert snapshot["diffusion-editor.left-panel"]["bounds"].height == 712.0
     finally:
         view.close()
         tc_ui_document_destroy(document)

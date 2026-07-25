@@ -24,6 +24,7 @@ from ..document.tool import DiffusionTool, InstructTool, LamaTool
 from ..generation.patch_resolver import source_patch_at_center
 from .application import EditorApplication, ShutdownPhase
 from .canvas_controls import CanvasControlsCoordinator
+from .canvas_status import CanvasStatusCoordinator
 from .generation_panels import GenerationPanelsCoordinator
 from .native_canvas_controls import NativeCanvasControls
 from .native_generation_panels import NativeGenerationPanels
@@ -249,6 +250,7 @@ class NativeEditorRoot:
         self.canvas = None
         self.canvas_controls = None
         self.canvas_controls_coordinator = None
+        self.canvas_status_coordinator = None
         self.generation_panels = None
         self.generation_panels_coordinator = None
         self.layer_panel = None
@@ -285,6 +287,17 @@ class NativeEditorRoot:
                     ShutdownPhase.GPU_RESOURCES,
                     "native-canvas",
                     self.canvas.close,
+                )
+                self.canvas_status_coordinator = CanvasStatusCoordinator(
+                    application.layer_stack,
+                    application.document,
+                    self.canvas.controller,
+                    application.set_status,
+                )
+                application.register_shutdown_resource(
+                    ShutdownPhase.VIEW_WORKERS,
+                    "native-canvas-status",
+                    self.canvas_status_coordinator.close,
                 )
                 mount_controls = getattr(
                     self.view, "mount_canvas_controls", None)
@@ -463,6 +476,8 @@ class NativeEditorRoot:
                 self.canvas_controls.close()
             if self.canvas_controls_coordinator is not None:
                 self.canvas_controls_coordinator.close()
+            if self.canvas_status_coordinator is not None:
+                self.canvas_status_coordinator.close()
             if self.canvas is not None:
                 self.canvas.close()
             self.dispatcher.close()

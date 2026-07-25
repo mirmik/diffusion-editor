@@ -366,11 +366,14 @@ def test_real_offscreen_canvas_renders_and_routes_image_space_paint(
         root.layer_panel.opacity.value = 0.45
         assert application.layer_stack.active_layer.opacity == pytest.approx(
             0.45)
-        root.layer_panel.visible.checked = False
-        assert not application.layer_stack.active_layer.visible
-        root.layer_panel.visible.checked = True
-        assert application.layer_stack.active_layer.visible
         active_id = application.layer_stack.active_layer.id
+        active_node = root.layer_panel._stable_to_node[active_id]
+        root.layer_panel._on_row_toggle(
+            active_node, 0, root.layer_panel.model.node(active_node).item)
+        assert not application.layer_stack.active_layer.visible
+        root.layer_panel._on_row_toggle(
+            active_node, 0, root.layer_panel.model.node(active_node).item)
+        assert application.layer_stack.active_layer.visible
         root.layer_tree_coordinator.handle_intent(LayerTreeIntent(
             LayerTreeAction.ATTACH_TOOL,
             layer_id=active_id,
@@ -387,9 +390,9 @@ def test_real_offscreen_canvas_renders_and_routes_image_space_paint(
             root.canvas.controller.brush_tool_mode
             == BrushToolMode.MASK_ERASER
         )
-        assert root.canvas_controls.brush.tool_checkboxes[
-            BrushToolMode.MASK_ERASER
-        ].checked
+        model, command_id = root.canvas_controls.brush.tool_commands[
+            BrushToolMode.MASK_ERASER]
+        assert model.command(command_id).data.checked
         root.layer_tree_coordinator.handle_intent(LayerTreeIntent(
             LayerTreeAction.DETACH_TOOL,
             layer_id=active_id,
@@ -398,14 +401,16 @@ def test_real_offscreen_canvas_renders_and_routes_image_space_paint(
         assert root.generation_panels.empty_label.visible
         root.canvas_controls.selection.rect_mode.checked = True
         assert root.canvas.widget.cursor_intent == CursorIntent.Crosshair
-        root.canvas_controls.brush.tool_checkboxes[
-            BrushToolMode.SMUDGE
-        ].checked = True
+        model, command_id = root.canvas_controls.brush.tool_commands[
+            BrushToolMode.SMUDGE]
+        root.canvas_controls.brush._on_tool_activated(
+            0, command_id, model.command(command_id).data)
         assert root.canvas.controller.brush_tool_mode == BrushToolMode.SMUDGE
         assert root.canvas.widget.cursor_intent == CursorIntent.Default
-        root.canvas_controls.brush.tool_checkboxes[
-            BrushToolMode.PAINT
-        ].checked = True
+        model, command_id = root.canvas_controls.brush.tool_commands[
+            BrushToolMode.PAINT]
+        root.canvas_controls.brush._on_tool_activated(
+            0, command_id, model.command(command_id).data)
         root.canvas_controls.brush.size.value = 5
         assert root.canvas.controller.brush.size == 5
         root.canvas.controller.brush.set_hardness(1.0)

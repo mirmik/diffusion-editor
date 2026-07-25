@@ -65,6 +65,7 @@ class NativeLayerPanel:
         self.tree.draggable = True
         self._connections.extend((
             self.tree.connect_selection_changed(self._on_selection_changed),
+            self.tree.connect_toggle_activated(self._on_row_toggle),
             self.tree.connect_context_menu_requested(
                 self._on_context_menu_requested),
             self.tree.connect_delete_requested(self._on_delete_requested),
@@ -91,21 +92,6 @@ class NativeLayerPanel:
         buttons.add_fixed_child(self.remove_button.widget, 30.0)
         buttons.add_flex_child(self.flatten_button.widget, 1.0)
         self.widget.add_preferred_child(buttons)
-
-        active_row = document.create_hstack("NativeLayerActiveFlags")
-        active_row.set_layout_spacing(4.0)
-        self.visible = document.create_checkbox(True)
-        self.visible.widget.stable_id = "diffusion-editor.layer.visible"
-        self.solo = document.create_checkbox(False)
-        self.solo.widget.stable_id = "diffusion-editor.layer.solo"
-        self._connections.extend((
-            self.visible.connect_changed(self._on_visibility_changed),
-            self.solo.connect_changed(self._on_solo_changed),
-        ))
-        self._add_checkbox_label(
-            active_row, self.visible, "Visible", "visible")
-        self._add_checkbox_label(active_row, self.solo, "Solo", "solo")
-        self.widget.add_preferred_child(active_row)
 
         self.opacity = document.create_slider_edit(state.opacity)
         self.opacity.widget.stable_id = "diffusion-editor.layer.opacity"
@@ -159,12 +145,8 @@ class NativeLayerPanel:
                 self.tree.clear_selection()
 
             active = self._find_state_node(state.roots, state.active_id)
-            self.visible.checked = active.visible if active is not None else False
-            self.solo.checked = active.solo if active is not None else False
             self.opacity.value = state.opacity
             has_active = active is not None
-            self.visible.widget.enabled = has_active
-            self.solo.widget.enabled = has_active
             self.opacity.widget.enabled = has_active
             self.add_button.widget.enabled = state.can_add
             self.remove_button.widget.enabled = state.can_remove
@@ -215,28 +197,21 @@ class NativeLayerPanel:
 
     @staticmethod
     def _item(node: LayerTreeNodeState) -> CollectionItem:
-        flags = "[V]" if node.visible else "[ ]"
-        if node.solo:
-            flags += "[S]"
         subtitle = (
             f"{node.tool_type.capitalize()} tool"
             if node.tool_type else ""
         )
         return CollectionItem(
             node.stable_id,
-            f"{flags} {node.name}",
+            node.name,
             subtitle,
+            primary_toggle=True,
+            primary_checked=node.visible,
+            primary_toggle_label="Visible",
+            secondary_toggle=True,
+            secondary_checked=node.solo,
+            secondary_toggle_label="Solo",
         )
-
-    def _add_checkbox_label(
-            self, parent, checkbox, label: str, suffix: str) -> None:
-        cell = self._document.create_hstack("NativeLayerFlagCell")
-        cell.set_layout_spacing(2.0)
-        text = self._document.create_label(label, "NativeLayerFlagLabel")
-        text.stable_id = f"diffusion-editor.layer.{suffix}.label"
-        cell.add_preferred_child(checkbox.widget)
-        cell.add_flex_child(text, 1.0)
-        parent.add_flex_child(cell, 1.0)
 
     def _on_selection_changed(self, native_node: int) -> None:
         if self._syncing or self._closed:
@@ -245,20 +220,22 @@ class NativeLayerPanel:
         if stable_id is not None:
             self._emit(LayerTreeAction.SELECT, layer_id=stable_id)
 
-    def _on_visibility_changed(self, visible: bool) -> None:
-        if not self._syncing:
+    def _on_row_toggle(
+            self, native_node: int, toggle_index: int, _item) -> None:
+        if self._syncing or self._closed:
+            return
+        stable_id = self._node_to_stable.get(native_node)
+        node = self._find_state_node(self._state.roots, stable_id)
+        if node is None:
+            return
+        if toggle_index == 0:
             self._emit(
                 LayerTreeAction.VISIBILITY,
-                layer_id=self._state.active_id,
-                value=visible,
+                layer_id=stable_id,
+                value=not node.visible,
             )
-
-    def _on_solo_changed(self, _solo: bool) -> None:
-        if not self._syncing:
-            self._emit(
-                LayerTreeAction.SOLO,
-                layer_id=self._state.active_id,
-            )
+        elif toggle_index == 1:
+            self._emit(LayerTreeAction.SOLO, layer_id=stable_id)
 
     def _on_opacity_changed(self, opacity: float) -> None:
         if not self._syncing:

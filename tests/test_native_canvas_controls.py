@@ -1,5 +1,11 @@
 from termin.gui_native import (
     Color,
+    EventResult,
+    KeyCode,
+    KeyEvent,
+    KeyEventType,
+    PointerEvent,
+    PointerEventType,
     Rect,
     tc_ui_document_create,
     tc_ui_document_destroy,
@@ -55,18 +61,64 @@ def test_native_controls_programmatic_sync_suppresses_feedback():
 
     assert brush_intents == []
     assert selection_intents == []
-    assert controls.brush.tool_checkboxes[BrushToolMode.MOVE].checked
+    model, command_id = controls.brush.tool_commands[BrushToolMode.MOVE]
+    assert model.command(command_id).data.checked
     assert not controls.brush.size.widget.visible
     assert controls.selection.edit_mode.checked
     assert controls.selection.size.value == 61
 
-    controls.brush.tool_checkboxes[BrushToolMode.PAINT].checked = True
+    model, command_id = controls.brush.tool_commands[BrushToolMode.PAINT]
+    controls.brush._on_tool_activated(
+        0, command_id, model.command(command_id).data)
     controls.selection.rect_mode.checked = True
 
     assert brush_intents[-1].action == BrushControlAction.TOOL
     assert brush_intents[-1].value == BrushToolMode.PAINT
     assert selection_intents[-1].action == SelectionControlAction.RECT_MODE
     assert selection_intents[-1].value is True
+
+    controls.close()
+    tc_ui_document_destroy(document)
+
+
+def test_native_brush_mode_toolbar_routes_pointer_and_keyboard():
+    document = tc_ui_document_create()
+    brush_intents = []
+    controls = NativeCanvasControls(
+        document,
+        BrushControlsState(
+            tool=BrushToolMode.PAINT,
+            size=20,
+            hardness=0.4,
+            flow=1.0,
+            color=(255, 255, 255, 255),
+        ),
+        SelectionControlsState(),
+        brush_intents.append,
+        lambda _intent: None,
+        viewport_rect=lambda: Rect(0.0, 0.0, 640.0, 480.0),
+    )
+    assert document.add_root(controls.widget.handle)
+    document.layout_roots(Rect(0.0, 0.0, 320.0, 700.0))
+    toolbar = controls.brush.toolbars[0]
+
+    pointer = PointerEvent()
+    pointer.type = PointerEventType.Down
+    pointer.button = 0
+    pointer.x = toolbar.item_rects[1].x + 3.0
+    pointer.y = toolbar.item_rects[1].y + 3.0
+    assert document.dispatch_pointer_event(pointer) == EventResult.Handled
+    pointer.type = PointerEventType.Up
+    assert document.dispatch_pointer_event(pointer) == EventResult.Handled
+    assert brush_intents[-1].value == BrushToolMode.ERASER
+
+    key = KeyEvent()
+    key.type = KeyEventType.Down
+    key.key = KeyCode.Left
+    assert document.dispatch_key_event(key) == EventResult.Handled
+    key.key = KeyCode.Space
+    assert document.dispatch_key_event(key) == EventResult.Handled
+    assert brush_intents[-1].value == BrushToolMode.PAINT
 
     controls.close()
     tc_ui_document_destroy(document)

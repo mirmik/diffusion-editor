@@ -56,6 +56,9 @@ def test_composite_uses_symbolic_texture_binding():
         args for name, args, _ in ctx.calls if name == "bind_texture_by_name"
     ]
     assert texture_bindings == [("u_texture", compositor._main_tex)]
+    assert [
+        args for name, args, _ in ctx.calls if name == "set_cull"
+    ] == [(0,), (0,)]
     assert ctx.in_frame is False
 
 

@@ -182,8 +182,12 @@ class NativeEditorView:
         )
 
         self.left_panel = document.create_vstack("DiffusionEditorLeftPanel")
-        self.left_panel.stable_id = "diffusion-editor.left-panel"
+        self.left_panel.stable_id = "diffusion-editor.left-panel.content"
         self.left_panel.set_layout_spacing(4.0)
+        self.left_scroll = document.create_scroll_area()
+        self.left_scroll.widget.stable_id = "diffusion-editor.left-panel"
+        self.left_scroll.set_scroll_axes(False, True)
+        self.left_scroll.set_content(self.left_panel)
         self.left_placeholder = document.create_label(
             "Tool controls", "DiffusionEditorLeftPanelLabel")
         self.left_placeholder.stable_id = "diffusion-editor.left-panel.label"
@@ -216,14 +220,14 @@ class NativeEditorView:
         self.agent_chat_view = None
 
         self.right_splitter = document.create_splitter(
-            False,
+            True,
             "DiffusionEditorRightSplitter",
         )
         self.right_splitter.widget.stable_id = "diffusion-editor.right-splitter"
         self.right_splitter.set_first(self.layer_panel)
         self.right_splitter.set_second(self.agent_panel)
-        self.right_splitter.set_split_fraction(0.58)
-        self.right_splitter.set_min_extents(120.0, 100.0)
+        self.right_splitter.set_split_fraction(0.41)
+        self.right_splitter.set_min_extents(180.0, 240.0)
 
         self.workspace_splitter = document.create_splitter(
             True,
@@ -234,15 +238,15 @@ class NativeEditorView:
         )
         self.workspace_splitter.set_first(self.canvas_host)
         self.workspace_splitter.set_second(self.right_splitter.widget)
-        self.workspace_splitter.set_split_fraction(0.72)
-        self.workspace_splitter.set_min_extents(320.0, 220.0)
+        self.workspace_splitter.set_split_fraction(0.46)
+        self.workspace_splitter.set_min_extents(320.0, 420.0)
 
         self.main_splitter = document.create_splitter(
             True,
             "DiffusionEditorMainSplitter",
         )
         self.main_splitter.widget.stable_id = "diffusion-editor.main-splitter"
-        self.main_splitter.set_first(self.left_panel)
+        self.main_splitter.set_first(self.left_scroll.widget)
         self.main_splitter.set_second(self.workspace_splitter.widget)
         self.main_splitter.set_split_fraction(0.20)
         self.main_splitter.set_min_extents(180.0, 480.0)
@@ -332,7 +336,7 @@ class NativeEditorView:
         if self.canvas_controls_view is not None:
             raise RuntimeError("native canvas controls are already mounted")
         self.left_panel.remove_child(self.left_placeholder)
-        self.left_panel.add_flex_child(controls_view.widget, 1.0)
+        self.left_panel.add_preferred_child(controls_view.widget)
         self.canvas_controls_view = controls_view
         self._request_repaint()
 
@@ -341,7 +345,7 @@ class NativeEditorView:
         self._require_open()
         if self.generation_panels_view is not None:
             raise RuntimeError("native generation panels are already mounted")
-        self.left_panel.add_flex_child(panels_view.widget, 1.0)
+        self.left_panel.add_preferred_child(panels_view.widget)
         self.generation_panels_view = panels_view
         self.panel_presentation = panel_presentation
         self._request_repaint()

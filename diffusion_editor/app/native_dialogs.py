@@ -189,6 +189,11 @@ class NativeApplicationDialogs:
             0.25,
             2,
         )
+        self.settings_history_note = self._caption(
+            content,
+            "Older history entries are removed when the limit is exceeded.",
+            "diffusion-editor.settings.history-note",
+        )
         self._caption(content, "Agent Chat API")
         self.settings_agent_url = self._input(
             content, "Base URL", "settings.agent-url")
@@ -199,22 +204,22 @@ class NativeApplicationDialogs:
 
         row = document.create_hstack("NativeSettingsAgentNumbers")
         row.set_layout_spacing(4.0)
-        self.settings_temperature = self._spin(
+        self.settings_temperature = self._spin_cell(
             row, "Temperature", "temperature",
-            0.7, 0.0, 2.0, 0.05, 2, add=False)
-        self.settings_max_tokens = self._spin(
+            0.7, 0.0, 2.0, 0.05, 2)
+        self.settings_max_tokens = self._spin_cell(
             row, "Max tokens", "max-tokens",
-            1024, 0, 131072, 128, 0, add=False)
-        self.settings_timeout = self._spin(
+            1024, 0, 131072, 128, 0)
+        self.settings_timeout = self._spin_cell(
             row, "Timeout sec", "timeout",
-            60, 5, 600, 5, 0, add=False)
-        row.add_flex_child(self.settings_temperature.widget, 1.0)
-        row.add_flex_child(self.settings_max_tokens.widget, 1.0)
-        row.add_flex_child(self.settings_timeout.widget, 1.0)
+            60, 5, 600, 5, 0)
         content.add_preferred_child(row)
         self.settings_stream = self._checkbox(
             content, "Stream responses", "settings.stream")
-        content.preferred_size = Size(520.0, 430.0)
+        # Constrain width to match the legacy dialog, but let the vertical
+        # layout derive its height from the actual fields.
+        content.preferred_size = Size(520.0, 0.0)
+        self.settings_content = content
         dialog.set_content(content)
         self._connections.append(dialog.connect_finished(
             self._finish_settings))
@@ -283,6 +288,11 @@ class NativeApplicationDialogs:
         self.grounding_text_threshold = self._slider(
             content, "Text token threshold", "grounding.text-threshold",
             0.30, 0.05, 1.0, 0.05, 2)
+        self.grounding_sam_caption = self._caption(
+            content,
+            "SAM 2.1 segmentation (experimental)",
+            "diffusion-editor.grounding.sam.caption",
+        )
         self.grounding_sam = self._checkbox(
             content, "Segment with SAM 2.1", "grounding.sam", True)
         self.grounding_sam_model = self._combo(
@@ -292,16 +302,19 @@ class NativeApplicationDialogs:
             content, "Mask channel", "grounding.mask-channel",
             ["whole (full object)", "part", "subpart"], 0)
         self.grounding_mask_threshold = self._slider(
-            content, "Mask threshold", "grounding.mask-threshold",
+            content, "Mask threshold (higher = tighter)",
+            "grounding.mask-threshold",
             0.0, 0.0, 1.0, 0.05, 2)
         self.grounding_max_hole = self._slider(
-            content, "Max hole area", "grounding.max-hole",
+            content, "Max hole area (0 = off, px)", "grounding.max-hole",
             0, 0, 10000, 100, 0)
         self.grounding_max_sprinkle = self._slider(
-            content, "Max sprinkle area", "grounding.max-sprinkle",
+            content, "Max sprinkle area (0 = off, px)",
+            "grounding.max-sprinkle",
             0, 0, 10000, 100, 0)
         self.grounding_multimask = self._checkbox(
-            content, "Multimask output", "grounding.multimask", True)
+            content, "Multimask output (3 candidates per box)",
+            "grounding.multimask", True)
         self.grounding_non_overlap = self._checkbox(
             content, "Non-overlapping masks",
             "grounding.non-overlap", False)
@@ -370,6 +383,29 @@ class NativeApplicationDialogs:
             parent.add_preferred_child(field.widget)
         return field
 
+    def _spin_cell(
+            self, parent, caption, suffix, value, minimum, maximum,
+            step, decimals):
+        cell = self._document.create_vstack(
+            f"NativeSettings{suffix.title().replace('-', '')}Cell")
+        cell.set_layout_spacing(3.0)
+        caption_widget = self._caption(
+            cell,
+            caption,
+            f"diffusion-editor.settings.{suffix}.caption",
+        )
+        setattr(
+            self,
+            f"settings_{suffix.replace('-', '_')}_caption",
+            caption_widget,
+        )
+        field = self._spin(
+            cell, caption, suffix, value, minimum, maximum,
+            step, decimals, add=False)
+        cell.add_preferred_child(field.widget)
+        parent.add_flex_child(cell, 1.0)
+        return field
+
     def _slider(
             self, parent, label, suffix, value, minimum, maximum,
             step, decimals):
@@ -399,13 +435,17 @@ class NativeApplicationDialogs:
         checkbox = self._document.create_checkbox(bool(checked))
         checkbox.widget.stable_id = f"diffusion-editor.{suffix}"
         text = self._document.create_label(label, "NativeDialogCheckboxLabel")
+        text.stable_id = f"diffusion-editor.{suffix}.label"
+        setattr(self, f"{suffix.replace('.', '_').replace('-', '_')}_label", text)
         row.add_preferred_child(checkbox.widget)
         row.add_flex_child(text, 1.0)
         parent.add_preferred_child(row)
         return checkbox
 
-    def _caption(self, parent, text):
+    def _caption(self, parent, text, stable_id=None):
         label = self._document.create_label(text, "NativeDialogCaption")
+        if stable_id is not None:
+            label.stable_id = stable_id
         parent.add_preferred_child(label)
         return label
 

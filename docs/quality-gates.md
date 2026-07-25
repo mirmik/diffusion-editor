@@ -41,13 +41,19 @@ The render child checks `Py_GIL_DISABLED`, `cp314t` SOABI, and
 rendering. Shader/compiler errors and bounded subprocess timeouts fail the
 gate with their transition name.
 
-Both native scenarios import a real PNG through the application coordinator,
-route mask and image strokes, require non-empty image/overlay textures, render
-several frames, and verify idempotent shutdown plus released texture leases.
+Both native scenarios import a deterministic, high-contrast PNG through the
+application coordinator, route mask and image strokes, require non-empty
+image/overlay textures, render several frames, and verify idempotent shutdown
+plus released texture leases. The compositor gate compares the imported
+source pixels with the final Canvas texture, so a correctly sized but blank
+texture fails. On failure it reports signatures for the source upload, main
+composition target and display target to localize the broken pass.
+
 The hostless Vulkan path additionally reads back the resized framebuffer and
 rejects a blank or non-finite result. The windowed OpenGL path requires the
-Canvas to borrow the live GPU compositor texture. CI runs the OpenGL scenario
-on every push and pull request. See
+Canvas to borrow the live GPU compositor texture and applies the source-pixel
+gate on that live device. CI runs the OpenGL scenario on every push and pull
+request. See
 [`native-ui-checklist.md`](native-ui-checklist.md) for real desktop input and
 visual verification, including the deterministic fake-generation path.
 
@@ -55,7 +61,7 @@ visual verification, including the deterministic fake-generation path.
 
 | Path | Evidence | Status |
 | --- | --- | --- |
-| Main UI CPython 3.14t | import/ABI/wheel gate; 320 tests | automated, passing |
+| Main UI CPython 3.14t | import/ABI/wheel gate; 334 tests | automated, passing |
 | Native headless root | `OffscreenGuiComposition`, snapshots, import/paint/mask, framebuffer readback, owned leases, resize/shutdown, bounded Vulkan render | automated, passing |
 | Native windowed root | public `WindowManager` + borrowed `GuiWindowAdapter`, borrowed GPU Canvas texture, import/paint/mask/shutdown, offscreen SDL/OpenGL smoke | routine CI gate |
 | OpenGL | 16-frame Xvfb render, GPU compositor + tcgui | passing with llvmpipe |
@@ -66,6 +72,12 @@ visual verification, including the deterministic fake-generation path.
 | Diffusers/Transformers CPU | fake lifecycle gate plus real SDXL, InstructPix2Pix, Grounding DINO and SAM smokes | passing |
 | CUDA | auto-selected reviewed CUDA 12.8 wheels, `pip check`, GPU availability probe, then real ML smoke | installer-verified; real model smoke remains hardware-dependent |
 | ROCm | `ML_ACCELERATOR=rocm` installer gate, `pip check`, then real ML smoke | manual; not claimed supported without recorded driver/toolkit evidence |
+
+The current hostless Vulkan smoke can fall back to the CPU compositor when the
+runtime device is not the application graphics device. It remains useful for
+root lifecycle and framebuffer coverage, but is not evidence for the Vulkan
+GPU compositor. Vulkan GPU composition therefore stays in the real-desktop
+manual gate until a presentation-capable display is available.
 
 For CUDA/ROCm, follow `docs/ml-worker.md`, record the exact PyTorch wheel
 suffix and official index, driver/toolkit versions, `torch.cuda.is_available()`,

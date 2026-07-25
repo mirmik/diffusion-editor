@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from termin.gui_native import (
+    EventResult,
     KeyCode,
     KeyEvent,
     KeyEventType,
+    ModifierFlag,
+    PointerEvent,
+    PointerEventType,
     Rect,
     TreeDropPosition,
     tc_ui_document_create,
@@ -13,6 +17,7 @@ from termin.gui_native import (
 from diffusion_editor.app.layer_tree import (
     LayerDropPosition,
     LayerTreeAction,
+    LayerTreeIntent,
     LayerTreeNodeState,
     LayerTreeState,
 )
@@ -81,7 +86,11 @@ def test_native_layer_panel_sync_is_feedback_free_and_incremental():
     assert panel.tree.selected_node == group_node
     assert panel.expansion.expanded(group_node)
     assert panel.opacity.value == 0.25
-    assert panel.model.node(child_node).item.text == "[ ] Updated"
+    item = panel.model.node(child_node).item
+    assert item.text == "Updated"
+    assert item.primary_toggle_label == "Visible"
+    assert not item.primary_checked
+    assert item.secondary_toggle_label == "Solo"
 
     panel.close()
     tc_ui_document_destroy(document)
@@ -123,8 +132,10 @@ def test_native_layer_panel_emits_selection_controls_and_drop_intents():
     document, panel, intents = _panel(state)
 
     panel.tree.select(panel._stable_to_node["first"])
-    panel.visible.checked = False
-    panel.solo.checked = True
+    first_node = panel._stable_to_node["first"]
+    first_item = panel.model.node(first_node).item
+    panel._on_row_toggle(first_node, 0, first_item)
+    panel._on_row_toggle(first_node, 1, first_item)
     panel.opacity.value = 0.4
     panel._on_drop_requested(
         panel._stable_to_node["first"],
@@ -142,6 +153,36 @@ def test_native_layer_panel_emits_selection_controls_and_drop_intents():
     assert intents[-1].layer_id == "first"
     assert intents[-1].target_id == "child"
     assert intents[-1].position == LayerDropPosition.AFTER
+
+    panel.close()
+    tc_ui_document_destroy(document)
+
+
+def test_native_layer_row_toggles_route_pointer_and_keyboard():
+    document, panel, intents = _panel(_state(_node("first", "First")))
+    document.layout_roots(Rect(0.0, 0.0, 240.0, 320.0))
+    native_node = panel._stable_to_node["first"]
+
+    pointer = PointerEvent()
+    pointer.type = PointerEventType.Down
+    pointer.button = 0
+    pointer.x = panel.tree.widget.bounds.x + 22.0
+    pointer.y = panel.tree.widget.bounds.y + 13.0
+    assert document.dispatch_pointer_event(pointer) == EventResult.Handled
+    pointer.type = PointerEventType.Up
+    assert document.dispatch_pointer_event(pointer) == EventResult.Handled
+    assert intents[-1] == LayerTreeIntent(
+        LayerTreeAction.VISIBILITY, layer_id="first", value=False)
+
+    panel.tree.select(native_node)
+    assert document.set_focus(panel.tree.handle)
+    key = KeyEvent()
+    key.type = KeyEventType.Down
+    key.key = KeyCode.Space
+    key.modifiers = int(ModifierFlag.Shift)
+    assert document.dispatch_key_event(key) == EventResult.Handled
+    assert intents[-1] == LayerTreeIntent(
+        LayerTreeAction.SOLO, layer_id="first")
 
     panel.close()
     tc_ui_document_destroy(document)

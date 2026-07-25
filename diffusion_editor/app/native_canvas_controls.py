@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import Callable
 
-from termin.gui_native import Color, EdgeInsets, Rect, TcDocument
+from termin.gui_native import (
+    Color,
+    CommandData,
+    CommandModel,
+    EdgeInsets,
+    Rect,
+    TcDocument,
+)
 
 from ..canvas.brush import BrushToolMode
 from .canvas_controls import (
@@ -52,27 +59,28 @@ class NativeBrushPanel:
 
         tools = document.create_vstack("NativeBrushToolModes")
         tools.set_layout_spacing(2.0)
-        self.tool_checkboxes = {}
-        for row_modes in (_TOOL_LABELS[:3], _TOOL_LABELS[3:]):
-            row = document.create_hstack("NativeBrushToolRow")
-            row.set_layout_spacing(4.0)
+        self.tool_commands = {}
+        self.toolbars = []
+        for row_index, row_modes in enumerate(
+                (_TOOL_LABELS[:3], _TOOL_LABELS[3:])):
+            model = CommandModel()
             for mode, label in row_modes:
-                checkbox = document.create_checkbox(False)
-                checkbox.widget.stable_id = (
-                    f"diffusion-editor.brush-tool.{mode.value}")
-                self._connections.append(checkbox.connect_changed(
-                    lambda checked, selected=mode: self._on_tool_changed(
-                        selected, checked)))
-                self.tool_checkboxes[mode] = checkbox
-                cell = document.create_hstack("NativeBrushToolCell")
-                cell.set_layout_spacing(2.0)
-                text = document.create_label(label, "NativeBrushToolLabel")
-                text.stable_id = (
-                    f"diffusion-editor.brush-tool.{mode.value}.label")
-                cell.add_preferred_child(checkbox.widget)
-                cell.add_flex_child(text, 1.0)
-                row.add_flex_child(cell, 1.0)
-            tools.add_preferred_child(row)
+                command_id = model.append(CommandData(
+                    f"diffusion-editor.brush-tool.{mode.value}",
+                    label,
+                    tooltip=f"{label} brush mode",
+                    checkable=True,
+                ))
+                self.tool_commands[mode] = (model, command_id)
+            toolbar = document.create_tool_bar(model)
+            toolbar.widget.stable_id = (
+                f"diffusion-editor.brush-tools.{row_index}")
+            toolbar.item_height = 26.0
+            toolbar.padding = 2.0
+            self._connections.append(toolbar.connect_activated(
+                self._on_tool_activated))
+            self.toolbars.append(toolbar)
+            tools.add_preferred_child(toolbar.widget)
         content.add_preferred_child(tools)
 
         patch_row = document.create_hstack("NativeBrushPatchRow")
@@ -158,8 +166,10 @@ class NativeBrushPanel:
         self._state = state
         self._syncing = True
         try:
-            for mode, checkbox in self.tool_checkboxes.items():
-                checkbox.checked = mode == state.tool
+            for mode, (model, command_id) in self.tool_commands.items():
+                checked = mode == state.tool
+                if model.command(command_id).data.checked != checked:
+                    model.set_checked(command_id, checked)
             self.draw_patch.checked = state.draw_patch
             self.show_patch.checked = state.show_patch
             self.size.value = float(state.size)
@@ -219,14 +229,20 @@ class NativeBrushPanel:
         cell.add_flex_child(text, 1.0)
         parent.add_flex_child(cell, 1.0)
 
-    def _on_tool_changed(
-            self, mode: BrushToolMode, checked: bool) -> None:
+    def _on_tool_activated(
+            self, _index, _command_id, command) -> None:
         if self._syncing or self._closed:
             return
-        if checked:
-            self._emit(BrushControlAction.TOOL, mode)
-        else:
-            self.apply_state(self._state)
+        mode = next(
+            candidate
+            for candidate in BrushToolMode
+            if command.stable_id.endswith(f".{candidate.value}")
+        )
+        self._emit(BrushControlAction.TOOL, mode)
+        # The toolbar implements generic independent checkable commands.
+        # Re-project immediately so this application-level group remains
+        # exactly-one-selected even if the active command was pressed again.
+        self.apply_state(self._state)
 
     def _on_draw_patch_changed(self, checked: bool) -> None:
         self._emit(BrushControlAction.DRAW_PATCH, checked)

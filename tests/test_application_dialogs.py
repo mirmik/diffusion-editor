@@ -274,6 +274,37 @@ def test_native_settings_accept_cancel_reopen_and_destroy(tmp_path):
         tc_ui_document_destroy(document)
 
 
+def test_native_dialogs_preserve_legacy_labels_and_compact_settings(tmp_path):
+    document = tc_ui_document_create()
+    service = NativeApplicationDialogs(
+        document,
+        lambda: Rect(0.0, 0.0, 800.0, 700.0),
+        lambda: None,
+    )
+    try:
+        assert service.settings_content.preferred_size.width == 520.0
+        assert service.settings_content.preferred_size.height == 0.0
+        assert service.settings_history_note.text == (
+            "Older history entries are removed when the limit is exceeded.")
+        assert service.settings_temperature_caption.text == "Temperature"
+        assert service.settings_max_tokens_caption.text == "Max tokens"
+        assert service.settings_timeout_caption.text == "Timeout sec"
+
+        assert service.grounding_sam_caption.text == (
+            "SAM 2.1 segmentation (experimental)")
+        assert service.grounding_mask_threshold.label == (
+            "Mask threshold (higher = tighter)")
+        assert service.grounding_max_hole.label == (
+            "Max hole area (0 = off, px)")
+        assert service.grounding_max_sprinkle.label == (
+            "Max sprinkle area (0 = off, px)")
+        assert service.grounding_multimask_label.text == (
+            "Multimask output (3 candidates per box)")
+    finally:
+        service.close()
+        tc_ui_document_destroy(document)
+
+
 def test_native_file_dialog_modal_routing_cancel_accept_and_reopen(tmp_path):
     text_path = tmp_path / "readme.txt"
     text_path.write_text("hello", encoding="utf-8")

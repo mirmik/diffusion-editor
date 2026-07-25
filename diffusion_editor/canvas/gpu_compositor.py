@@ -11,6 +11,7 @@ from ..document.layer_stack import LayerStack
 from ..document.layer import Layer
 
 from tgfx._tgfx_native import (
+    CULL_NONE,
     ShaderArtifactPolicy,
     ShaderLanguage,
     TcShader,
@@ -233,7 +234,11 @@ class GPUCompositor:
                 clear_depth_enabled=False,
             )
             ctx.set_viewport(0, 0, w, h)
+            ctx.clear_scissor()
+            ctx.set_cull(CULL_NONE)
             ctx.set_depth_test(False)
+            ctx.set_depth_write(False)
+            ctx.set_color_mask(True, True, True, True)
             ctx.set_blend(True)
             ctx.set_blend_func(Tgfx2BlendFactor.One,
                                Tgfx2BlendFactor.OneMinusSrcAlpha)
@@ -258,6 +263,11 @@ class GPUCompositor:
                 clear_depth_enabled=False,
             )
             ctx.set_viewport(0, 0, w, h)
+            ctx.clear_scissor()
+            ctx.set_cull(CULL_NONE)
+            ctx.set_depth_test(False)
+            ctx.set_depth_write(False)
+            ctx.set_color_mask(True, True, True, True)
             ctx.set_blend(False)
             ctx.bind_shader(self._unpremul_vs, self._unpremul_fs)
             ctx.use_shader_resource_layout(self._unpremul_shader)
@@ -314,28 +324,28 @@ class GPUCompositor:
                 return np.zeros((1, 1, 4), dtype=np.uint8)
             return np.zeros((h, w, 4), dtype=np.uint8)
 
-        # Use the Tgfx2Context's own device — diffusion-editor is a thin
-        # tcgui app and doesn't link the full termin._native render engine.
-        # Reaching into RenderingManager here would pull in the entire
-        # editor runtime and break the standalone venv.
-        device = self._graphics.device
-        if device is None:
-            log.error("GPUCompositor.readback: tgfx2 device unavailable")
-            h, w = self._fbo_h, self._fbo_w
-            return np.zeros((h, w, 4), dtype=np.uint8)
+        result = self._readback_texture(
+            self._display_tex, self._fbo_w, self._fbo_h, "display")
+        if result is not None:
+            return result
+        return np.zeros((self._fbo_h, self._fbo_w, 4), dtype=np.uint8)
 
-        buf = np.empty((self._fbo_h * self._fbo_w * 4,), dtype=np.float32)
-        ok = device.read_texture_rgba_float(self._display_tex, buf)
-        if not ok:
-            log.error("GPUCompositor.readback: read_texture_rgba_float failed")
-            h, w = self._fbo_h, self._fbo_w
-            return np.zeros((h, w, 4), dtype=np.uint8)
-
-        float_data = buf.reshape((self._fbo_h, self._fbo_w, 4))
-        result = np.clip(float_data * 255.0, 0, 255).astype(np.uint8)
-        # OpenGL reads bottom-up; flip to top-down.
-        result = np.ascontiguousarray(result[::-1])
-        return result
+    def diagnostic_readbacks(
+            self, layer: Layer | None = None) -> dict[str, np.ndarray | None]:
+        """Read the upload, premultiplied and display stages for smoke errors."""
+        source = None
+        if layer is not None:
+            texture = self._layer_textures.get(id(layer))
+            if texture is not None:
+                source = self._readback_texture(
+                    texture, layer.width, layer.height, "source upload")
+        return {
+            "source upload": source,
+            "premultiplied compositor": self._readback_texture(
+                self._main_tex, self._fbo_w, self._fbo_h, "main"),
+            "display compositor": self._readback_texture(
+                self._display_tex, self._fbo_w, self._fbo_h, "display"),
+        }
 
     def dispose(self):
         """Release all GPU resources."""
@@ -401,6 +411,34 @@ class GPUCompositor:
         )
         pair = tc_shader_ensure_tgfx2(self._ctx, shader)
         return shader, pair
+
+    def _readback_texture(
+            self,
+            texture,
+            width: int,
+            height: int,
+            label: str) -> np.ndarray | None:
+        if (
+                texture is None
+                or self._graphics is None
+                or width <= 0
+                or height <= 0):
+            return None
+        # Use the Tgfx2Context's own device. Pulling RenderingManager into
+        # this standalone editor would load the full Termin runtime.
+        device = self._graphics.device
+        if device is None:
+            log.error(f"GPUCompositor {label} readback: device unavailable")
+            return None
+        buf = np.empty((height * width * 4,), dtype=np.float32)
+        if not device.read_texture_rgba_float(texture, buf):
+            log.error(f"GPUCompositor {label} readback failed")
+            return None
+        float_data = buf.reshape((height, width, 4))
+        result = np.clip(float_data * 255.0, 0, 255).astype(np.uint8)
+        # IRenderDevice normalizes texture readback to top-down rows on every
+        # backend; applying an OpenGL-specific flip here mirrored CPU users.
+        return np.ascontiguousarray(result)
 
     def _ensure_attachments(self, w: int, h: int):
         if (self._main_tex is not None
@@ -491,7 +529,11 @@ class GPUCompositor:
                 clear_depth_enabled=False,
             )
             ctx.set_viewport(0, 0, self._fbo_w, self._fbo_h)
+            ctx.clear_scissor()
+            ctx.set_cull(CULL_NONE)
             ctx.set_depth_test(False)
+            ctx.set_depth_write(False)
+            ctx.set_color_mask(True, True, True, True)
             ctx.set_blend(True)
             ctx.set_blend_func(Tgfx2BlendFactor.One,
                                Tgfx2BlendFactor.OneMinusSrcAlpha)
@@ -514,7 +556,11 @@ class GPUCompositor:
                 clear_depth_enabled=False,
             )
             ctx.set_viewport(0, 0, self._fbo_w, self._fbo_h)
+            ctx.clear_scissor()
+            ctx.set_cull(CULL_NONE)
             ctx.set_depth_test(False)
+            ctx.set_depth_write(False)
+            ctx.set_color_mask(True, True, True, True)
             ctx.set_blend(True)
             ctx.set_blend_func(Tgfx2BlendFactor.One,
                                Tgfx2BlendFactor.OneMinusSrcAlpha)
