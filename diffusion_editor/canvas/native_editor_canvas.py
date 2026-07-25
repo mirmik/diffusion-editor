@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Any, Callable
 
 import numpy as np
 from tcbase import log
@@ -10,7 +10,6 @@ from termin.gui_native import (
     CanvasTextureLayer,
     Color,
     CursorIntent,
-    DynamicTextureLease,
     DynamicTextureOwnership,
     Point,
     PointerEventType,
@@ -32,11 +31,10 @@ class NativeEditorCanvas:
             document: TcDocument,
             layer_stack: LayerStack,
             *,
-            texture_lease_host,
+            lease_factory: Callable[[], Any],
             graphics_owner,
             request_repaint: Callable[[], None],
-            gpu_compositing: bool = True,
-            lease_factory=DynamicTextureLease) -> None:
+            gpu_compositing: bool = True) -> None:
         self._closed = False
         self._request_repaint = request_repaint
         self._graphics_owner = graphics_owner
@@ -53,8 +51,8 @@ class NativeEditorCanvas:
         self.canvas = document.create_canvas()
         self.canvas.widget.stable_id = "diffusion-editor.canvas"
         self.widget = self.canvas.widget
-        self._image_lease = lease_factory(texture_lease_host)
-        self._overlay_lease = lease_factory(texture_lease_host)
+        self._image_lease = lease_factory()
+        self._overlay_lease = lease_factory()
         self._image_lease.bind_canvas(self.canvas, CanvasTextureLayer.IMAGE)
         self._overlay_lease.bind_canvas(self.canvas, CanvasTextureLayer.OVERLAY)
 

@@ -15,8 +15,8 @@ from termin.gui_native import (
     PointerEvent,
     PointerEventType,
 )
-
 from diffusion_editor.app.application import EditorApplication, EngineSet
+from diffusion_editor.app import native_root as native_root_module
 from diffusion_editor.app.dialogs import FileDialogKind
 from diffusion_editor.app.generation_panels import GenerationPanelKind
 from diffusion_editor.app.layer_tree import LayerTreeAction, LayerTreeIntent
@@ -262,6 +262,22 @@ def test_windowed_composition_closes_borrowed_adapter_before_owned_resources(
         "manager-close",
         "session-close",
     ]
+
+
+def test_windowed_composition_creates_texture_lease_for_its_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    adapter = object()
+    lease = object()
+    composition = WindowedNativeComposition.__new__(WindowedNativeComposition)
+    composition._adapter = adapter
+    monkeypatch.setattr(
+        native_root_module,
+        "dynamic_texture_lease",
+        lambda value: lease if value is adapter else None,
+    )
+
+    assert composition.create_texture_lease() is lease
 
 
 def test_real_offscreen_root_binds_application_and_renders(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
@@ -10,12 +11,13 @@ from tcbase import log
 from termin.dispatch import Dispatcher, DispatchStats
 from termin.display.window import WindowHandle, WindowManager, WindowedGraphicsSession
 from termin.gui_native import (
+    DynamicTextureLease,
     OffscreenGuiComposition,
     TcDocument,
     tc_ui_document_create,
     tc_ui_document_destroy,
 )
-from termin.gui_native.window import GuiWindowAdapter
+from termin.gui_native.window import GuiWindowAdapter, dynamic_texture_lease
 from tgfx import configure_default_shader_runtime
 
 from ..sdk_runtime import resolve_sdk
@@ -148,11 +150,10 @@ class WindowedNativeComposition:
             raise RuntimeError("native window composition is closed")
         return self._session.graphics
 
-    @property
-    def texture_lease_host(self):
+    def create_texture_lease(self):
         if self._adapter is None:
             raise RuntimeError("native window composition is closed")
-        return self._adapter
+        return dynamic_texture_lease(self._adapter)
 
     def pump_events(self) -> int:
         if self._manager is None or self._adapter is None or self._handle is None:
@@ -230,6 +231,7 @@ class NativeEditorRoot:
             dispatcher: Dispatcher | None = None,
             dispatch_limit: int = DEFAULT_DISPATCH_LIMIT,
             command_handlers: Mapping[str, CommandHandler] | None = None,
+            texture_lease_factory: Callable[[], Any] | None = None,
             view_factory: NativeViewFactory = NativeEditorView) -> None:
         if dispatch_limit <= 0:
             raise ValueError("dispatch_limit must be positive")
@@ -270,15 +272,14 @@ class NativeEditorRoot:
             mount_canvas = getattr(self.view, "mount_canvas", None)
             graphics = getattr(composition, "graphics", None)
             if mount_canvas is not None and graphics is not None:
-                texture_lease_host = getattr(
-                    composition,
-                    "texture_lease_host",
-                    composition,
-                )
+                if texture_lease_factory is None:
+                    raise RuntimeError(
+                        "native canvas requires an explicit texture lease factory"
+                    )
                 self.canvas = NativeEditorCanvas(
                     composition.document,
                     application.layer_stack,
-                    texture_lease_host=texture_lease_host,
+                    lease_factory=texture_lease_factory,
                     graphics_owner=graphics,
                     request_repaint=composition.request_repaint,
                 )
@@ -558,6 +559,7 @@ class NativeEditorRoot:
             composition,
             dispatch_limit=dispatch_limit,
             command_handlers=command_handlers,
+            texture_lease_factory=partial(DynamicTextureLease, composition),
         )
 
     @classmethod
@@ -582,6 +584,7 @@ class NativeEditorRoot:
             composition,
             dispatch_limit=dispatch_limit,
             command_handlers=command_handlers,
+            texture_lease_factory=composition.create_texture_lease,
         )
 
     def _set_window_title(self, title: str) -> None:

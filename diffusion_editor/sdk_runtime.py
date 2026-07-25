@@ -655,13 +655,14 @@ def verify_imports(contract: SdkContract) -> None:
     from termin.dispatch import Dispatcher
     from termin.display.window import WindowedGraphicsSession
     from termin.gui_native import OffscreenGuiComposition
-    from termin.gui_native.window import GuiWindowAdapter
+    from termin.gui_native.window import GuiWindowAdapter, dynamic_texture_lease
     from tgfx import Tgfx2Context, configure_default_shader_runtime
 
     required = (
         tcgui,
         Dispatcher,
         GuiWindowAdapter,
+        dynamic_texture_lease,
         OffscreenGuiComposition,
         WindowedGraphicsSession,
         Tgfx2Context,
