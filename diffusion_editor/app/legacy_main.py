@@ -15,7 +15,7 @@ from tcbase import Key, MouseButton, Mods
 from tcbase import log
 
 from tgfx import Tgfx2Context, configure_default_shader_runtime
-from termin.display import WindowedGraphicsSession
+from termin.display.window import WindowedGraphicsSession
 
 from .editor_window import EditorWindow
 

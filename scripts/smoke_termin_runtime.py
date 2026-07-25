@@ -40,7 +40,7 @@ def _render_frames(frame_count: int, project_path: Path | None = None) -> int:
     from tcgui.widgets.panel import Panel
     from tcgui.widgets.ui import UI
     from tcgui.widgets.units import pct
-    from termin.display import WindowedGraphicsSession
+    from termin.display.window import WindowedGraphicsSession
     from tgfx import Tgfx2Context, configure_default_shader_runtime
 
     from diffusion_editor.canvas.gpu_compositor import GPUCompositor

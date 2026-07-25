@@ -649,10 +649,13 @@ def verify_imports(contract: SdkContract) -> None:
     import tgfx
     import termin.dispatch
     import termin.display
+    import termin.display.window
     import termin.gui_native
+    import termin.gui_native.window
     from termin.dispatch import Dispatcher
-    from termin.display import WindowedGraphicsSession
-    from termin.gui_native import GuiWindowAdapter, OffscreenGuiComposition
+    from termin.display.window import WindowedGraphicsSession
+    from termin.gui_native import OffscreenGuiComposition
+    from termin.gui_native.window import GuiWindowAdapter
     from tgfx import Tgfx2Context, configure_default_shader_runtime
 
     required = (
@@ -682,7 +685,9 @@ def verify_imports(contract: SdkContract) -> None:
         tgfx,
         termin.dispatch,
         termin.display,
+        termin.display.window,
         termin.gui_native,
+        termin.gui_native.window,
     ):
         _require_module_from_runtime_environment(module)
 

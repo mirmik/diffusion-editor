@@ -8,14 +8,14 @@ from typing import Any, Callable, Mapping, Protocol
 
 from tcbase import log
 from termin.dispatch import Dispatcher, DispatchStats
-from termin.display import WindowHandle, WindowManager, WindowedGraphicsSession
+from termin.display.window import WindowHandle, WindowManager, WindowedGraphicsSession
 from termin.gui_native import (
-    GuiWindowAdapter,
     OffscreenGuiComposition,
     TcDocument,
     tc_ui_document_create,
     tc_ui_document_destroy,
 )
+from termin.gui_native.window import GuiWindowAdapter
 from tgfx import configure_default_shader_runtime
 
 from ..sdk_runtime import resolve_sdk

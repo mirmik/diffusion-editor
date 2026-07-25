@@ -14,7 +14,6 @@ from termin.gui_native import (
     Point,
     PointerEvent,
     PointerEventType,
-    WindowKey,
 )
 
 from diffusion_editor.app.application import EditorApplication, EngineSet
@@ -416,7 +415,7 @@ def test_real_offscreen_canvas_renders_and_routes_image_space_paint(
         root.canvas.controller.brush.set_hardness(1.0)
         root.canvas.controller.brush.set_color(255, 0, 0, 255)
         brush_size = root.canvas.controller.brush.size
-        root.composition.push_key(WindowKey.RIGHT_BRACKET)
+        root.composition.push_key(ord("]"))
         root.tick()
         assert root.canvas.controller.brush.size == brush_size + 5
         assert root.canvas_controls.brush.size.value == brush_size + 5
@@ -495,7 +494,7 @@ def test_offscreen_routes_unhandled_shortcut_after_focused_widget(
 
         application.set_command_state("edit.redo", enabled=False)
         root.composition.push_key(
-            WindowKey.Y,
+            ord("Y"),
             modifiers=int(ModifierFlag.Ctrl),
         )
         root.tick()
@@ -503,7 +502,7 @@ def test_offscreen_routes_unhandled_shortcut_after_focused_widget(
 
         application.set_command_state("edit.redo", enabled=True)
         root.composition.push_key(
-            WindowKey.Y,
+            ord("Y"),
             modifiers=int(ModifierFlag.Ctrl),
         )
         result = root.tick()
