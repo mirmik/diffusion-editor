@@ -101,6 +101,37 @@ def test_native_canvas_switches_borrowed_and_owned_textures_explicitly():
     assert operations == ["borrow", "clear", "set", "update", "clear", "borrow"]
 
 
+def test_native_canvas_reuses_same_size_owned_texture_for_full_update():
+    native, trace, _previous = _native_canvas_shell()
+    first = np.full((8, 10, 4), 17, dtype=np.uint8)
+    replacement = np.full((8, 10, 4), 23, dtype=np.uint8)
+
+    native._replace_owned(native.image_lease, first)
+    native._replace_owned(native.image_lease, replacement)
+
+    operations = [item[1] for item in trace if item[0] == "image"]
+    assert operations == ["set", "update"]
+    assert trace[-1][2:4] == (0, 0)
+    assert np.array_equal(trace[-1][4], replacement)
+
+
+def test_native_canvas_reallocates_owned_texture_after_resize():
+    native, trace, _previous = _native_canvas_shell()
+    native._replace_owned(
+        native.image_lease,
+        np.full((8, 10, 4), 17, dtype=np.uint8),
+    )
+
+    native._replace_owned(
+        native.image_lease,
+        np.full((6, 7, 4), 23, dtype=np.uint8),
+    )
+
+    operations = [item[1] for item in trace if item[0] == "image"]
+    assert operations == ["set", "clear", "set"]
+    assert (native.image_lease.width, native.image_lease.height) == (7, 6)
+
+
 def test_native_canvas_releases_leases_before_gpu_compositor():
     native, trace, previous = _native_canvas_shell()
     native._sync_gpu_image()

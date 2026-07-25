@@ -85,6 +85,50 @@ def test_overlay_bridge_updates_preview_region_from_dirty_local_mask():
     assert bridge.overlay[1, 1, 3] == int(255.0 * MASK_OPACITY * 0.25)
 
 
+def test_overlay_bridge_updates_selection_region_with_mask_equivalence():
+    stack = LayerStack(tile_size=8)
+    stack.init_from_image(_rgba(8, 8))
+    layer = stack.active_layer
+    layer.mask.data[2, 2] = 1.0
+    updates = []
+    bridge = CanvasOverlayBridge(
+        stack,
+        set_overlay=lambda _overlay: None,
+        update_overlay_region=lambda x, y, data: updates.append(
+            (x, y, data.copy())),
+    )
+    bridge.rebuild()
+    stack.selection.data[2, 2] = 1.0
+
+    bridge.update_selection_region((2, 2, 3, 3))
+    incremental = bridge.overlay.copy()
+    bridge.rebuild()
+
+    assert np.array_equal(incremental, bridge.overlay)
+    assert updates[0][0:2] == (2, 2)
+    assert updates[0][2].shape == (1, 1, 4)
+
+
+def test_overlay_bridge_clips_selection_region_at_canvas_boundary():
+    stack = LayerStack(tile_size=8)
+    stack.init_from_image(_rgba(8, 8))
+    stack.selection.data[0, 0] = 1.0
+    updates = []
+    bridge = CanvasOverlayBridge(
+        stack,
+        set_overlay=lambda _overlay: None,
+        update_overlay_region=lambda x, y, data: updates.append(
+            (x, y, data.copy())),
+    )
+    bridge.rebuild()
+    stack.selection.data[0:2, 0:2] = 0.5
+
+    bridge.update_selection_region((-2, -3, 2, 2))
+
+    assert updates[0][0:2] == (0, 0)
+    assert updates[0][2].shape == (2, 2, 4)
+
+
 def test_overlay_bridge_honors_hidden_mask_overlay_flag():
     stack = LayerStack(tile_size=8)
     stack.init_from_image(_rgba(8, 8))

@@ -181,6 +181,8 @@ class WindowedNativeComposition:
     def render_frame(self) -> bool:
         if self._adapter is None:
             raise RuntimeError("native window composition is closed")
+        if not self._adapter.repaint_requested:
+            return False
         return bool(self._adapter.render_frame())
 
     def close(self) -> None:

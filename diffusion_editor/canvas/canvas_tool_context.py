@@ -151,7 +151,7 @@ class CanvasToolContext:
             x,
             y,
         )
-        self._overlay_bridge.rebuild()
+        self._overlay_bridge.update_selection_region(dirty)
         return dirty
 
     def selection_line(
@@ -167,7 +167,7 @@ class CanvasToolContext:
             x1,
             y1,
         )
-        self._overlay_bridge.rebuild()
+        self._overlay_bridge.update_selection_region(dirty)
         return dirty
 
     def mask_dab(

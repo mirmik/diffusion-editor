@@ -58,9 +58,13 @@ def compose_overlay_pixels(
                 255,
             ).astype(np.uint8)
         else:
-            overlay[:, :, 0] = MASK_COLOR[0]
-            overlay[:, :, 1] = MASK_COLOR[1]
-            overlay[:, :, 2] = MASK_COLOR[2]
+            visible = ma > 0.0
+            overlay[:, :, 0] = np.where(
+                visible, MASK_COLOR[0], 0).astype(np.uint8)
+            overlay[:, :, 1] = np.where(
+                visible, MASK_COLOR[1], 0).astype(np.uint8)
+            overlay[:, :, 2] = np.where(
+                visible, MASK_COLOR[2], 0).astype(np.uint8)
             overlay[:, :, 3] = mask_alpha.astype(np.uint8)
 
     return overlay
@@ -150,6 +154,36 @@ class CanvasOverlayBridge:
             preview_mask[py0:py1, px0:px1],
         )
 
+    def update_selection_region(self, dirty: Rect | None) -> None:
+        if dirty is None or not self.show_selection:
+            return
+        width, height = self._layer_stack.width, self._layer_stack.height
+        x0, y0, x1, y1 = dirty
+        canvas_rect = (
+            max(0, x0),
+            max(0, y0),
+            min(width, x1),
+            min(height, y1),
+        )
+        cx0, cy0, cx1, cy1 = canvas_rect
+        if cx1 <= cx0 or cy1 <= cy0:
+            return
+        if self._overlay is None:
+            self.rebuild()
+            return
+
+        selection_alpha = self._selection_alpha(canvas_rect)
+        mask_alpha = self._mask_alpha(
+            self._layer_stack.active_layer,
+            canvas_rect,
+        )
+        region = compose_overlay_pixels(selection_alpha, mask_alpha)
+        if region is None:
+            self._overlay[cy0:cy1, cx0:cx1] = 0
+        else:
+            self._overlay[cy0:cy1, cx0:cx1] = region
+        self._publish_region(canvas_rect)
+
     def _selection_alpha(self, canvas_rect: Rect) -> np.ndarray | None:
         if not self.show_selection or self._layer_stack.selection.is_empty:
             return None
@@ -172,6 +206,31 @@ class CanvasOverlayBridge:
             dx1, dy1 = layer.x + lx1, layer.y + ly1
             mask_alpha[dy0:dy1, dx0:dx1] = (
                 layer.mask.data[ly0:ly1, lx0:lx1] * 255.0 * MASK_OPACITY)
+        return mask_alpha
+
+    def _mask_alpha(
+            self,
+            layer: Layer | None,
+            canvas_rect: Rect) -> np.ndarray | None:
+        if layer is None or not self.show_mask or not layer.has_mask():
+            return None
+
+        cx0, cy0, cx1, cy1 = canvas_rect
+        lx0 = max(0, cx0 - layer.x)
+        ly0 = max(0, cy0 - layer.y)
+        lx1 = min(layer.width, cx1 - layer.x)
+        ly1 = min(layer.height, cy1 - layer.y)
+        mask_alpha = np.zeros((cy1 - cy0, cx1 - cx0), dtype=np.float32)
+        if lx1 <= lx0 or ly1 <= ly0:
+            return mask_alpha
+
+        dx0 = layer.x + lx0 - cx0
+        dy0 = layer.y + ly0 - cy0
+        dx1 = dx0 + (lx1 - lx0)
+        dy1 = dy0 + (ly1 - ly0)
+        mask_alpha[dy0:dy1, dx0:dx1] = (
+            layer.mask.data[ly0:ly1, lx0:lx1] * 255.0 * MASK_OPACITY
+        )
         return mask_alpha
 
     def _clip_layer_local_rect(
@@ -199,6 +258,12 @@ class CanvasOverlayBridge:
             self._overlay[cy0:cy1, cx0:cx1] = 0
         else:
             self._overlay[cy0:cy1, cx0:cx1] = region
+        self._publish_region(canvas_rect)
+
+    def _publish_region(self, canvas_rect: Rect) -> None:
+        if self._overlay is None:
+            return
+        cx0, cy0, cx1, cy1 = canvas_rect
         if self._update_overlay_region is None:
             self._set_overlay(self._overlay)
         else:

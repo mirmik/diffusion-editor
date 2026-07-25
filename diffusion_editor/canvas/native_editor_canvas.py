@@ -184,11 +184,23 @@ class NativeEditorCanvas:
             self._request_repaint()
 
     def _replace_owned(self, lease, data: np.ndarray | None) -> None:
+        if data is None:
+            if not lease.empty:
+                lease.clear()
+            return
+
+        pixels = np.ascontiguousarray(data, dtype=np.uint8)
+        height, width = pixels.shape[:2]
+        if (
+                lease.ownership == DynamicTextureOwnership.OWNED
+                and lease.width == width
+                and lease.height == height):
+            lease.update_region_rgba8(0, 0, pixels)
+            return
+
         if not lease.empty:
             lease.clear()
-        if data is not None:
-            lease.set_rgba8(np.ascontiguousarray(data, dtype=np.uint8))
-        self._request_repaint()
+        lease.set_rgba8(pixels)
 
     def _sync_gpu_image(self) -> None:
         bridge = self.controller.composite_bridge

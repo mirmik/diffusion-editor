@@ -280,6 +280,31 @@ def test_windowed_composition_creates_texture_lease_for_its_adapter(
     assert composition.create_texture_lease() is lease
 
 
+def test_windowed_composition_renders_only_when_repaint_is_requested():
+    class Adapter:
+        def __init__(self):
+            self.repaint_requested = False
+            self.rendered = 0
+
+        def render_frame(self):
+            self.rendered += 1
+            self.repaint_requested = False
+            return True
+
+    adapter = Adapter()
+    composition = WindowedNativeComposition.__new__(WindowedNativeComposition)
+    composition._adapter = adapter
+
+    assert composition.render_frame() is False
+    assert adapter.rendered == 0
+
+    adapter.repaint_requested = True
+    assert composition.render_frame() is True
+    assert adapter.rendered == 1
+    assert composition.render_frame() is False
+    assert adapter.rendered == 1
+
+
 def test_real_offscreen_root_binds_application_and_renders(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -373,6 +398,11 @@ def test_real_offscreen_canvas_renders_and_routes_image_space_paint(
             root.canvas.image_lease.ownership
             == DynamicTextureOwnership.OWNED
         )
+        overlay = np.zeros((32, 32, 4), dtype=np.uint8)
+        root.canvas._set_overlay(overlay)
+        overlay_texture_id = root.canvas.overlay_lease.texture.id
+        root.canvas._set_overlay(np.full_like(overlay, 23))
+        assert root.canvas.overlay_lease.texture.id == overlay_texture_id
         assert root.canvas_controls.widget.stable_id == (
             "diffusion-editor.canvas-controls")
         assert root.generation_panels.widget.stable_id == (
