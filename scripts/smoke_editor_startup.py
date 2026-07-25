@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 from pathlib import Path
 import subprocess
@@ -27,6 +28,13 @@ FAILURE_MARKERS = (
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--ui",
+        choices=("legacy", "native"),
+        default="legacy",
+    )
+    args = parser.parse_args()
     environment = os.environ.copy()
     environment["DIFFUSION_EDITOR_SMOKE_FRAMES"] = "3"
     with tempfile.TemporaryDirectory(
@@ -35,7 +43,11 @@ def main() -> int:
         environment["TERMIN_SDK_SHADER_CACHE_ROOT"] = cache_root
         try:
             result = subprocess.run(
-                [str(PROJECT_ROOT / "run.sh")],
+                [
+                    str(PROJECT_ROOT / "run.sh"),
+                    "--ui",
+                    args.ui,
+                ],
                 cwd=PROJECT_ROOT,
                 env=environment,
                 capture_output=True,
@@ -67,7 +79,8 @@ def main() -> int:
     if "[main] window created" not in combined:
         raise RuntimeError("Production editor did not create a window")
 
-    print("Production editor startup/render smoke OK: 3 frames")
+    print(
+        f"Production editor {args.ui} startup/render smoke OK: 3 frames")
     return 0
 
 

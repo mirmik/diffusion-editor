@@ -1,8 +1,15 @@
 # Native UI desktop checklist
 
-Use this checklist on a real desktop before the native cutover in #608. The
-manual harness uses the production native root and a deterministic fake
-Diffusion engine, so completing generation does not require model weights.
+Use this checklist on a real desktop before the native cutover in #608. For
+normal side-by-side work, launch the production application in either mode:
+
+```sh
+./run.sh --ui legacy [project.deproj-or-image]
+./run.sh --ui native [project.deproj-or-image]
+```
+
+For deterministic generation without model weights, use the native manual
+harness:
 
 ```sh
 TERMIN_BACKEND=opengl \

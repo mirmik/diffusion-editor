@@ -82,11 +82,19 @@ package versions and wheel payload bytes before importing native modules. If
 the venv contains stale SDK files, rerun `./install-deps.sh`. An explicit
 `TERMIN_SDK` overrides the saved path and is checked by the same gate.
 
-or:
+During the comparison period the legacy UI remains the default. Select either
+implementation explicitly with the same optional project/image argument:
 
 ```bash
-./venv/bin/diffusion-editor
+./run.sh --ui legacy [project.deproj-or-image]
+./run.sh --ui native [project.deproj-or-image]
+
+# Equivalent installed entrypoint:
+./venv/bin/diffusion-editor --ui native [project.deproj-or-image]
 ```
+
+`--ui native` uses production settings and inference engines; it is distinct
+from the deterministic fake-engine harness in `scripts/smoke_native_root.py`.
 
 ## Tests
 
