@@ -5,7 +5,13 @@ from dataclasses import replace
 import numpy as np
 from PIL import Image
 import pytest
-from termin.gui_native import tc_ui_document_create, tc_ui_document_destroy
+from termin.gui_native import (
+    PointerEvent,
+    PointerEventType,
+    Rect,
+    tc_ui_document_create,
+    tc_ui_document_destroy,
+)
 
 from diffusion_editor.app.application import EditorApplication, EngineSet
 from diffusion_editor.app.generation_panels import (
@@ -465,6 +471,57 @@ def test_native_generation_panels_sync_without_feedback_and_edit_all_fields(
     panel.close()
     coordinator.close()
     tc_ui_document_destroy(document)
+
+
+def test_native_generation_panel_expands_inside_shell_owned_scroll(tmp_path):
+    application, _diffusion, _instruct, _lama = _application(tmp_path)
+    _insert_tool_layer(application, "Diff", _diffusion_tool())
+    coordinator = GenerationPanelsCoordinator(application, _Canvas())
+    document = tc_ui_document_create()
+    panel = NativeGenerationPanels(
+        document,
+        coordinator.state,
+        coordinator.handle_intent,
+        lambda: None,
+    )
+    left_content = document.create_vstack("TestLeftPanelContent")
+    left_content.add_preferred_child(panel.widget)
+    left_scroll = document.create_scroll_area("TestLeftPanelScroll")
+    left_scroll.set_scroll_axes(False, True)
+    left_scroll.set_content(left_content)
+    assert document.add_root(left_scroll.handle)
+
+    try:
+        document.layout_roots(Rect(0.0, 0.0, 500.0, 700.0))
+        widgets = {
+            item["stable_id"]: item
+            for item in document.inspect_snapshot()["widgets"]
+            if item["stable_id"]
+        }
+        panel_bounds = widgets[
+            "diffusion-editor.generation-panels"]["bounds"]
+        clear_bounds = widgets[
+            "diffusion-editor.generation.diffusion.clear-mask"]["bounds"]
+
+        assert clear_bounds.y + clear_bounds.height <= (
+            panel_bounds.y + panel_bounds.height
+        )
+        assert left_scroll.content_size.height > left_scroll.widget.bounds.height
+
+        prompt_bounds = widgets[
+            "diffusion-editor.generation.diffusion.prompt"]["bounds"]
+        wheel = PointerEvent()
+        wheel.type = PointerEventType.Wheel
+        wheel.x = prompt_bounds.x + prompt_bounds.width * 0.5
+        wheel.y = prompt_bounds.y + prompt_bounds.height * 0.5
+        wheel.wheel_y = -1.0
+        document.dispatch_pointer_event(wheel)
+
+        assert left_scroll.scroll_y > 0.0
+    finally:
+        panel.close()
+        coordinator.close()
+        tc_ui_document_destroy(document)
 
 
 def test_native_generation_programmatic_apply_is_feedback_free(tmp_path):

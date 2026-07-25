@@ -25,7 +25,7 @@ _MASKED_CONTENT_VALUES = (
 
 
 class NativeGenerationPanels:
-    """Single scroll host that switches among the active layer's tool panel."""
+    """Generation controls measured by the shell-owned left-panel scroll."""
 
     def __init__(
             self,
@@ -42,15 +42,11 @@ class NativeGenerationPanels:
         self._model_paths: list[str] = []
         self._reference_ids: list[str | None] = []
 
-        self.scroll = document.create_scroll_area()
-        self.scroll.widget.stable_id = (
-            "diffusion-editor.generation-panels")
-        self.scroll.set_scroll_axes(False, True)
-        self.widget = self.scroll.widget
         self.content = document.create_vstack(
             "NativeGenerationPanelsContent")
+        self.content.stable_id = "diffusion-editor.generation-panels"
         self.content.set_layout_spacing(6.0)
-        self.scroll.set_content(self.content)
+        self.widget = self.content
 
         self.diffusion_group, diffusion = self._group(
             "Diffusion", "diffusion")
