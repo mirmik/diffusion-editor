@@ -22,6 +22,11 @@ class HistoryManager:
         self._max_memory_bytes = max_memory_bytes
         self._undo_stack: list[HistoryEntry] = []
         self._redo_stack: list[HistoryEntry] = []
+        self._memory_revision = 0
+
+    @property
+    def memory_revision(self) -> int:
+        return self._memory_revision
 
     @property
     def can_undo(self) -> bool:
@@ -32,8 +37,11 @@ class HistoryManager:
         return bool(self._redo_stack)
 
     def clear(self) -> None:
+        if not self._undo_stack and not self._redo_stack:
+            return
         self._undo_stack.clear()
         self._redo_stack.clear()
+        self._memory_revision += 1
 
     @property
     def max_memory_bytes(self) -> int:
@@ -62,6 +70,7 @@ class HistoryManager:
             label=label, undo_fn=undo_fn, redo_fn=redo_fn,
             size_bytes=size_bytes))
         self._redo_stack.clear()
+        self._memory_revision += 1
         self._enforce_limits()
 
     def memory_bytes(self) -> int:
@@ -79,6 +88,7 @@ class HistoryManager:
         entry = self._undo_stack.pop()
         entry.undo_fn()
         self._redo_stack.append(entry)
+        self._memory_revision += 1
         return entry.label
 
     def redo(self) -> str | None:
@@ -87,18 +97,26 @@ class HistoryManager:
         entry = self._redo_stack.pop()
         entry.redo_fn()
         self._undo_stack.append(entry)
+        self._memory_revision += 1
         return entry.label
 
     def _enforce_limits(self) -> None:
+        changed = False
         while len(self._undo_stack) > self._max_entries:
             self._undo_stack.pop(0)
+            changed = True
         while len(self._redo_stack) > self._max_entries:
             self._redo_stack.pop(0)
+            changed = True
         while self.memory_bytes() > self._max_memory_bytes:
             if self._undo_stack:
                 self._undo_stack.pop(0)
+                changed = True
                 continue
             if self._redo_stack:
                 self._redo_stack.pop(0)
+                changed = True
                 continue
             break
+        if changed:
+            self._memory_revision += 1

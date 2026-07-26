@@ -90,6 +90,34 @@ _SDL_BUTTON_MAP = {
 }
 
 
+class LegacyFramePresenter:
+    """Poll the editor continuously but render only on a coalesced request."""
+
+    def __init__(self, editor, window) -> None:
+        self._editor = editor
+        self._window = window
+        self._last_framebuffer_size: tuple[int, int] | None = None
+        self.presented_frames = 0
+
+    def tick(self, *, force: bool = False) -> bool:
+        self._editor.poll()
+        framebuffer_size = self._window.framebuffer_size()
+        if framebuffer_size != self._last_framebuffer_size:
+            self._editor.request_repaint()
+        if force:
+            self._editor.request_repaint()
+        if not self._editor.consume_repaint_request():
+            return False
+
+        tex = self._editor.render_compose(*framebuffer_size)
+        self._last_framebuffer_size = framebuffer_size
+        if tex is None:
+            return False
+        self._window.present(tex)
+        self.presented_frames += 1
+        return True
+
+
 def translate_button(sdl_button: int) -> MouseButton:
     return _SDL_BUTTON_MAP.get(sdl_button, MouseButton.LEFT)
 
@@ -140,7 +168,7 @@ def main(path: str | None = None) -> int:
     smoke_frames = int(os.environ.get("DIFFUSION_EDITOR_SMOKE_FRAMES", "0"))
     if smoke_frames < 0:
         raise ValueError("DIFFUSION_EDITOR_SMOKE_FRAMES must be non-negative")
-    presented_frames = 0
+    presenter = LegacyFramePresenter(editor, window)
 
     # Cursor support
     def on_cursor_changed(cursor_name: str):
@@ -160,6 +188,7 @@ def main(path: str | None = None) -> int:
     event = sdl2.SDL_Event()
 
     def dispatch(ev):
+        editor.request_repaint()
         t = ev.type
         if t == sdl2.SDL_QUIT:
             editor.request_stop()
@@ -198,21 +227,13 @@ def main(path: str | None = None) -> int:
             if not editor.running:
                 break
 
-            # Poll engines
-            editor.poll()
-
-            # Render into the UI's offscreen texture, then publish via
-            # SDLBackendWindow.present — on OpenGL this blits to the
-            # default framebuffer and calls SwapWindow; on Vulkan it
-            # acquires a swapchain image, blits, submits, presents.
-            vw, vh = window.framebuffer_size()
-            tex = editor.render_compose(vw, vh)
-            if tex is not None:
-                window.present(tex)
-                presented_frames += 1
-                if smoke_frames and presented_frames >= smoke_frames:
-                    editor.request_stop()
-                    window.set_should_close(True)
+            # Poll engines every tick. Render into the UI's offscreen texture
+            # only after a coalesced repaint request (or forced smoke frame),
+            # then publish through the backend-specific window presenter.
+            presenter.tick(force=bool(smoke_frames))
+            if smoke_frames and presenter.presented_frames >= smoke_frames:
+                editor.request_stop()
+                window.set_should_close(True)
     finally:
         # Application shutdown stops view workers, inference workers and GPU
         # resources before the borrowed host/window leaves scope.

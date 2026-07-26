@@ -12,15 +12,27 @@ class LayerRenderer:
         self._prefix_cache: dict[tuple[Layer, int, int], np.ndarray | None] = {}
         self._nested_cache: dict[tuple[Layer, int, int], np.ndarray | None] = {}
         self._composite_cache: dict[tuple[Layer, int, int], np.ndarray | None] = {}
+        self._cache_revision = 0
 
     # ------------------------------------------------------------------
     # Cache management
     # ------------------------------------------------------------------
 
     def reset_cache(self) -> None:
+        if not any((
+                self._prefix_cache,
+                self._nested_cache,
+                self._composite_cache,
+        )):
+            return
         self._prefix_cache.clear()
         self._nested_cache.clear()
         self._composite_cache.clear()
+        self._cache_revision += 1
+
+    @property
+    def cache_revision(self) -> int:
+        return self._cache_revision
 
     def cache_memory_bytes(self) -> int:
         """Estimated memory held by tile caches."""
@@ -38,20 +50,42 @@ class LayerRenderer:
 
     def _invalidate_layer(self, layer: Layer, tiles: set[tuple[int, int]] | None) -> None:
         if tiles is None:
-            self._drop_layer_from_cache(self._prefix_cache, layer)
-            self._drop_layer_from_cache(self._nested_cache, layer)
-            self._drop_layer_from_cache(self._composite_cache, layer)
+            changed = False
+            changed |= self._drop_layer_from_cache(self._prefix_cache, layer)
+            changed |= self._drop_layer_from_cache(self._nested_cache, layer)
+            changed |= self._drop_layer_from_cache(self._composite_cache, layer)
+            if changed:
+                self._cache_revision += 1
             return
         for tx, ty in tiles:
-            self._prefix_cache.pop((layer, tx, ty), None)
-            self._nested_cache.pop((layer, tx, ty), None)
-            self._composite_cache.pop((layer, tx, ty), None)
+            key = (layer, tx, ty)
+            changed = self._cache_pop(self._prefix_cache, key)
+            changed |= self._cache_pop(self._nested_cache, key)
+            changed |= self._cache_pop(self._composite_cache, key)
+            if changed:
+                self._cache_revision += 1
 
     @staticmethod
-    def _drop_layer_from_cache(cache: dict, layer: Layer) -> None:
+    def _drop_layer_from_cache(cache: dict, layer: Layer) -> bool:
         keys = [k for k in cache.keys() if k[0] is layer]
         for k in keys:
             cache.pop(k, None)
+        return bool(keys)
+
+    @staticmethod
+    def _cache_pop(cache: dict, key: tuple[Layer, int, int]) -> bool:
+        if key not in cache:
+            return False
+        cache.pop(key)
+        return True
+
+    def _cache_set(
+            self,
+            cache: dict,
+            key: tuple[Layer, int, int],
+            value: np.ndarray | None) -> None:
+        cache[key] = value
+        self._cache_revision += 1
 
     # ------------------------------------------------------------------
     # Tile compositing
@@ -148,7 +182,7 @@ class LayerRenderer:
         nested = self._nested_of(layer, tx, ty)
 
         if previous is None and nested is None:
-            self._prefix_cache[key] = None
+            self._cache_set(self._prefix_cache, key, None)
             return None
 
         result = self._blank_float(tx, ty)
@@ -158,7 +192,7 @@ class LayerRenderer:
             self._blend_buffer(nested, 1.0, result)
 
         out = np.clip(result, 0, 255).astype(np.uint8)
-        self._prefix_cache[key] = out
+        self._cache_set(self._prefix_cache, key, out)
         return out
 
     def _nested_of(self, layer: Layer, tx: int, ty: int) -> np.ndarray | None:
@@ -170,7 +204,7 @@ class LayerRenderer:
             nested = self._composite_of(top_child, tx, ty)
         else:
             nested = None
-        self._nested_cache[key] = nested
+        self._cache_set(self._nested_cache, key, nested)
         return nested
 
     def _composite_of(self, layer: Layer, tx: int, ty: int) -> np.ndarray | None:
@@ -187,14 +221,14 @@ class LayerRenderer:
                 result = self._composite_of(siblings[idx - 1], tx, ty)
             else:
                 result = None
-            self._composite_cache[key] = result
+            self._cache_set(self._composite_cache, key, result)
             return result
 
         if own_visible and layer.opacity <= 0:
             siblings = self._stack.comp_order_siblings(layer)
             idx = siblings.index(layer)
             result = self._composite_of(siblings[idx - 1], tx, ty) if idx > 0 else None
-            self._composite_cache[key] = result
+            self._cache_set(self._composite_cache, key, result)
             return result
 
         prefix = self._prefix_of(layer, tx, ty)
@@ -202,7 +236,7 @@ class LayerRenderer:
         if not own_visible:
             nested = self._nested_of(layer, tx, ty)
             if prefix is None and nested is None:
-                self._composite_cache[key] = None
+                self._cache_set(self._composite_cache, key, None)
                 return None
             result = self._blank_float(tx, ty)
             if prefix is not None:
@@ -210,12 +244,12 @@ class LayerRenderer:
             if nested is not None:
                 self._blend_buffer(nested, 1.0, result)
             out = np.clip(result, 0, 255).astype(np.uint8)
-            self._composite_cache[key] = out
+            self._cache_set(self._composite_cache, key, out)
             return out
 
         if layer.opacity >= 1.0:
             if prefix is None and (own is None or not np.any(own[:, :, 3])):
-                self._composite_cache[key] = None
+                self._cache_set(self._composite_cache, key, None)
                 return None
             result = self._blank_float(tx, ty)
             if prefix is not None:
@@ -223,7 +257,7 @@ class LayerRenderer:
             if own is not None:
                 self._blend_image(own, 1.0, result)
             out = np.clip(result, 0, 255).astype(np.uint8)
-            self._composite_cache[key] = out
+            self._cache_set(self._composite_cache, key, out)
             return out
 
         siblings = self._stack.comp_order_siblings(layer)
@@ -242,7 +276,7 @@ class LayerRenderer:
             subtree = np.clip(subtree_f, 0, 255).astype(np.uint8)
 
         if previous is None and subtree is None:
-            self._composite_cache[key] = None
+            self._cache_set(self._composite_cache, key, None)
             return None
 
         result = self._blank_float(tx, ty)
@@ -251,7 +285,7 @@ class LayerRenderer:
         if subtree is not None:
             self._blend_buffer(subtree, layer.opacity, result)
         out = np.clip(result, 0, 255).astype(np.uint8)
-        self._composite_cache[key] = out
+        self._cache_set(self._composite_cache, key, out)
         return out
 
     def _layer_canvas_tile(self, layer: Layer, tx: int, ty: int) -> np.ndarray | None:

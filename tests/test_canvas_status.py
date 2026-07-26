@@ -13,7 +13,18 @@ from diffusion_editor.document.history import HistoryManager
 from diffusion_editor.document.layer_stack import LayerStack
 
 
-def _status_coordinator():
+class _Clock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+def _status_coordinator(*, clock=None, update_interval=0.0):
     image = np.zeros((24, 32, 4), dtype=np.uint8)
     stack = LayerStack(tile_size=8)
     stack.init_from_image(image)
@@ -33,12 +44,15 @@ def _status_coordinator():
         document,
         canvas,
         statuses.append,
+        get_status=lambda: statuses[-1] if statuses else "Ready",
+        clock=clock or _Clock(),
+        update_interval=update_interval,
     )
-    return stack, canvas, coordinator, statuses, previous_moves
+    return stack, document, canvas, coordinator, statuses, previous_moves
 
 
 def test_canvas_status_formats_live_context_and_preserves_callback_chain():
-    stack, canvas, coordinator, statuses, previous_moves = (
+    stack, _document, canvas, coordinator, statuses, previous_moves = (
         _status_coordinator())
     canvas.brush.set_size(37)
     canvas.set_brush_tool(BrushToolMode.SMUDGE)
@@ -61,13 +75,92 @@ def test_canvas_status_formats_live_context_and_preserves_callback_chain():
 
 
 def test_canvas_status_replaces_operation_text_only_after_pointer_motion():
-    _stack, canvas, coordinator, statuses, _previous_moves = (
+    _stack, _document, canvas, coordinator, statuses, _previous_moves = (
         _status_coordinator())
     statuses.append("Imported: source.png")
 
     assert statuses[-1] == "Imported: source.png"
     canvas.pointer_move(1, 2)
     assert statuses[-1].startswith("32x24 | (1,2)")
+    coordinator.close()
+
+
+def test_canvas_status_coalesces_motion_and_delivers_latest_position():
+    clock = _Clock()
+    _stack, _document, canvas, coordinator, statuses, previous_moves = (
+        _status_coordinator(clock=clock, update_interval=0.04))
+
+    canvas.pointer_move(1, 2)
+    clock.advance(0.01)
+    canvas.pointer_move(3, 4)
+    clock.advance(0.01)
+    canvas.pointer_move(5, 6)
+
+    assert previous_moves == [(1, 2), (3, 4), (5, 6)]
+    assert len(statuses) == 1
+    assert "(1,2)" in statuses[0]
+    assert coordinator.flush() is False
+
+    clock.advance(0.02)
+    assert coordinator.flush() is True
+    assert len(statuses) == 2
+    assert "(5,6)" in statuses[-1]
+    coordinator.close()
+
+
+def test_canvas_status_skips_unchanged_text_but_replaces_operation_message():
+    clock = _Clock()
+    _stack, _document, canvas, coordinator, statuses, _previous_moves = (
+        _status_coordinator(clock=clock, update_interval=0.04))
+
+    canvas.pointer_move(1, 2)
+    clock.advance(0.04)
+    canvas.pointer_move(1, 2)
+    assert len(statuses) == 1
+
+    statuses.append("Imported: source.png")
+    clock.advance(0.04)
+    canvas.pointer_move(1, 2)
+    assert len(statuses) == 3
+    assert statuses[-1].startswith("32x24 | (1,2)")
+    coordinator.close()
+
+
+def test_canvas_status_memory_counters_are_cached_by_revision(monkeypatch):
+    clock = _Clock()
+    stack, document, canvas, coordinator, _statuses, _previous_moves = (
+        _status_coordinator(clock=clock, update_interval=0.0))
+    calls = {"history": 0, "cache": 0}
+    history_memory_bytes = document.memory_bytes
+    cache_memory_bytes = stack.cache_memory_bytes
+
+    def count_history():
+        calls["history"] += 1
+        return history_memory_bytes()
+
+    def count_cache():
+        calls["cache"] += 1
+        return cache_memory_bytes()
+
+    monkeypatch.setattr(document, "memory_bytes", count_history)
+    monkeypatch.setattr(stack, "cache_memory_bytes", count_cache)
+
+    canvas.pointer_move(1, 1)
+    canvas.pointer_move(2, 2)
+    assert calls == {"history": 1, "cache": 1}
+
+    document.push_callbacks(
+        "Edit",
+        undo_fn=lambda: None,
+        redo_fn=lambda: None,
+        size_bytes=128,
+    )
+    canvas.pointer_move(3, 3)
+    assert calls == {"history": 2, "cache": 1}
+
+    stack.composite()
+    canvas.pointer_move(4, 4)
+    assert calls == {"history": 2, "cache": 2}
     coordinator.close()
 
 

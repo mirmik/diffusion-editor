@@ -167,10 +167,12 @@ class AgentChatPanel(Panel):
         self._transcript.text = ""
         self._status.text = "Cleared"
 
-    def poll(self) -> None:
+    def poll(self) -> bool:
         if self._runner is None:
-            return
+            return False
+        changed = False
         for kind, value in self._runner.poll():
+            changed = True
             if kind == "delta":
                 self._assistant_buffer += value
                 self._status.text = "Generating..."
@@ -203,6 +205,7 @@ class AgentChatPanel(Panel):
                 self._status.text = f"Error: {str(value)[:120]}"
                 self._assistant_active = False
                 self._set_busy(False)
+        return changed
 
     def shutdown(self) -> None:
         if self._runner is not None:

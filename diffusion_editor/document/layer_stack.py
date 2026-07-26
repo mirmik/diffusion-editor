@@ -85,6 +85,10 @@ class LayerStack:
         return self._renderer.cache_memory_bytes()
 
     @property
+    def cache_revision(self) -> int:
+        return self._renderer.cache_revision
+
+    @property
     def layers(self):
         return self._layers
 

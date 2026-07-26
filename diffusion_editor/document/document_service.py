@@ -65,6 +65,10 @@ class DocumentService:
     def memory_bytes(self) -> int:
         return self._history.memory_bytes()
 
+    @property
+    def memory_revision(self) -> int:
+        return self._history.memory_revision
+
     def set_history_memory_limit_bytes(self, max_memory_bytes: int) -> None:
         self._history.set_max_memory_bytes(max_memory_bytes)
 

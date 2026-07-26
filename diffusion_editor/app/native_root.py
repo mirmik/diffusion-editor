@@ -296,6 +296,7 @@ class NativeEditorRoot:
                     application.document,
                     self.canvas.controller,
                     application.set_status,
+                    get_status=lambda: application.status_text,
                 )
                 application.register_shutdown_resource(
                     ShutdownPhase.VIEW_WORKERS,
@@ -613,6 +614,8 @@ class NativeEditorRoot:
             self.application.poll()
         if self.agent_chat is not None:
             self.agent_chat.poll()
+        if self.canvas_status_coordinator is not None:
+            self.canvas_status_coordinator.flush()
         rendered = bool(self.composition.render_frame())
         return NativeTickResult(
             dispatched=stats.executed,

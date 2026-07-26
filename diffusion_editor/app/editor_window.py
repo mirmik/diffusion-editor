@@ -50,6 +50,7 @@ from .application import (
     EditorApplication,
     ShutdownPhase,
 )
+from .canvas_status import CanvasStatusCoordinator
 from .presentation import PanelUpdate, ViewPorts
 from ..document.commands import (
     AddLayerCommand, RemoveLayerCommand,
@@ -83,7 +84,10 @@ class _LegacyPresentation:
         self._window = window
 
     def set_status(self, text: str) -> None:
+        if self._window._statusbar.text == text:
+            return
         self._window._statusbar.text = text
+        self._window.request_repaint()
 
     def update_panel(self, update: PanelUpdate) -> None:
         if update.panel_id == "instruct":
@@ -95,6 +99,7 @@ class _LegacyPresentation:
                 )
             elif update.state == "model-loaded":
                 self._window._instruct_panel.on_model_loaded()
+            self._window.request_repaint()
             return
         if update.panel_id != "diffusion":
             return
@@ -113,6 +118,7 @@ class _LegacyPresentation:
             )
         elif update.state == "ip-adapter-loaded":
             self._window._diffusion_panel.on_ip_adapter_loaded()
+        self._window.request_repaint()
 
 
 class EditorWindow:
@@ -137,6 +143,8 @@ class EditorWindow:
         self._clipboard_pos = self.application.clipboard_pos
         self._external_edit_ctx: ExternalEditContext | None = None
         self._closed = False
+        self._repaint_requested = True
+        self.canvas_status_coordinator: CanvasStatusCoordinator | None = None
 
         # Explicit compatibility aliases while the tcgui view is migrated in
         # vertical slices. All of these objects are owned by EditorApplication.
@@ -177,6 +185,18 @@ class EditorWindow:
 
         # Wire callbacks
         self._wire_callbacks()
+        self.canvas_status_coordinator = CanvasStatusCoordinator(
+            self._layer_stack,
+            self._document,
+            self._canvas,
+            self.application.set_status,
+            get_status=lambda: self._statusbar.text,
+        )
+        self.application.register_shutdown_resource(
+            ShutdownPhase.VIEW_WORKERS,
+            "legacy-canvas-status",
+            self.canvas_status_coordinator.close,
+        )
         self._menu_bar.register_shortcuts(self.ui)
 
     # Temporary scalar compatibility seam for the legacy view. The values
@@ -319,6 +339,7 @@ class EditorWindow:
         root.add_child(self._statusbar)
 
         self.ui = UI(graphics=self._ctx)
+        self.ui.on_present_requested = self.request_repaint
         self.ui.root = root
 
     def _canvas_placeholder_brush(self):
@@ -385,10 +406,10 @@ class EditorWindow:
                 old_on_changed()
             self._on_layer_changed()
             self._layer_panel.sync_from_stack()
+            self.request_repaint()
         self._layer_stack.on_changed = _on_stack_changed
 
         # Canvas
-        self._canvas.on_mouse_moved = self._on_mouse_moved
         self._canvas.on_color_picked = self._on_color_picked
         self._canvas.on_edit_begin = self._begin_external_edit
         self._canvas.on_edit_end = self._end_external_edit
@@ -498,14 +519,6 @@ class EditorWindow:
     # ------------------------------------------------------------------
     # Status
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _fmt_bytes(n: int) -> str:
-        if n < 1024:
-            return f"{n}B"
-        if n < 1024 * 1024:
-            return f"{n / 1024:.0f}K"
-        return f"{n / (1024 * 1024):.1f}M"
 
     def _load_history_memory_limit_bytes(self) -> int:
         return self.application.history_memory_limit_bytes
@@ -706,25 +719,6 @@ class EditorWindow:
         dlg.on_result = _apply
         dlg.show(self.ui)
         self.ui.set_focus(limit_input)
-
-    def _memory_status(self) -> str:
-        hist = self._document.memory_bytes()
-        cache = self._layer_stack.cache_memory_bytes()
-        return f"Hist:{self._fmt_bytes(hist)} Cache:{self._fmt_bytes(cache)}"
-
-    def _on_mouse_moved(self, x, y):
-        if self._layer_stack.width == 0:
-            return
-        w, h = self._layer_stack.width, self._layer_stack.height
-        layer = self._layer_stack.active_layer
-        name = layer.name if layer else "-"
-        bs = self._canvas.brush.size
-        tool = self._canvas.brush_tool_mode.value
-        mem = self._memory_status()
-        if 0 <= x < w and 0 <= y < h:
-            self._statusbar.text = f"{w}x{h} | ({x},{y}) | {name} | {tool}:{bs}px | {mem}"
-        else:
-            self._statusbar.text = f"{w}x{h} | {name} | {tool}:{bs}px | {mem}"
 
     def _on_color_picked(self, r, g, b, a):
         self._canvas.brush.set_color(r, g, b, a)
@@ -1523,7 +1517,10 @@ class EditorWindow:
     # ------------------------------------------------------------------
 
     def poll(self):
-        self._agent_chat_panel.poll()
+        if self.canvas_status_coordinator is not None:
+            self.canvas_status_coordinator.flush()
+        if self._agent_chat_panel.poll():
+            self.request_repaint()
         self.application.poll()
 
     def _show_grounding_dialog(self) -> None:
@@ -1571,6 +1568,14 @@ class EditorWindow:
 
     def request_stop(self) -> None:
         self.application.request_stop()
+
+    def request_repaint(self) -> None:
+        self._repaint_requested = True
+
+    def consume_repaint_request(self) -> bool:
+        requested = self._repaint_requested
+        self._repaint_requested = False
+        return requested
 
     def close(self):
         """Release runtime resources (GPU/engines). Safe to call multiple times."""
