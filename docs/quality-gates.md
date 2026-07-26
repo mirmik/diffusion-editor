@@ -5,6 +5,11 @@ wrong interpreter, a regular `cp314` native ABI, a main-process GIL transition,
 worker-only distributions in the UI environment, non-exact locks, unavailable
 binary wheels, broken requirements, lifecycle races, and broken worker IPC.
 
+`run-quality-gates.ps1` applies the same ABI/import/test runner on Windows.
+The Windows CI job is enabled when a `windows_sdk_asset` workflow input or
+`windows_asset` repository-dispatch payload names a published Windows x86-64
+CPython 3.14t SDK archive.
+
 ```sh
 ./run-quality-gates.sh
 ```
@@ -57,16 +62,19 @@ request. See
 [`native-ui-checklist.md`](native-ui-checklist.md) for real desktop input and
 visual verification, including the deterministic fake-generation path.
 
-## Verified matrix (2026-07-25)
+## Verified matrix (2026-07-27)
 
 | Path | Evidence | Status |
 | --- | --- | --- |
-| Main UI CPython 3.14t | import/ABI/wheel gate; 334 tests | automated, passing |
+| Main UI CPython 3.14t | import/ABI/wheel gate; 365 tests | automated, passing |
+| Windows main UI CPython 3.14t | `install-deps.ps1`, import/ABI/payload gate, `pip check`, full tests | CI definition ready; requires a published Windows SDK asset |
 | Native headless root | `OffscreenGuiComposition`, snapshots, import/paint/mask, framebuffer readback, owned leases, resize/shutdown, bounded Vulkan render | automated, passing |
 | Native windowed root | public `WindowManager` + borrowed `GuiWindowAdapter`, borrowed GPU Canvas texture, import/paint/mask/shutdown, offscreen SDL/OpenGL smoke | routine CI gate |
 | OpenGL | 16-frame Xvfb render, GPU compositor + tcgui | passing with llvmpipe |
 | Vulkan device | `vulkaninfo --summary` | passing with llvmpipe 1.4 |
 | Vulkan presentation | 16-frame render command above | manual gate; current Xvfb has no DRI3/present queue |
+| Windows OpenGL presentation | production legacy startup smoke through `run.ps1` | Windows CI/manual gate |
+| Windows Vulkan presentation | production startup smoke on a Vulkan-capable Windows host | manual; backend support is separate from Python ABI support |
 | LaMa CPU | identity lifecycle gate plus real LaMa smoke | passing |
 | rembg CPU | threshold lifecycle gate plus real U2Net smoke | passing |
 | Diffusers/Transformers CPU | fake lifecycle gate plus real SDXL, InstructPix2Pix, Grounding DINO and SAM smokes | passing |
@@ -87,12 +95,3 @@ and the output of:
 ./venv/bin/python scripts/smoke_ml_worker.py \
   --real --sdxl /path/to/model.safetensors
 ```
-
-## SDK wheelhouse recovery overlay
-
-`DIFFUSION_EDITOR_QA_SITE_PACKAGES` exists only to test a freshly rebuilt SDK
-payload while a known wheelhouse/manifest defect prevents refreshing the local
-venv. Normal CI and production must not set it: `run-quality-gates.sh` first
-runs `sdk_runtime verify-installed`, so stale installed payloads remain a hard
-failure. Remove the overlay after rebuilding the Termin SDK and rerunning
-`install-deps.sh`.

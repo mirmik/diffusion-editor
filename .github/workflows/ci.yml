@@ -9,7 +9,11 @@ on:
       sdk_asset:
         description: Termin SDK release asset to download
         required: false
-        default: termin-sdk-linux-x86_64-py310-latest-ci.tar.zst
+        default: termin-sdk-linux-x86_64-py314t-latest-ci.tar.zst
+      windows_sdk_asset:
+        description: Optional Windows x86-64 CPython 3.14t SDK release asset
+        required: false
+        default: ""
   repository_dispatch:
     types: [termin-sdk-published]
 
@@ -19,7 +23,7 @@ permissions:
 env:
   TERMIN_REPO: mirmik/termin
   TERMIN_SDK_RELEASE_TAG: sdk-latest-ci
-  DEFAULT_TERMIN_SDK_ASSET: termin-sdk-linux-x86_64-py310-latest-ci.tar.zst
+  DEFAULT_TERMIN_SDK_ASSET: termin-sdk-linux-x86_64-py314t-latest-ci.tar.zst
 
 jobs:
   tests:
@@ -27,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Setup Python
+      - name: Setup bootstrap Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.10"
@@ -61,25 +65,16 @@ jobs:
           test -f "$RUNNER_TEMP/termin-sdk/manifest.json"
           test -f "$RUNNER_TEMP/termin-sdk/python-runtime-manifest.json"
 
-      - name: Install Python dependencies
+      - name: Install canonical CPython 3.14t environment
         env:
           TERMIN_SDK: ${{ runner.temp }}/termin-sdk
-        run: |
-          python -m pip install --upgrade pip setuptools wheel
-          termin_requirements_output="$(
-            python -m diffusion_editor.sdk_runtime requirements --sdk "$TERMIN_SDK"
-          )"
-          mapfile -t termin_requirements <<< "$termin_requirements_output"
-          python -m pip install --no-index --no-deps \
-            --find-links "$TERMIN_SDK/wheels" "${termin_requirements[@]}"
-          python -m pip install Pillow numpy PyYAML pysdl2 pytest
-          python -m pip install --no-build-isolation --no-deps -e .
+        run: ./install-deps.sh
 
       - name: Verify Termin imports
         env:
           TERMIN_SDK: ${{ runner.temp }}/termin-sdk
         run: |
-          python -m diffusion_editor.sdk_runtime verify-installed \
+          ./venv/bin/python -m diffusion_editor.sdk_runtime verify-installed \
             --sdk "$TERMIN_SDK" --imports
 
       - name: Render OpenGL runtime smoke
@@ -87,7 +82,7 @@ jobs:
           TERMIN_SDK: ${{ runner.temp }}/termin-sdk
           TERMIN_BACKEND: opengl
           LIBGL_ALWAYS_SOFTWARE: "1"
-        run: xvfb-run -a python scripts/smoke_termin_runtime.py
+        run: xvfb-run -a ./venv/bin/python scripts/smoke_termin_runtime.py
 
       - name: Exercise native editor OpenGL scenario
         env:
@@ -96,9 +91,81 @@ jobs:
           SDL_VIDEODRIVER: offscreen
           LIBGL_ALWAYS_SOFTWARE: "1"
           TERMIN_SDK_SHADER_CACHE_ROOT: ${{ runner.temp }}/native-editor-shaders
-        run: python scripts/smoke_native_root.py --windowed --frames 3
+        run: ./venv/bin/python scripts/smoke_native_root.py --windowed --frames 3
 
       - name: Run tests
         env:
           TERMIN_SDK: ${{ runner.temp }}/termin-sdk
-        run: python -m pytest -q
+        run: ./venv/bin/python -m pytest -q
+
+  windows-tests:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.windows_sdk_asset != '') ||
+      (github.event_name == 'repository_dispatch' &&
+       github.event.client_payload.windows_asset != '')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve Windows Termin SDK asset
+        id: sdk
+        shell: pwsh
+        env:
+          DISPATCH_ASSET: ${{ github.event.client_payload.windows_asset }}
+          INPUT_ASSET: ${{ inputs.windows_sdk_asset }}
+        run: |
+          $asset = if ($env:DISPATCH_ASSET) {
+            $env:DISPATCH_ASSET
+          } else {
+            $env:INPUT_ASSET
+          }
+          if (-not $asset) {
+            throw "A Windows CPython 3.14t SDK asset is required"
+          }
+          "asset=$asset" >> $env:GITHUB_OUTPUT
+
+      - name: Download Windows Termin SDK
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.TERMIN_RELEASE_TOKEN || github.token }}
+        run: |
+          $asset = "${{ steps.sdk.outputs.asset }}"
+          $archive = Join-Path $env:RUNNER_TEMP $asset
+          $sdk = Join-Path $env:RUNNER_TEMP "termin-sdk"
+          New-Item -ItemType Directory -Force -Path $sdk | Out-Null
+          gh release download "$env:TERMIN_SDK_RELEASE_TAG" `
+            --repo "$env:TERMIN_REPO" `
+            --pattern $asset `
+            --dir $env:RUNNER_TEMP
+          if ($asset.EndsWith(".zip")) {
+            Expand-Archive -Path $archive -DestinationPath $sdk
+          } elseif ($asset.EndsWith(".tar.zst")) {
+            tar --zstd -xf $archive -C $sdk
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not extract $asset"
+            }
+          } else {
+            throw "Unsupported Windows SDK archive: $asset"
+          }
+          foreach ($required in @(
+            "lib",
+            "wheels",
+            "python-runtime-manifest.json",
+            "bin\termin_python.exe"
+          )) {
+            if (-not (Test-Path (Join-Path $sdk $required))) {
+              throw "Windows SDK is missing $required"
+            }
+          }
+
+      - name: Install canonical CPython 3.14t environment
+        shell: pwsh
+        run: .\install-deps.ps1 -Sdk (Join-Path $env:RUNNER_TEMP "termin-sdk")
+
+      - name: Run Windows ABI and test gates
+        shell: pwsh
+        run: .\run-quality-gates.ps1 --skip-resolver --skip-workers
+
+      - name: Run Windows production startup smoke
+        shell: pwsh
+        run: .\scripts\smoke_windows_runtime.ps1 -Ui legacy -Backend opengl -Frames 3

@@ -17,6 +17,12 @@ For development builds, point `TERMIN_SDK` at a local SDK:
 TERMIN_SDK=/path/to/termin/sdk ./install-deps.sh
 ```
 
+On Windows, use the matching Windows x86-64 SDK and PowerShell:
+
+```powershell
+.\install-deps.ps1 -Sdk C:\path\to\termin-sdk
+```
+
 The SDK must contain the schema-v3 runtime manifest, its canonical
 free-threaded interpreter, and Termin wheels:
 
@@ -36,11 +42,21 @@ Regular CPython 3.14 (`cp314`) is intentionally rejected.
 ./install-deps.sh
 ```
 
+```powershell
+.\install-deps.ps1
+```
+
 The script creates `./venv` with `$TERMIN_SDK/bin/termin_python`, verifies that
 the wheelhouse has one native build ID and only compatible `cp314t` native
 wheels, installs the exact Termin dependency closure, and installs this project
 in editable mode. After successful import verification it saves the absolute
 SDK path in the ignored `.termin-sdk` file.
+
+The PowerShell installer applies the same contract: it selects
+`bin\termin_python.exe`, prepends only the selected SDK's `bin`/`lib`
+directories for deterministic DLL discovery, rejects an existing regular
+`cp314` environment, installs binary wheels only, and verifies imports with
+the GIL disabled.
 
 If `VENV` already exists, its interpreter is checked before anything is
 installed. An old `cp310`/`cp314` environment, or a 3.14t process started with
@@ -77,6 +93,10 @@ SDK instead of mixing the artifacts.
 ./run.sh
 ```
 
+```powershell
+.\run.ps1
+```
+
 `run.sh` restores `TERMIN_SDK` from `.termin-sdk` and verifies installed Termin
 package versions and wheel payload bytes before importing native modules. If
 the venv contains stale SDK files, rerun `./install-deps.sh`. An explicit
@@ -93,6 +113,13 @@ implementation explicitly with the same optional project/image argument:
 ./venv/bin/diffusion-editor --ui native [project.deproj-or-image]
 ```
 
+Windows keeps the same comparison selector:
+
+```powershell
+.\run.ps1 --ui legacy
+.\run.ps1 --ui native
+```
+
 `--ui native` uses production settings and inference engines; it is distinct
 from the deterministic fake-engine harness in `scripts/smoke_native_root.py`.
 
@@ -100,6 +127,11 @@ from the deterministic fake-engine harness in `scripts/smoke_native_root.py`.
 
 ```bash
 ./venv/bin/python -m pytest -q
+```
+
+```powershell
+.\run-quality-gates.ps1 --skip-resolver
+.\scripts\smoke_windows_runtime.ps1 -Ui legacy -Backend opengl
 ```
 
 The CI runtime gates can also be run directly:

@@ -11,9 +11,6 @@ import sys
 import tempfile
 import time
 
-if runtime_site := os.environ.get("DIFFUSION_EDITOR_QA_SITE_PACKAGES"):
-    sys.path.insert(0, runtime_site)
-
 from diffusion_editor.quality_gate import verify_runtime_identity
 
 
@@ -21,30 +18,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _python_script(path: str, *arguments: str) -> list[str]:
-    runtime_site = os.environ.get("DIFFUSION_EDITOR_QA_SITE_PACKAGES")
-    if not runtime_site:
-        return [sys.executable, path, *arguments]
-    argv = [path, *arguments]
-    code = (
-        "import os,runpy,sys;"
-        "sys.path.insert(0,os.environ['DIFFUSION_EDITOR_QA_SITE_PACKAGES']);"
-        f"sys.argv={argv!r};"
-        f"runpy.run_path({path!r},run_name='__main__')"
-    )
-    return [sys.executable, "-c", code]
+    return [sys.executable, path, *arguments]
 
 
 def _pytest_command() -> list[str]:
-    runtime_site = os.environ.get("DIFFUSION_EDITOR_QA_SITE_PACKAGES")
-    if not runtime_site:
-        return [sys.executable, "-m", "pytest", "-q"]
-    code = (
-        "import os,sys;"
-        "sys.path.insert(0,os.environ['DIFFUSION_EDITOR_QA_SITE_PACKAGES']);"
-        "import pytest;"
-        "raise SystemExit(pytest.main(['-q']))"
-    )
-    return [sys.executable, "-c", code]
+    return [sys.executable, "-m", "pytest", "-q"]
 
 
 def _run(label: str, command: list[str], *, env=None, timeout: float) -> None:

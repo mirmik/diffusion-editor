@@ -9,9 +9,6 @@ from pathlib import Path
 import subprocess
 import sys
 
-if runtime_site := os.environ.get("DIFFUSION_EDITOR_QA_SITE_PACKAGES"):
-    sys.path.insert(0, runtime_site)
-
 
 _SHADER_FAILURE_MARKERS = (
     "shader is unavailable",

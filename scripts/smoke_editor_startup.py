@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,33 @@ FAILURE_MARKERS = (
 )
 
 
+def production_run_command(
+    ui: str,
+    *,
+    platform_name: str = os.name,
+    find_executable=shutil.which,
+) -> list[str]:
+    if platform_name == "nt":
+        powershell = (
+            find_executable("pwsh")
+            or find_executable("powershell")
+            or find_executable("powershell.exe")
+        )
+        if powershell is None:
+            raise RuntimeError(
+                "PowerShell is required for the Windows startup smoke"
+            )
+        return [
+            powershell,
+            "-NoProfile",
+            "-File",
+            str(PROJECT_ROOT / "run.ps1"),
+            "--ui",
+            ui,
+        ]
+    return [str(PROJECT_ROOT / "run.sh"), "--ui", ui]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -43,11 +71,7 @@ def main() -> int:
         environment["TERMIN_SDK_SHADER_CACHE_ROOT"] = cache_root
         try:
             result = subprocess.run(
-                [
-                    str(PROJECT_ROOT / "run.sh"),
-                    "--ui",
-                    args.ui,
-                ],
+                production_run_command(args.ui),
                 cwd=PROJECT_ROOT,
                 env=environment,
                 capture_output=True,

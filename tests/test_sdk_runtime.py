@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 from zipfile import ZipFile
@@ -14,6 +15,7 @@ from diffusion_editor.sdk_runtime import (
     resolve_sdk,
     sdk_python_executable,
     termin_requirement_closure,
+    verify_application_environment,
     verify_installed,
     verify_installed_payloads,
 )
@@ -168,6 +170,38 @@ def test_installed_native_build_must_match_manifest(tmp_path: Path):
 
     with pytest.raises(SdkContractError, match="tgfx: installed"):
         verify_installed(contract, installed)
+
+
+def test_application_environment_sets_selected_sdk_before_payload_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    sdk = _make_sdk(tmp_path)
+    calls = []
+    monkeypatch.setattr(
+        "diffusion_editor.sdk_runtime.resolve_sdk",
+        lambda: sdk,
+    )
+    monkeypatch.setattr(
+        "diffusion_editor.sdk_runtime.load_contract",
+        lambda root: calls.append(("contract", root)) or _load(sdk),
+    )
+    monkeypatch.setattr(
+        "diffusion_editor.sdk_runtime.verify_installed",
+        lambda contract: calls.append(("installed", contract.root)),
+    )
+    monkeypatch.setattr(
+        "diffusion_editor.sdk_runtime.verify_installed_payloads",
+        lambda contract: calls.append(("payloads", contract.root)),
+    )
+    monkeypatch.delenv("TERMIN_SDK", raising=False)
+
+    assert verify_application_environment() == sdk
+    assert calls == [
+        ("contract", sdk),
+        ("installed", sdk),
+        ("payloads", sdk),
+    ]
+    assert os.environ["TERMIN_SDK"] == str(sdk)
 
 
 def test_saved_sdk_path_is_resolved_without_ambient_environment(

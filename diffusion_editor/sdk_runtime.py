@@ -198,8 +198,8 @@ def resolve_sdk(
 
     if candidate is None:
         raise SdkContractError(
-            "Termin SDK not found. Set TERMIN_SDK or run ./install-deps.sh with "
-            "TERMIN_SDK pointing at a complete SDK."
+            "Termin SDK not found. Set TERMIN_SDK or run the platform installer "
+            "(./install-deps.sh or .\\install-deps.ps1) with a complete SDK."
         )
     try:
         return _validate_sdk_layout(candidate)
@@ -620,7 +620,7 @@ def verify_installed_payloads(
     if errors:
         raise SdkContractError(
             "Termin Python payloads do not match the selected SDK; "
-            "run ./install-deps.sh to refresh the venv:\n- "
+            "run install-deps.sh/install-deps.ps1 to refresh the venv:\n- "
             + "\n- ".join(errors)
         )
 
@@ -693,6 +693,17 @@ def verify_imports(contract: SdkContract) -> None:
         _require_module_from_runtime_environment(module)
 
 
+def verify_application_environment() -> Path:
+    """Reject ABI/SDK/payload drift before either production UI host imports."""
+
+    root = resolve_sdk()
+    os.environ["TERMIN_SDK"] = str(root)
+    contract = load_contract(root)
+    verify_installed(contract)
+    verify_installed_payloads(contract)
+    return root
+
+
 def write_state(root: Path, state_file: Path = DEFAULT_STATE_FILE) -> None:
     root = _validate_sdk_layout(root)
     state_file.parent.mkdir(parents=True, exist_ok=True)
@@ -748,7 +759,10 @@ def build_parser() -> argparse.ArgumentParser:
     add_sdk_options(verify)
     verify.add_argument("--imports", action="store_true", help="also import native runtime modules")
 
-    save = subparsers.add_parser("write-state", help="persist the selected SDK for run.sh")
+    save = subparsers.add_parser(
+        "write-state",
+        help="persist the selected SDK for the platform run script",
+    )
     add_sdk_options(save)
     return parser
 

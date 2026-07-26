@@ -5,12 +5,8 @@ from __future__ import annotations
 
 import importlib
 from importlib import metadata
-import os
 from pathlib import Path
 import sys
-
-if runtime_site := os.environ.get("DIFFUSION_EDITOR_QA_SITE_PACKAGES"):
-    sys.path.insert(0, runtime_site)
 
 from diffusion_editor.quality_gate import (
     WORKER_ONLY_DISTRIBUTIONS,

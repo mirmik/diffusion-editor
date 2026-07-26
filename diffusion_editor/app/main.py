@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 from collections.abc import Sequence
 
+from ..sdk_runtime import verify_application_environment
+
 
 UI_CHOICES = ("legacy", "native")
 DEFAULT_UI = "legacy"
@@ -40,6 +42,7 @@ def _run_native(path: str | None) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    verify_application_environment()
     if args.ui == "native":
         return _run_native(args.path)
     return _run_legacy(args.path)

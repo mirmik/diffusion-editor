@@ -1,6 +1,6 @@
 # CPython 3.14t dependency contract
 
-Status: 2026-07-24.
+Status: 2026-07-27.
 
 The editor UI process runs only on Termin's CPython 3.14t build and must keep
 `sys._is_gil_enabled() == False`. `install-deps.sh` therefore installs the main
@@ -28,6 +28,12 @@ Verified Linux x86_64 CPython 3.14t wheels:
 | Pillow | 12.3.0 | `cp314t` |
 | PyYAML | 6.0.3 | `cp314t`; imported through `tcgui` with the GIL disabled |
 | PySDL2 | 0.9.17 | pure Python |
+
+The same exact pins are required on Windows x86-64. `install-deps.ps1`
+accepts only wheels compatible with the SDK's `cp314t` ABI and uses the
+manifest-selected Termin closure from the Windows SDK wheelhouse. A regular
+`cp314-win_amd64` native wheel, an sdist fallback, or a DLL imported from a
+different SDK is a hard failure.
 
 `requirements-test.txt` is the exact build/test layer. `requirements.txt`
 includes both files for developer installs.

@@ -12,6 +12,12 @@ from diffusion_editor.app.native_main import _open_path
 
 def test_cli_defaults_to_legacy_and_dispatches_optional_path(monkeypatch):
     calls = []
+    verified = []
+    monkeypatch.setattr(
+        app_main,
+        "verify_application_environment",
+        lambda: verified.append("runtime"),
+    )
     monkeypatch.setattr(
         app_main,
         "_run_legacy",
@@ -31,6 +37,7 @@ def test_cli_defaults_to_legacy_and_dispatches_optional_path(monkeypatch):
         ("legacy", "image.png"),
         ("native", "project.deproj"),
     ]
+    assert verified == ["runtime", "runtime", "runtime"]
 
 
 def test_cli_rejects_unknown_ui():
@@ -38,6 +45,23 @@ def test_cli_rejects_unknown_ui():
         app_main.main(["--ui", "unknown"])
 
     assert exc_info.value.code == 2
+
+
+def test_cli_verifies_runtime_before_loading_selected_host(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        app_main,
+        "verify_application_environment",
+        lambda: calls.append("runtime"),
+    )
+    monkeypatch.setattr(
+        app_main,
+        "_run_native",
+        lambda _path: calls.append("native") or 0,
+    )
+
+    assert app_main.main(["--ui", "native"]) == 0
+    assert calls == ["runtime", "native"]
 
 
 def test_cli_and_native_host_import_without_legacy_ui():
