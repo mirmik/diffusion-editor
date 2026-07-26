@@ -137,14 +137,14 @@ def test_move_tool_updates_cpu_composite_before_mouse_up():
     assert canvas._image_dirty is True
 
 
-def test_move_tool_marks_gpu_compositor_dirty_before_mouse_up():
+def test_move_tool_recomposites_without_reupload_before_mouse_up():
     class FakeCompositor:
         def __init__(self):
-            self.marked_layer = None
+            self.composite_dirty_calls = 0
             self.composite_calls = 0
 
-        def mark_dirty(self, layer):
-            self.marked_layer = layer
+        def mark_composite_dirty(self):
+            self.composite_dirty_calls += 1
 
         def composite(self):
             self.composite_calls += 1
@@ -164,7 +164,7 @@ def test_move_tool_marks_gpu_compositor_dirty_before_mouse_up():
 
     assert stack.active_layer.x == 3
     assert stack.active_layer.y == 1
-    assert fake.marked_layer is stack.active_layer
+    assert fake.composite_dirty_calls == 1
     assert fake.composite_calls == 1
     assert canvas._composite_stale is True
 

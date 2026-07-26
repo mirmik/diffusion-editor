@@ -57,8 +57,17 @@ class CanvasToolContext:
     def union_rect(self, a: Rect | None, b: Rect | None) -> Rect | None:
         return union_rect(a, b)
 
-    def mark_layer_dirty(self, layer: Layer, rect: Rect | None = None) -> None:
-        self._layer_stack.mark_layer_dirty(layer, rect)
+    def mark_layer_dirty(
+            self,
+            layer: Layer,
+            rect: Rect | None = None,
+            *,
+            pixels_changed: bool = True) -> None:
+        self._layer_stack.mark_layer_dirty(
+            layer,
+            rect,
+            pixels_changed=pixels_changed,
+        )
 
     def clip_layer_local_rect(
             self,
@@ -116,7 +125,11 @@ class CanvasToolContext:
     def end_paint_stroke(self, layer: Layer | None) -> None:
         dirty = self._paint_stroke.live_dirty_rect
         if layer is not None and dirty is not None:
-            self.mark_layer_dirty(layer, layer.local_rect_to_canvas(dirty))
+            self.mark_layer_dirty(
+                layer,
+                layer.local_rect_to_canvas(dirty),
+                pixels_changed=False,
+            )
         self._paint_stroke.clear()
         self._overlay_bridge.clear()
         self._overlay_bridge.rebuild()

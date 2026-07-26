@@ -121,13 +121,15 @@ class CanvasCompositeBridge:
             canvas_rect: Rect) -> None:
         if not self._layer_stack.is_layer_visible_for_composition(layer):
             self._layer_stack.mark_layer_dirty(layer, canvas_rect)
-            if not self.using_gpu:
+            if self.using_gpu:
+                self._gpu_compositor.mark_dirty(layer, local_rect)
+            else:
                 self._rebuild_cpu_composite()
             return
 
         self._layer_stack.mark_layer_dirty(layer, canvas_rect)
         if self.using_gpu:
-            self._gpu_compositor.mark_dirty(layer)
+            self._gpu_compositor.mark_dirty(layer, local_rect)
             self._gpu_compositor.composite()
             self._composite_stale = True
             return
@@ -137,9 +139,13 @@ class CanvasCompositeBridge:
         self._blend_layer_rect(layer, local_rect, canvas_rect)
 
     def refresh_layer_transform(self, layer: Layer, dirty_canvas_rect: Rect) -> None:
-        self._layer_stack.mark_layer_dirty(layer, dirty_canvas_rect)
+        self._layer_stack.mark_layer_dirty(
+            layer,
+            dirty_canvas_rect,
+            pixels_changed=False,
+        )
         if self.using_gpu:
-            self._gpu_compositor.mark_dirty(layer)
+            self._gpu_compositor.mark_composite_dirty()
             self._gpu_compositor.composite()
             self._composite_stale = True
             return

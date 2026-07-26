@@ -34,6 +34,7 @@ class Layer:
         self.children: list['Layer'] = []
         self.parent: 'Layer | None' = None
         self.patch_rect: tuple[int, int, int, int] | None = None
+        self._pixel_revision = 0
         if image is not None:
             arr = np.ascontiguousarray(image.astype(np.uint8))
         else:
@@ -75,6 +76,13 @@ class Layer:
     @property
     def bounds(self) -> tuple[int, int, int, int]:
         return (self.x, self.y, self.x + self.width, self.y + self.height)
+
+    @property
+    def pixel_revision(self) -> int:
+        return self._pixel_revision
+
+    def mark_pixels_changed(self) -> None:
+        self._pixel_revision += 1
 
     def local_rect_to_canvas(self, rect: tuple[int, int, int, int]
                              ) -> tuple[int, int, int, int]:
@@ -155,6 +163,7 @@ class Layer:
         layer.y = int(d.get("y", 0))
         patch_rect = d.get("patch_rect")
         layer.patch_rect = tuple(patch_rect) if patch_rect else None
+        layer._pixel_revision = 0
         layer.content = DenseTileGrid.from_array(arr, tile_size=tile_size)
         layer.image = layer.content.array
         layer.children = []

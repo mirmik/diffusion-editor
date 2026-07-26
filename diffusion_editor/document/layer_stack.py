@@ -211,14 +211,14 @@ class LayerStack:
 
     def set_visibility(self, layer: Layer, visible: bool):
         layer.visible = visible
-        self.mark_layer_dirty(layer)
+        self.mark_layer_dirty(layer, pixels_changed=False)
         if self.on_changed:
             self.on_changed()
 
     def set_opacity(self, layer: Layer, opacity: float):
         """Set layer opacity with prefix invalidation."""
         layer.opacity = opacity
-        self.mark_layer_dirty(layer)
+        self.mark_layer_dirty(layer, pixels_changed=False)
         if self.on_changed:
             self.on_changed()
 
@@ -286,7 +286,7 @@ class LayerStack:
         layer.y = int(y)
         new_bounds = layer.bounds
         dirty = self._union_rect(old_bounds, new_bounds)
-        self.mark_layer_dirty(layer, dirty)
+        self.mark_layer_dirty(layer, dirty, pixels_changed=False)
         if self.on_changed:
             self.on_changed()
 
@@ -324,8 +324,15 @@ class LayerStack:
         """Mark a single layer as dirty and clear its cache."""
         self._renderer.invalidate_tiles({layer}, tiles=None)
 
-    def mark_layer_dirty(self, layer: Layer, rect: tuple[int, int, int, int] | None = None):
+    def mark_layer_dirty(
+            self,
+            layer: Layer,
+            rect: tuple[int, int, int, int] | None = None,
+            *,
+            pixels_changed: bool = True):
         """Public: call when a layer's content/visibility/opacity changed."""
+        if pixels_changed:
+            layer.mark_pixels_changed()
         affected = self._collect_affected_layers(layer)
         if not affected:
             self._rebuild_caches()

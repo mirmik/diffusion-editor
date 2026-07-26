@@ -77,10 +77,12 @@ def test_bridge_refresh_modified_layer_rect_uses_gpu_compositor_when_enabled():
     class FakeCompositor:
         def __init__(self):
             self.marked_layer = None
+            self.marked_rect = None
             self.composite_calls = 0
 
-        def mark_dirty(self, layer):
+        def mark_dirty(self, layer, rect=None):
             self.marked_layer = layer
+            self.marked_rect = rect
 
         def composite(self):
             self.composite_calls += 1
@@ -104,6 +106,38 @@ def test_bridge_refresh_modified_layer_rect_uses_gpu_compositor_when_enabled():
     )
 
     assert fake.marked_layer is layer
+    assert fake.marked_rect == (0, 0, 1, 1)
+    assert fake.composite_calls == 1
+    assert bridge.composite_stale is True
+
+
+def test_bridge_layer_transform_recomposites_without_pixel_upload():
+    class FakeCompositor:
+        def __init__(self):
+            self.composite_dirty_calls = 0
+            self.composite_calls = 0
+
+        def mark_composite_dirty(self):
+            self.composite_dirty_calls += 1
+
+        def composite(self):
+            self.composite_calls += 1
+
+    stack = LayerStack(tile_size=8)
+    stack.init_from_image(_rgba(8, 8))
+    layer = stack.active_layer
+    bridge = CanvasCompositeBridge(
+        stack,
+        gpu_compositing=False,
+        set_image=lambda _image: None,
+    )
+    fake = FakeCompositor()
+    bridge.gpu_compositing = True
+    bridge.gpu_compositor = fake
+
+    bridge.refresh_layer_transform(layer, layer.bounds)
+
+    assert fake.composite_dirty_calls == 1
     assert fake.composite_calls == 1
     assert bridge.composite_stale is True
 
@@ -133,3 +167,38 @@ def test_bridge_hidden_layer_refresh_falls_back_to_cpu_without_gpu_compositor():
 
     assert images[-1] is bridge.composite
     assert bridge.composite[0, 0].tolist() == [1, 2, 3, 255]
+
+
+def test_bridge_hidden_gpu_layer_accumulates_region_without_compositing():
+    class FakeCompositor:
+        def __init__(self):
+            self.marked = []
+            self.composite_calls = 0
+
+        def mark_dirty(self, layer, rect=None):
+            self.marked.append((layer, rect))
+
+        def composite(self):
+            self.composite_calls += 1
+
+    stack = LayerStack(tile_size=8)
+    stack.init_from_image(_rgba(8, 8))
+    layer = stack.active_layer
+    layer.visible = False
+    bridge = CanvasCompositeBridge(
+        stack,
+        gpu_compositing=False,
+        set_image=lambda _image: None,
+    )
+    fake = FakeCompositor()
+    bridge.gpu_compositing = True
+    bridge.gpu_compositor = fake
+
+    bridge.refresh_modified_layer_rect(
+        layer,
+        (2, 1, 4, 3),
+        (2, 1, 4, 3),
+    )
+
+    assert fake.marked == [(layer, (2, 1, 4, 3))]
+    assert fake.composite_calls == 0

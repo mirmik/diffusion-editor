@@ -21,6 +21,8 @@ from tgfx._tgfx_native import (
     tc_shader_ensure_tgfx2,
 )
 
+Rect = tuple[int, int, int, int]
+
 # ---------------------------------------------------------------------------
 # Scoped Slang sources
 # ---------------------------------------------------------------------------
@@ -178,7 +180,9 @@ class GPUCompositor:
         # Per-layer GPU textures, keyed by ``id(layer)`` — Tgfx2TextureHandle.
         self._layer_textures: dict[int, Tgfx2TextureHandle] = {}
         self._layer_tex_size: dict[int, tuple[int, int]] = {}
+        self._layer_tex_revision: dict[int, int] = {}
         self._dirty_layers: set[int] = set()
+        self._dirty_layer_regions: dict[int, Rect] = {}
 
         # Offscreen color attachments (created lazily on first composite).
         self._main_tex: Tgfx2TextureHandle | None = None
@@ -297,20 +301,53 @@ class GPUCompositor:
         """(width, height) of the current display texture, or (0, 0)."""
         return (self._fbo_w, self._fbo_h)
 
-    def mark_dirty(self, layer: Layer | None = None):
-        """Mark a layer (or the whole stack) for re-upload + re-composite."""
+    def mark_dirty(
+            self,
+            layer: Layer | None = None,
+            rect: Rect | None = None) -> None:
+        """Mark layer pixels for upload and request a new composite.
+
+        ``rect`` uses layer-local texture coordinates. A full dirty mark
+        dominates any partial region accumulated for the same layer.
+        """
         self._dirty = True
-        if layer is not None:
-            self._dirty_layers.add(id(layer))
-        else:
+        if layer is None:
             for l in self._stack._all_layers_flat():
-                self._dirty_layers.add(id(l))
+                lid = id(l)
+                self._dirty_layers.add(lid)
+                self._dirty_layer_regions.pop(lid, None)
+            return
+
+        lid = id(layer)
+        if rect is None:
+            self._dirty_layers.add(lid)
+            self._dirty_layer_regions.pop(lid, None)
+            return
+        if lid in self._dirty_layers:
+            return
+
+        x0, y0, x1, y1 = rect
+        clipped = (
+            max(0, x0),
+            max(0, y0),
+            min(layer.width, x1),
+            min(layer.height, y1),
+        )
+        if clipped[2] <= clipped[0] or clipped[3] <= clipped[1]:
+            return
+        previous = self._dirty_layer_regions.get(lid)
+        self._dirty_layer_regions[lid] = (
+            clipped if previous is None else self._union_rect(previous, clipped)
+        )
+
+    def mark_composite_dirty(self) -> None:
+        """Request recomposition without re-uploading unchanged layer pixels."""
+        self._dirty = True
 
     def rebuild(self):
-        """Full rebuild after structural change (add/remove/reorder)."""
+        """Recompose after model changes; revisions decide pixel uploads."""
         self._cleanup_stale_textures()
         self._dirty = True
-        self._dirty_layers = {id(l) for l in self._stack._all_layers_flat()}
 
     @property
     def is_dirty(self) -> bool:
@@ -353,7 +390,9 @@ class GPUCompositor:
             # Nothing was ever created.
             self._layer_textures.clear()
             self._layer_tex_size.clear()
+            self._layer_tex_revision.clear()
             self._dirty_layers.clear()
+            self._dirty_layer_regions.clear()
             self._temp_texs.clear()
             return
 
@@ -361,7 +400,9 @@ class GPUCompositor:
             self._graphics.destroy_texture(tex)
         self._layer_textures.clear()
         self._layer_tex_size.clear()
+        self._layer_tex_revision.clear()
         self._dirty_layers.clear()
+        self._dirty_layer_regions.clear()
 
         for tex in self._temp_texs:
             self._graphics.destroy_texture(tex)
@@ -467,24 +508,69 @@ class GPUCompositor:
     def _sync_dirty_textures(self):
         for layer in self._stack._all_layers_flat():
             lid = id(layer)
-            img = np.ascontiguousarray(layer.image).reshape(-1)
             w, h = layer.width, layer.height
+            revision = int(getattr(layer, "pixel_revision", 0))
             if lid not in self._layer_textures:
+                img = np.ascontiguousarray(layer.image).reshape(-1)
                 tex = self._graphics.create_texture_rgba8(w, h, img)
                 self._layer_textures[lid] = tex
                 self._layer_tex_size[lid] = (w, h)
-                self._dirty_layers.discard(lid)
-            elif lid in self._dirty_layers:
-                prev_w, prev_h = self._layer_tex_size.get(lid, (0, 0))
-                if prev_w == w and prev_h == h:
-                    self._graphics.upload_texture(self._layer_textures[lid], img)
-                else:
-                    # Size changed — reallocate.
-                    self._graphics.destroy_texture(self._layer_textures[lid])
-                    tex = self._graphics.create_texture_rgba8(w, h, img)
-                    self._layer_textures[lid] = tex
-                    self._layer_tex_size[lid] = (w, h)
-                self._dirty_layers.discard(lid)
+                self._layer_tex_revision[lid] = revision
+                self._clear_layer_dirty(lid)
+                continue
+
+            prev_w, prev_h = self._layer_tex_size.get(lid, (0, 0))
+            if prev_w != w or prev_h != h:
+                img = np.ascontiguousarray(layer.image).reshape(-1)
+                self._graphics.destroy_texture(self._layer_textures[lid])
+                tex = self._graphics.create_texture_rgba8(w, h, img)
+                self._layer_textures[lid] = tex
+                self._layer_tex_size[lid] = (w, h)
+                self._layer_tex_revision[lid] = revision
+                self._clear_layer_dirty(lid)
+                continue
+
+            if (
+                    lid in self._dirty_layers
+                    or (
+                        lid not in self._dirty_layer_regions
+                        and self._layer_tex_revision.get(lid) != revision
+                    )):
+                img = np.ascontiguousarray(layer.image).reshape(-1)
+                self._graphics.upload_texture(self._layer_textures[lid], img)
+                self._layer_tex_revision[lid] = revision
+                self._clear_layer_dirty(lid)
+                continue
+
+            rect = self._dirty_layer_regions.pop(lid, None)
+            if rect is None:
+                continue
+            x0, y0, x1, y1 = rect
+            region = np.ascontiguousarray(
+                layer.image[y0:y1, x0:x1],
+            ).reshape(-1)
+            self._graphics.upload_texture_region(
+                self._layer_textures[lid],
+                x0,
+                y0,
+                x1 - x0,
+                y1 - y0,
+                region,
+            )
+            self._layer_tex_revision[lid] = revision
+
+    def _clear_layer_dirty(self, lid: int) -> None:
+        self._dirty_layers.discard(lid)
+        self._dirty_layer_regions.pop(lid, None)
+
+    @staticmethod
+    def _union_rect(first: Rect, second: Rect) -> Rect:
+        return (
+            min(first[0], second[0]),
+            min(first[1], second[1]),
+            max(first[2], second[2]),
+            max(first[3], second[3]),
+        )
 
     def _cleanup_stale_textures(self):
         live_ids = {id(l) for l in self._stack._all_layers_flat()}
@@ -496,7 +582,8 @@ class GPUCompositor:
                 self._graphics.destroy_texture(self._layer_textures[lid])
             del self._layer_textures[lid]
             self._layer_tex_size.pop(lid, None)
-            self._dirty_layers.discard(lid)
+            self._layer_tex_revision.pop(lid, None)
+            self._clear_layer_dirty(lid)
 
     # ------------------------------------------------------------------
     # Compositing helpers

@@ -82,7 +82,7 @@ class EraserTool(CanvasStrokeTool):
 
     def end(self, context, layer):
         if layer is not None:
-            context.mark_layer_dirty(layer)
+            context.mark_layer_dirty(layer, pixels_changed=False)
 
 
 class SmudgeTool(CanvasStrokeTool):
@@ -111,7 +111,10 @@ class SmudgeTool(CanvasStrokeTool):
     def end(self, context, layer):
         if layer is not None and self._dirty_rect is not None:
             context.mark_layer_dirty(
-                layer, layer.local_rect_to_canvas(self._dirty_rect))
+                layer,
+                layer.local_rect_to_canvas(self._dirty_rect),
+                pixels_changed=False,
+            )
         self._dirty_rect = None
         context.clear_smudge()
 
