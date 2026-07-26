@@ -7,6 +7,8 @@ from .threaded_lifecycle import EngineTaskQueue
 
 
 class SegmentationEngine:
+    supports_job_ids = True
+
     def __init__(self, client: SegmentationProcessClient | None = None):
         self._client = client or SegmentationProcessClient()
         self._tasks = EngineTaskQueue()
@@ -19,7 +21,11 @@ class SegmentationEngine:
     def is_busy(self) -> bool:
         return self._tasks.is_busy
 
-    def submit_request(self, request: SegmentationRequest):
+    def submit_request(
+            self,
+            request: SegmentationRequest,
+            *,
+            job_id: str | None = None):
         return self._tasks.submit(
             "segmentation",
             lambda cancel: self._run(
@@ -27,6 +33,7 @@ class SegmentationEngine:
                 request.invert,
                 cancel,
             ),
+            job_id=job_id,
             name="segmentation-inference",
             on_error=lambda _exc: log.exception("Segmentation failed"),
         )

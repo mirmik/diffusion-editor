@@ -1,6 +1,7 @@
 import numpy as np
 
 from diffusion_editor.canvas.canvas_composite import CanvasCompositeBridge
+from diffusion_editor.document.layer import Layer
 from diffusion_editor.document.layer_stack import LayerStack
 
 
@@ -49,6 +50,88 @@ def test_bridge_refresh_modified_layer_rect_updates_cpu_composite_region():
 
     assert bridge.composite[2, 3].tolist() == [100, 50, 25, 255]
     assert images[-1] is bridge.composite
+
+
+def test_cpu_partial_composite_matches_full_with_upper_layer_and_group_opacity():
+    stack = LayerStack(tile_size=4)
+    stack._width = 8
+    stack._height = 8
+    bottom = Layer("bottom", 8, 8, _rgba(8, 8, (5, 20, 180, 255)))
+    group = Layer("group", 8, 8, _rgba(8, 8, (170, 10, 20, 96)))
+    target = Layer("target", 8, 8, _rgba(8, 8, (20, 190, 40, 128)))
+    group.add_child(target)
+    group.opacity = 0.35
+    upper = Layer("upper", 8, 8, _rgba(8, 8, (230, 210, 10, 80)))
+    stack._layers = [upper, group, bottom]
+    stack._active_layer = target
+    stack._rebuild_caches()
+
+    updated_regions = []
+    bridge = CanvasCompositeBridge(
+        stack,
+        gpu_compositing=False,
+        set_image=lambda _image: None,
+        update_image_region=lambda x, y, image: updated_regions.append(
+            (x, y, image.copy())),
+    )
+    bridge.update_composite()
+
+    target.image[2:4, 3:5] = (180, 30, 210, 72)
+    bridge.refresh_modified_layer_rect(
+        target,
+        (3, 2, 5, 4),
+        (3, 2, 5, 4),
+    )
+
+    np.testing.assert_array_equal(bridge.composite, stack.composite())
+    assert updated_regions[-1][0:2] == (3, 2)
+    np.testing.assert_array_equal(
+        updated_regions[-1][2],
+        stack.composite()[2:4, 3:5],
+    )
+
+
+def test_cpu_mask_erase_preview_uses_canonical_composition_and_restores_layer():
+    stack = LayerStack(tile_size=4)
+    stack.init_from_image(_rgba(8, 8, (10, 30, 200, 255)))
+    target_image = _rgba(8, 8, (220, 30, 20, 180))
+    stack.add_layer("target", target_image)
+    target = stack.active_layer
+    target.opacity = 0.5
+    stack.add_layer("upper", _rgba(8, 8, (20, 220, 40, 96)))
+    original = target.image.copy()
+
+    bridge = CanvasCompositeBridge(
+        stack,
+        gpu_compositing=False,
+        set_image=lambda _image: None,
+    )
+    bridge.update_composite()
+
+    erase = np.full((2, 2), 0.75, dtype=np.float32)
+    bridge.preview_erased_layer_rect(
+        target,
+        (3, 2, 5, 4),
+        (3, 2, 5, 4),
+        erase,
+    )
+    preview_result = bridge.composite.copy()
+
+    # Build the canonical expected result using the same temporary source
+    # pixels; the bridge itself must leave the document unchanged.
+    expected_alpha = np.clip(
+        original[2:4, 3:5, 3].astype(np.float32) * (1.0 - erase),
+        0,
+        255,
+    ).astype(np.uint8)
+    target.image[2:4, 3:5, 3] = expected_alpha
+    stack.mark_layer_dirty(target, (3, 2, 5, 4), pixels_changed=False)
+    expected = stack.composite()
+    target.image[:] = original
+    stack.mark_layer_dirty(target, (3, 2, 5, 4), pixels_changed=False)
+
+    np.testing.assert_array_equal(preview_result, expected)
+    np.testing.assert_array_equal(target.image, original)
 
 
 def test_bridge_refresh_layer_transform_rebuilds_cpu_composite():

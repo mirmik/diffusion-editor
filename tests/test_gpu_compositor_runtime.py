@@ -1,9 +1,11 @@
 from types import SimpleNamespace
+import struct
 
 import numpy as np
 import pytest
 
 from diffusion_editor.canvas.gpu_compositor import GPUCompositor
+from diffusion_editor.canvas import gpu_compositor as gpu_compositor_module
 from diffusion_editor.document.layer_stack import LayerStack
 
 
@@ -209,6 +211,31 @@ def test_composite_only_dirty_does_not_upload_layer_pixels():
     compositor._sync_dirty_textures()
 
     assert graphics.calls == []
+
+
+def test_group_texture_is_declared_premultiplied_for_opacity_draw():
+    ctx = _FakeContext()
+    compositor = GPUCompositor.__new__(GPUCompositor)
+    compositor._ctx = ctx
+    compositor._quad_verts = np.zeros((6, 7), dtype=np.float32)
+
+    compositor._draw_texture_quad(
+        "group-texture",
+        0.5,
+        source_premultiplied=True,
+    )
+
+    uniform_calls = [
+        args for name, args, _ in ctx.calls
+        if name == "bind_uniform_by_name"
+    ]
+    assert len(uniform_calls) == 1
+    opacity, premultiplied = struct.unpack(
+        gpu_compositor_module._COMPOSITE_PARAMS_FMT,
+        uniform_calls[0][1],
+    )
+    assert opacity == pytest.approx(0.5)
+    assert premultiplied == pytest.approx(1.0)
 
 
 def test_metadata_only_rebuild_does_not_upload_unchanged_layer_pixels():

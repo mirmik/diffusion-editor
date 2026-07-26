@@ -27,6 +27,7 @@ from ..generation.patch_resolver import source_patch_at_center
 from .application import EditorApplication, ShutdownPhase
 from .canvas_controls import CanvasControlsCoordinator
 from .canvas_status import CanvasStatusCoordinator
+from .editor_commands import EditorCommandCoordinator
 from .generation_panels import GenerationPanelsCoordinator
 from .native_canvas_controls import NativeCanvasControls
 from .native_generation_panels import NativeGenerationPanels
@@ -37,6 +38,7 @@ from .native_agent_chat import NativeAgentChatPanel
 from .layer_tree import LayerTreeCoordinator
 from .native_layer_panel import NativeLayerPanel
 from .native_shell import CommandHandler, NativeEditorView
+from ..canvas.edit_transactions import CanvasEditTransactionCoordinator
 from ..canvas.native_editor_canvas import NativeEditorCanvas
 
 
@@ -255,6 +257,8 @@ class NativeEditorRoot:
         self.canvas_controls = None
         self.canvas_controls_coordinator = None
         self.canvas_status_coordinator = None
+        self.canvas_edit_coordinator = None
+        self.command_coordinator = None
         self.generation_panels = None
         self.generation_panels_coordinator = None
         self.layer_panel = None
@@ -302,6 +306,27 @@ class NativeEditorRoot:
                     ShutdownPhase.VIEW_WORKERS,
                     "native-canvas-status",
                     self.canvas_status_coordinator.close,
+                )
+                self.canvas_edit_coordinator = (
+                    CanvasEditTransactionCoordinator(
+                        application.layer_stack,
+                        application.document,
+                        history_replaying=(
+                            lambda: application.history_replaying),
+                        on_history_changed=self._refresh_commands,
+                        on_mutation_begin=application.mark_external_mutation,
+                        cancel_interaction=(
+                            self.canvas.cancel_pointer_interaction),
+                    )
+                )
+                self.canvas_edit_coordinator.bind(self.canvas.controller)
+                application.add_snapshot_listener(
+                    self._on_snapshot_applied
+                )
+                application.register_shutdown_resource(
+                    ShutdownPhase.VIEW_WORKERS,
+                    "native-canvas-edit-transactions",
+                    self.canvas_edit_coordinator.close,
                 )
                 mount_controls = getattr(
                     self.view, "mount_canvas_controls", None)
@@ -364,6 +389,7 @@ class NativeEditorRoot:
                         application.layer_stack,
                         application.document,
                         tool_factory=self._create_default_layer_tool,
+                        before_remove_layer=self._before_remove_layer,
                         before_detach_tool=self._before_detach_layer_tool,
                         set_status=application.set_status,
                     )
@@ -441,6 +467,18 @@ class NativeEditorRoot:
                 for command_id, handler in (
                         self.dialog_coordinator.command_handlers.items()):
                     self.view.set_command_handler(command_id, handler)
+                self.command_coordinator = EditorCommandCoordinator(
+                    application,
+                    fit_in_view=self.canvas.fit_in_view,
+                    request_remove_layer=(
+                        self.layer_panel.request_active_delete
+                        if self.layer_panel is not None else None
+                    ),
+                    before_mutation=self.canvas.cancel_pointer_interaction,
+                )
+                for command_id, handler in (
+                        self.command_coordinator.handlers.items()):
+                    self.view.set_command_handler(command_id, handler)
                 if command_handlers is not None:
                     for command_id, handler in command_handlers.items():
                         self.view.set_command_handler(command_id, handler)
@@ -460,6 +498,8 @@ class NativeEditorRoot:
             application.bind_view(self.view.ports())
             composition.request_repaint()
         except Exception:
+            if self.canvas_edit_coordinator is not None:
+                self.canvas_edit_coordinator.close()
             if self.dialog_coordinator is not None:
                 self.dialog_coordinator.close()
             if self.dialogs is not None:
@@ -536,6 +576,13 @@ class NativeEditorRoot:
                 self.application.segmentation_controller,
                 self.application.grounding_controller):
             controller.clear_pending_layer(layer)
+
+    def _before_remove_layer(self, layer: Layer) -> None:
+        for removed in (layer, *layer.all_descendants()):
+            self.application.invalidate_generation_jobs_for_layer(
+                removed.id,
+                "target layer was deleted",
+            )
 
     @classmethod
     def create_headless(
@@ -616,6 +663,7 @@ class NativeEditorRoot:
             self.agent_chat.poll()
         if self.canvas_status_coordinator is not None:
             self.canvas_status_coordinator.flush()
+        self._refresh_commands()
         rendered = bool(self.composition.render_frame())
         return NativeTickResult(
             dispatched=stats.executed,
@@ -624,6 +672,16 @@ class NativeEditorRoot:
             events=events,
             rendered=rendered,
         )
+
+    def _refresh_commands(self) -> None:
+        if self.command_coordinator is not None:
+            self.command_coordinator.refresh()
+
+    def _on_snapshot_applied(self) -> None:
+        if self.canvas_edit_coordinator is not None:
+            self.canvas_edit_coordinator.discard()
+        if self.canvas is not None:
+            self.canvas.cancel_pointer_interaction()
 
     def close(self) -> None:
         if self.closed:

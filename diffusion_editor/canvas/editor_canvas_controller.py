@@ -97,6 +97,7 @@ class EditorCanvasController:
         self._active_stroke_tool = self._stroke_tools[self._brush_tool_mode]
         self._selection_tool = SelectionPaintTool()
         self._edit_tool = None
+        self._edit_tool_started = False
 
         self.on_mouse_moved: Callable[[int, int], None] | None = None
         self.on_color_picked: Callable[[int, int, int, int], None] | None = None
@@ -109,6 +110,9 @@ class EditorCanvasController:
         self.on_edit_begin: Callable[[str, Layer | None, str], None] | None = None
         self.on_edit_end: (
             Callable[[Layer | None, str, Rect | None], None] | None
+        ) = None
+        self.on_edit_cancel: (
+            Callable[[Layer | None, str], None] | None
         ) = None
         self.on_brush_size_changed: Callable[[int], None] | None = None
 
@@ -123,6 +127,10 @@ class EditorCanvasController:
     @property
     def brush_tool_mode(self) -> BrushToolMode:
         return self._brush_tool_mode
+
+    @property
+    def pointer_interaction_active(self) -> bool:
+        return self._edit_session.active or self._rect_drags.dragging
 
     def refresh(self) -> None:
         if self._layer_stack.width <= 0 or self._layer_stack.height <= 0:
@@ -214,6 +222,8 @@ class EditorCanvasController:
             return
         if button != self.LEFT_BUTTON:
             return
+        if self.pointer_interaction_active:
+            self.pointer_cancel()
 
         layer = self._layer_stack.active_layer
         if layer is None:
@@ -259,6 +269,41 @@ class EditorCanvasController:
         if self._edit_session.active:
             self._finish_tool_edit()
 
+    def pointer_cancel(self) -> None:
+        rect_cancelled = self._rect_drags.cancel()
+        edit_cancelled = self._edit_session.active
+        errors: list[tuple[BaseException, object]] = []
+
+        def cleanup(callback) -> None:
+            try:
+                callback()
+            except BaseException as exc:
+                errors.append((exc, exc.__traceback__))
+
+        if edit_cancelled:
+            tool = self._edit_tool
+            layer = self._edit_session.layer
+            target = self._edit_session.target
+            if tool is not None and self._edit_tool_started:
+                cleanup(lambda: tool.end(self._tool_context, layer))
+            # Roll back persistent state before any presentation cleanup;
+            # GPU/overlay failures must never suppress the transaction owner.
+            if self.on_edit_cancel is not None:
+                cleanup(lambda: self.on_edit_cancel(layer, target or ""))
+            if target != "selection":
+                cleanup(self._overlay_bridge.clear)
+                cleanup(self._overlay_bridge.rebuild)
+            self._edit_tool = None
+            self._edit_tool_started = False
+            self._edit_session.clear()
+        if rect_cancelled or edit_cancelled:
+            cleanup(lambda: self._set_cursor(
+                "crosshair" if self._selection_mode else "default"))
+            cleanup(self._request_repaint)
+        if errors:
+            error, traceback = errors[0]
+            raise error.with_traceback(traceback)
+
     def annotations(self) -> tuple[CanvasAnnotation, ...]:
         result: list[CanvasAnnotation] = []
         layer = self._layer_stack.active_layer
@@ -273,7 +318,10 @@ class EditorCanvasController:
         return tuple(result)
 
     def dispose(self) -> None:
-        self._composite_bridge.dispose()
+        try:
+            self.pointer_cancel()
+        finally:
+            self._composite_bridge.dispose()
 
     def _can_edit_layer(self, layer: Layer | None) -> bool:
         return (
@@ -289,10 +337,18 @@ class EditorCanvasController:
             layer=layer,
             pos=(x, y),
         )
-        if self.on_edit_begin:
-            self.on_edit_begin(tool.label, layer, tool.target)
-        self._edit_session.add_dirty(
-            tool.begin(self._tool_context, layer, x, y))
+        try:
+            if self.on_edit_begin:
+                self.on_edit_begin(tool.label, layer, tool.target)
+            self._edit_tool_started = True
+            self._edit_session.add_dirty(
+                tool.begin(self._tool_context, layer, x, y))
+        except BaseException as exc:
+            try:
+                self.pointer_cancel()
+            except BaseException as cleanup_error:
+                raise exc from cleanup_error
+            raise
 
     def _move_tool_edit(self, x: int, y: int) -> None:
         tool = self._edit_tool
@@ -300,16 +356,26 @@ class EditorCanvasController:
             return
         layer = None
         if self._edit_session.target != "selection":
-            layer = self._layer_stack.active_layer
-            if layer is None:
+            layer = self._edit_session.layer
+            if (
+                    layer is None
+                    or self._layer_stack.find_layer_by_id(layer.id) is not layer):
+                self.pointer_cancel()
                 return
-        dirty = tool.move(
-            self._tool_context,
-            layer,
-            self._edit_session.last_pos,
-            x,
-            y,
-        )
+        try:
+            dirty = tool.move(
+                self._tool_context,
+                layer,
+                self._edit_session.last_pos,
+                x,
+                y,
+            )
+        except BaseException as exc:
+            try:
+                self.pointer_cancel()
+            except BaseException as cleanup_error:
+                raise exc from cleanup_error
+            raise
         self._edit_session.add_dirty(dirty)
         self._edit_session.move_to((x, y))
         self._request_repaint()
@@ -318,21 +384,39 @@ class EditorCanvasController:
         tool = self._edit_tool
         layer = None
         if self._edit_session.target != "selection":
-            layer = self._layer_stack.active_layer
-        if tool is not None:
-            tool.end(self._tool_context, layer)
-        if self._edit_session.target != "selection":
-            self._overlay_bridge.clear()
-            self._overlay_bridge.rebuild()
-        if self.on_edit_end:
-            self.on_edit_end(
-                self._edit_session.layer,
-                self._edit_session.target,
-                self._edit_session.dirty_rect,
-            )
-        self._edit_tool = None
-        self._edit_session.clear()
-        self._request_repaint()
+            layer = self._edit_session.layer
+            if (
+                    layer is None
+                    or self._layer_stack.find_layer_by_id(layer.id) is not layer):
+                self.pointer_cancel()
+                return
+        target = self._edit_session.target
+        dirty_rect = self._edit_session.dirty_rect
+        try:
+            if tool is not None and self._edit_tool_started:
+                tool.end(self._tool_context, layer)
+                self._edit_tool_started = False
+            if target != "selection":
+                self._overlay_bridge.clear()
+                self._overlay_bridge.rebuild()
+            if self.on_edit_end:
+                self.on_edit_end(
+                    self._edit_session.layer,
+                    target,
+                    dirty_rect,
+                )
+        except BaseException as exc:
+            try:
+                if self.on_edit_cancel is not None:
+                    self.on_edit_cancel(layer, target or "")
+            except BaseException as cleanup_error:
+                raise exc from cleanup_error
+            raise
+        finally:
+            self._edit_tool = None
+            self._edit_tool_started = False
+            self._edit_session.clear()
+            self._request_repaint()
 
     def _pick_color(self, x: int, y: int) -> None:
         if self._layer_stack.width == 0 or self._layer_stack.height == 0:

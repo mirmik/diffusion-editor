@@ -80,6 +80,7 @@ class EditorCanvas(Canvas):
         self._active_stroke_tool = self._stroke_tools[self._brush_tool_mode]
         self._selection_tool = SelectionPaintTool()
         self._edit_tool = None
+        self._edit_tool_started = False
 
         # Callbacks
         self.on_mouse_moved: callable = None
@@ -88,6 +89,7 @@ class EditorCanvas(Canvas):
         self.on_selection_rect_drawn: callable = None
         self.on_edit_begin: callable = None  # (label: str, layer: Layer, target: str)
         self.on_edit_end: callable = None  # (layer: Layer, target: str, dirty_rect)
+        self.on_edit_cancel: callable = None  # (layer: Layer, target: str)
 
         # Wire layer stack
         layer_stack.on_changed = self._on_stack_changed
@@ -248,6 +250,8 @@ class EditorCanvas(Canvas):
             return
 
         if button == MouseButton.LEFT:
+            if self._edit_session.active or self._rect_drags.dragging:
+                self.cancel_pointer_interaction()
             layer = self._layer_stack.active_layer
             if layer is None:
                 return
@@ -299,6 +303,39 @@ class EditorCanvas(Canvas):
         if self._edit_session.active:
             self._finish_tool_edit()
 
+    def cancel_pointer_interaction(self):
+        """Cancel a direct edit and let the transaction owner roll it back."""
+        rect_cancelled = self._rect_drags.cancel()
+        errors: list[tuple[BaseException, object]] = []
+
+        def cleanup(callback):
+            try:
+                callback()
+            except BaseException as exc:
+                errors.append((exc, exc.__traceback__))
+
+        if not self._edit_session.active:
+            if rect_cancelled:
+                self.cursor = "cross" if self._selection_mode else ""
+            return
+        tool = self._edit_tool
+        layer = self._edit_session.layer
+        target = self._edit_session.target
+        if tool is not None and self._edit_tool_started:
+            cleanup(lambda: tool.end(self._tool_context, layer))
+        if self.on_edit_cancel:
+            cleanup(lambda: self.on_edit_cancel(layer, target))
+        if target != "selection":
+            cleanup(self._overlay_bridge.clear)
+            cleanup(self._update_overlay)
+        self._edit_tool = None
+        self._edit_tool_started = False
+        self._edit_session.clear()
+        self.cursor = "cross" if self._selection_mode else ""
+        if errors:
+            error, traceback = errors[0]
+            raise error.with_traceback(traceback)
+
     def _begin_tool_edit(self, tool, layer, ix: int, iy: int):
         self._edit_tool = tool
         self._edit_session.begin(
@@ -307,9 +344,17 @@ class EditorCanvas(Canvas):
             layer=layer,
             pos=(ix, iy),
         )
-        if self.on_edit_begin:
-            self.on_edit_begin(tool.label, layer, tool.target)
-        dirty = tool.begin(self._tool_context, layer, ix, iy)
+        try:
+            if self.on_edit_begin:
+                self.on_edit_begin(tool.label, layer, tool.target)
+            self._edit_tool_started = True
+            dirty = tool.begin(self._tool_context, layer, ix, iy)
+        except BaseException as exc:
+            try:
+                self.cancel_pointer_interaction()
+            except BaseException as cleanup_error:
+                raise exc from cleanup_error
+            raise
         self._edit_session.add_dirty(dirty)
 
     def _move_tool_edit(self, ix: int, iy: int):
@@ -318,16 +363,26 @@ class EditorCanvas(Canvas):
             return
         layer = None
         if self._edit_session.target != "selection":
-            layer = self._layer_stack.active_layer
-            if layer is None:
+            layer = self._edit_session.layer
+            if (
+                    layer is None
+                    or self._layer_stack.find_layer_by_id(layer.id) is not layer):
+                self.cancel_pointer_interaction()
                 return
-        dirty = tool.move(
-            self._tool_context,
-            layer,
-            self._edit_session.last_pos,
-            ix,
-            iy,
-        )
+        try:
+            dirty = tool.move(
+                self._tool_context,
+                layer,
+                self._edit_session.last_pos,
+                ix,
+                iy,
+            )
+        except BaseException as exc:
+            try:
+                self.cancel_pointer_interaction()
+            except BaseException as cleanup_error:
+                raise exc from cleanup_error
+            raise
         self._edit_session.add_dirty(dirty)
         self._edit_session.move_to((ix, iy))
 
@@ -335,20 +390,38 @@ class EditorCanvas(Canvas):
         tool = self._edit_tool
         layer = None
         if self._edit_session.target != "selection":
-            layer = self._layer_stack.active_layer
-        if tool is not None:
-            tool.end(self._tool_context, layer)
-        if self._edit_session.target != "selection":
-            self._overlay_bridge.clear()
-            self._update_overlay()
-        if self.on_edit_end:
-            self.on_edit_end(
-                self._edit_session.layer,
-                self._edit_session.target,
-                self._edit_session.dirty_rect,
-            )
-        self._edit_tool = None
-        self._edit_session.clear()
+            layer = self._edit_session.layer
+            if (
+                    layer is None
+                    or self._layer_stack.find_layer_by_id(layer.id) is not layer):
+                self.cancel_pointer_interaction()
+                return
+        target = self._edit_session.target
+        dirty_rect = self._edit_session.dirty_rect
+        try:
+            if tool is not None and self._edit_tool_started:
+                tool.end(self._tool_context, layer)
+                self._edit_tool_started = False
+            if target != "selection":
+                self._overlay_bridge.clear()
+                self._update_overlay()
+            if self.on_edit_end:
+                self.on_edit_end(
+                    self._edit_session.layer,
+                    target,
+                    dirty_rect,
+                )
+        except BaseException as exc:
+            try:
+                if self.on_edit_cancel:
+                    self.on_edit_cancel(layer, target or "")
+            except BaseException as cleanup_error:
+                raise exc from cleanup_error
+            raise
+        finally:
+            self._edit_tool = None
+            self._edit_tool_started = False
+            self._edit_session.clear()
 
     def _pick_color(self, ix: int, iy: int):
         if self._layer_stack.width == 0 or self._layer_stack.height == 0:
@@ -459,4 +532,7 @@ class EditorCanvas(Canvas):
 
     def dispose(self):
         """Release GPU resources held by the canvas compositor."""
-        self._composite_bridge.dispose()
+        try:
+            self.cancel_pointer_interaction()
+        finally:
+            self._composite_bridge.dispose()

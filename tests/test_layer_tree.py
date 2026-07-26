@@ -36,8 +36,8 @@ def test_layer_tree_projects_nested_stable_ids_and_restores_callback():
     stack.add_layer("Group")
     group = stack.active_layer
     child = Layer("Child", stack.width, stack.height)
-    group.add_child(child)
-    stack.active_layer = child
+    stack.insert_layer(child)
+    stack.move_layer(child, group, 0)
     calls = []
     previous = lambda: calls.append("changed")
     stack.on_changed = previous
@@ -103,8 +103,8 @@ def test_layer_tree_moves_across_tree_and_rejects_cycles_and_stale_ids():
     stack.add_layer("Group")
     group = stack.active_layer
     child = Layer("Child", stack.width, stack.height)
-    group.add_child(child)
-    stack.active_layer = child
+    stack.insert_layer(child)
+    stack.move_layer(child, group, 0)
     coordinator = LayerTreeCoordinator(stack, service)
 
     coordinator.handle_intent(_intent(
@@ -130,7 +130,7 @@ def test_layer_tree_moves_across_tree_and_rejects_cycles_and_stale_ids():
         target_id=group.id,
         position=LayerDropPosition.AFTER,
     ))
-    assert stack.layers == [group]
+    assert stack.layers == (group,)
 
     coordinator.handle_intent(_intent(
         LayerTreeAction.MOVE,
@@ -138,7 +138,7 @@ def test_layer_tree_moves_across_tree_and_rejects_cycles_and_stale_ids():
         position=LayerDropPosition.ROOT,
     ))
     assert child.parent is None
-    assert stack.layers == [group, child]
+    assert stack.layers == (group, child)
 
 
 def test_layer_tree_attach_detach_uses_injected_tool_boundary():
@@ -187,12 +187,13 @@ def test_layer_tree_does_not_remove_the_only_root_subtree():
     stack, service = _stack_and_service()
     root = stack.active_layer
     child = Layer("Child", stack.width, stack.height)
-    root.add_child(child)
+    stack.insert_layer(child)
+    stack.move_layer(child, root, 0)
     stack.active_layer = root
     coordinator = LayerTreeCoordinator(stack, service)
 
     assert not coordinator.state.can_remove
     coordinator.handle_intent(_intent(LayerTreeAction.REMOVE, root))
 
-    assert stack.layers == [root]
-    assert root.children == [child]
+    assert stack.layers == (root,)
+    assert root.children == (child,)

@@ -24,6 +24,7 @@ from diffusion_editor.app.dialogs import (
     SettingsState,
 )
 from diffusion_editor.app.native_dialogs import NativeApplicationDialogs
+from diffusion_editor.document.commands import AddLayerCommand
 
 
 class _Settings:
@@ -161,6 +162,34 @@ def test_dialog_coordinator_save_export_and_errors(tmp_path):
     coordinator.export_image_path(str(tmp_path / "bad.gif"))
     assert view.errors[-1][0] == "Export Image"
     assert "Unknown export extension" in view.errors[-1][1]
+    coordinator.close()
+    app.close()
+
+
+def test_open_commit_remains_coherent_when_remembering_directory_fails(
+    tmp_path,
+):
+    app, _grounding = _application(tmp_path)
+    project_path = tmp_path / "source.deproj"
+    app.layer_stack.save_project(str(project_path))
+    app.document.execute(AddLayerCommand(name="Unsaved"))
+    old_session = app.document_session_id
+    canvas = _Canvas()
+    view = _Dialogs()
+    coordinator = ApplicationDialogCoordinator(app, canvas)
+    coordinator.bind_view(view)
+    app.set_last_dir = lambda _directory: (_ for _ in ()).throw(
+        RuntimeError("settings write failed"))
+
+    coordinator.open_project_path(str(project_path))
+
+    assert app.project_path == str(project_path)
+    assert app.document_session_id != old_session
+    assert not app.history.can_undo
+    assert len(app.layer_stack.layers) == 1
+    assert canvas.fit_calls == 1
+    assert app.status_text == "Opened: source.deproj"
+    assert view.errors == []
     coordinator.close()
     app.close()
 

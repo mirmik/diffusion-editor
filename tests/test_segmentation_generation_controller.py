@@ -44,9 +44,10 @@ def test_start_select_background_submits_segmentation_request():
     event = controller.start_select_background(layer)
 
     assert event.status == "Segmenting background..."
-    assert controller.pending_layer is layer
+    assert controller.pending_context.layer_id == layer.id
     assert len(engine.calls) == 1
-    assert engine.calls[0].image is composite
+    assert np.array_equal(engine.calls[0].image, composite)
+    assert engine.calls[0].image is not composite
     assert engine.calls[0].invert is True
 
 
@@ -66,5 +67,7 @@ def test_poll_returns_pending_layer_and_mask():
 
     event = controller.poll()
 
-    assert event.segmentation_result == (layer, mask)
-    assert controller.pending_layer is None
+    context, result_mask = event.segmentation_result
+    assert context.layer_id == layer.id
+    assert np.array_equal(result_mask, mask)
+    assert controller.pending_context is None

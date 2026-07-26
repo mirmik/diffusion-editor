@@ -8,6 +8,8 @@ from typing import Literal
 import numpy as np
 from PIL import Image
 
+from .provenance import GenerationProvenance
+
 Rect = tuple[int, int, int, int]
 
 
@@ -77,12 +79,14 @@ class EnginePollEvent:
     result: object | None = None
     error: str | None = None
     meta: object | None = None
+    job_id: str | None = None
 
 
 @dataclass(frozen=True)
 class DiffusionInferenceResult:
     image: Image.Image
     seed: int
+    provenance: GenerationProvenance | None = None
 
 
 @dataclass(frozen=True)
@@ -99,6 +103,7 @@ class InstructRequest:
 class InstructInferenceResult:
     image: Image.Image
     seed: int
+    provenance: GenerationProvenance | None = None
 
 
 @dataclass(frozen=True)
@@ -110,6 +115,7 @@ class LamaRequest:
 @dataclass(frozen=True)
 class LamaResult:
     image: Image.Image
+    provenance: GenerationProvenance | None = None
 
 
 @dataclass(frozen=True)
@@ -121,3 +127,4 @@ class SegmentationRequest:
 @dataclass(frozen=True)
 class SegmentationResult:
     mask: np.ndarray
+    provenance: GenerationProvenance | None = None

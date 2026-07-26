@@ -30,10 +30,13 @@ from diffusion_editor.app.generation_panels import (
 from diffusion_editor.app.layer_tree import LayerTreeAction, LayerTreeIntent
 from diffusion_editor.app.native_root import NativeEditorRoot
 from diffusion_editor.canvas.brush import BrushToolMode
+from diffusion_editor.canvas.gpu_compositor import GPUCompositor
 from diffusion_editor.canvas.render_diagnostics import (
     rgba_signature,
     source_contribution_error,
 )
+from diffusion_editor.document.layer import Layer
+from diffusion_editor.document.layer_stack import LayerStack
 from diffusion_editor.generation.types import (
     DiffusionInferenceResult,
     EnginePollEvent,
@@ -175,6 +178,41 @@ def _assert_contract_snapshot(root) -> None:
         )
 
 
+def _assert_translucent_group_gpu_parity(root) -> None:
+    bridge = root.canvas.controller.composite_bridge
+    if not bridge.using_gpu:
+        return
+    stack = LayerStack(tile_size=8)
+    background = np.full((2, 2, 4), (20, 40, 220, 255), dtype=np.uint8)
+    stack.init_from_image(background)
+    group = Layer("group", 2, 2)
+    child = Layer(
+        "child",
+        2,
+        2,
+        np.full((2, 2, 4), (220, 30, 20, 128), dtype=np.uint8),
+    )
+    group.add_child(child)
+    group.opacity = 0.5
+    stack.insert_layer(group)
+    expected = stack.composite()
+
+    compositor = GPUCompositor(stack, graphics=root.canvas._graphics)
+    try:
+        compositor.composite()
+        actual = compositor.readback()
+    finally:
+        compositor.dispose()
+    difference = np.abs(
+        actual.astype(np.int16) - expected.astype(np.int16))
+    if int(difference.max(initial=0)) > 1:
+        raise RuntimeError(
+            "native GPU translucent-group parity failed: "
+            f"expected={expected[0, 0].tolist()}, "
+            f"actual={actual[0, 0].tolist()}"
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--frames", type=int, default=3)
@@ -219,6 +257,7 @@ def main() -> int:
             if root.dialogs is None or root.dialog_coordinator is None:
                 raise RuntimeError("native application dialogs were not mounted")
             _assert_contract_snapshot(root)
+            _assert_translucent_group_gpu_parity(root)
 
             # Exercise the same application-owned import path as File > Import.
             root.dialog_coordinator.import_image_path(str(image_path))

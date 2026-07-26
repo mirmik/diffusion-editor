@@ -32,7 +32,7 @@ TERMIN_BACKEND=opengl SDL_VIDEODRIVER=offscreen \
 TERMIN_SDK_SHADER_CACHE_ROOT=/tmp/diffusion-editor-native-window-cache \
   ./venv/bin/python scripts/smoke_native_root.py --windowed --frames 3
 
-# Legacy production entrypoint:
+# Canonical routine OpenGL gate (legacy runtime/startup + native windowed root):
 xvfb-run -a ./run-quality-gates.sh --skip-resolver \
   --render-backend opengl --frames 16
 
@@ -41,7 +41,7 @@ xvfb-run -a ./run-quality-gates.sh --skip-resolver \
   --render-backend vulkan --frames 16
 ```
 
-The render child checks `Py_GIL_DISABLED`, `cp314t` SOABI, and
+The render children check `Py_GIL_DISABLED`, `cp314t` SOABI, and
 `sys._is_gil_enabled()` before native imports, after native imports, and after
 rendering. Shader/compiler errors and bounded subprocess timeouts fail the
 gate with their transition name.

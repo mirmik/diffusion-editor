@@ -312,6 +312,10 @@ class NativeLayerPanel:
     def _request_active_delete(self) -> None:
         self._request_delete(self._state.active_id)
 
+    def request_active_delete(self) -> None:
+        """Open the standard confirmation flow for the active layer."""
+        self._request_active_delete()
+
     def _request_delete(self, layer_id: str | None) -> None:
         node = self._find_state_node(self._state.roots, layer_id)
         if node is None or not self._state.can_remove:

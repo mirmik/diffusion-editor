@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import os
 import random
 
@@ -29,11 +28,11 @@ from tcgui.widgets.units import px, pct
 from tcgui.widgets.splitter import Splitter
 
 from ..agent.chat_panel import DEFAULT_AGENT_BASE_URL, DEFAULT_AGENT_MODEL, AgentChatPanel
-from ..document.mask import coerce_mask_data
 from ..document.layer import Layer
 from ..document.tool import DiffusionTool, LamaTool, InstructTool
 from ..canvas.brush import BrushToolMode
 from ..canvas.editor_canvas import EditorCanvas
+from ..canvas.edit_transactions import CanvasEditTransactionCoordinator
 from ..ui.panels.layer_panel import LayerPanel
 from ..ui.panels.brush_panel import BrushPanel
 from ..ui.panels.diffusion_panel import DiffusionPanel
@@ -66,15 +65,6 @@ from ..document.commands import (
 
 _BYTES_PER_GIB = 1024 * 1024 * 1024
 _EXPORT_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
-
-
-@dataclass
-class ExternalEditContext:
-    label: str
-    layer_path: str
-    target: str
-    before_arr: np.ndarray | None = None
-    before_offset: tuple[int, int] | None = None
 
 
 class _LegacyPresentation:
@@ -141,7 +131,6 @@ class EditorWindow:
         self._models_dir = self.application.models_dir
         self._clipboard = self.application.clipboard
         self._clipboard_pos = self.application.clipboard_pos
-        self._external_edit_ctx: ExternalEditContext | None = None
         self._closed = False
         self._repaint_requested = True
         self.canvas_status_coordinator: CanvasStatusCoordinator | None = None
@@ -181,6 +170,19 @@ class EditorWindow:
             ShutdownPhase.GPU_RESOURCES,
             "canvas",
             self._canvas.dispose,
+        )
+        self.canvas_edit_coordinator = CanvasEditTransactionCoordinator(
+            self._layer_stack,
+            self._document,
+            history_replaying=lambda: self.application.history_replaying,
+            on_mutation_begin=self.application.mark_external_mutation,
+            cancel_interaction=self._canvas.cancel_pointer_interaction,
+        )
+        self.canvas_edit_coordinator.bind(self._canvas)
+        self.application.register_shutdown_resource(
+            ShutdownPhase.VIEW_WORKERS,
+            "legacy-canvas-edit-transactions",
+            self.canvas_edit_coordinator.close,
         )
 
         # Wire callbacks
@@ -411,9 +413,6 @@ class EditorWindow:
 
         # Canvas
         self._canvas.on_color_picked = self._on_color_picked
-        self._canvas.on_edit_begin = self._begin_external_edit
-        self._canvas.on_edit_end = self._end_external_edit
-
         # Brush panel
         self._brush_panel.on_tool_changed = self._set_canvas_tool
         self._brush_panel.on_eraser_toggled = self._canvas.set_brush_eraser
@@ -729,168 +728,31 @@ class EditorWindow:
     # ------------------------------------------------------------------
 
     def _on_snapshot_applied(self) -> None:
-        self._external_edit_ctx = None
+        self.canvas_edit_coordinator.discard()
+        self._canvas.cancel_pointer_interaction()
 
     def _clear_history(self):
         self.application.clear_history()
-        self._external_edit_ctx = None
+        try:
+            self.canvas_edit_coordinator.discard()
+        except Exception:
+            log.exception("Failed to discard legacy canvas transaction")
+        try:
+            self._canvas.cancel_pointer_interaction()
+        except Exception:
+            log.exception("Failed to cancel legacy canvas interaction")
 
     def undo(self):
+        self._canvas.cancel_pointer_interaction()
         label = self._document.undo()
         if label is not None:
             self._statusbar.text = f"Undo: {label}"
 
     def redo(self):
+        self._canvas.cancel_pointer_interaction()
         label = self._document.redo()
         if label is not None:
             self._statusbar.text = f"Redo: {label}"
-
-    def _begin_external_edit(self, label: str, layer: Layer, target: str):
-        if self.application.history_replaying:
-            return
-        if self._external_edit_ctx is not None:
-            return
-        if target == "selection":
-            before_arr = self._layer_stack.selection.data.copy()
-            self._external_edit_ctx = ExternalEditContext(
-                label=label,
-                layer_path="",
-                target=target,
-                before_arr=before_arr,
-            )
-            return
-        layer_path = self._layer_stack.get_layer_path(layer)
-        if not layer_path:
-            return
-        if target == "transform":
-            self._external_edit_ctx = ExternalEditContext(
-                label=label,
-                layer_path=layer_path,
-                target=target,
-                before_offset=(layer.x, layer.y),
-            )
-            return
-        if target == "mask":
-            before_arr = layer.mask.data.copy()
-        else:
-            before_arr = layer.image.copy()
-        self._external_edit_ctx = ExternalEditContext(
-            label=label,
-            layer_path=layer_path,
-            target=target,
-            before_arr=before_arr,
-        )
-
-    def _apply_layer_patch(self, layer_path: str, target: str, rect, patch: np.ndarray):
-        if target == "selection":
-            x0, y0, x1, y1 = rect
-            if x1 <= x0 or y1 <= y0:
-                return
-            self._layer_stack.selection.data[y0:y1, x0:x1] = coerce_mask_data(patch)
-            if self._layer_stack.on_changed:
-                self._layer_stack.on_changed()
-            return
-        layer = self._layer_stack.get_layer_by_path(layer_path)
-        if layer is None:
-            return
-        x0, y0, x1, y1 = rect
-        if x1 <= x0 or y1 <= y0:
-            return
-        if target == "mask":
-            layer.mask.data[y0:y1, x0:x1] = coerce_mask_data(patch)
-            if self._layer_stack.on_changed:
-                self._layer_stack.on_changed()
-            return
-        layer.image[y0:y1, x0:x1] = patch
-        self._layer_stack.mark_layer_dirty(
-            layer, rect=layer.local_rect_to_canvas(rect))
-        if self._layer_stack.on_changed:
-            self._layer_stack.on_changed()
-
-    def _end_external_edit(self, layer: Layer, target: str, dirty_rect):
-        if self.application.history_replaying:
-            self._external_edit_ctx = None
-            return
-        if self._external_edit_ctx is None:
-            return
-        ctx = self._external_edit_ctx
-        self._external_edit_ctx = None
-        if target == "selection":
-            if dirty_rect is None:
-                return
-            x0, y0, x1, y1 = dirty_rect
-            if x1 <= x0 or y1 <= y0:
-                return
-            before_arr = ctx.before_arr
-            after_arr = self._layer_stack.selection.data
-            before_patch = before_arr[y0:y1, x0:x1].copy()
-            after_patch = after_arr[y0:y1, x0:x1].copy()
-            if np.array_equal(before_patch, after_patch):
-                return
-            rect = (x0, y0, x1, y1)
-            label = ctx.label
-            self._document.push_callbacks(
-                label=label,
-                undo_fn=lambda: self._apply_layer_patch("", target, rect, before_patch),
-                redo_fn=lambda: self._apply_layer_patch("", target, rect, after_patch),
-                size_bytes=before_patch.nbytes + after_patch.nbytes,
-            )
-            return
-        if layer is None:
-            return
-        layer_path = self._layer_stack.get_layer_path(layer)
-        if layer_path != ctx.layer_path or target != ctx.target:
-            return
-        if target == "transform":
-            if ctx.before_offset is None:
-                return
-            before = ctx.before_offset
-            after = (layer.x, layer.y)
-            if before == after:
-                return
-            label = ctx.label
-
-            def _apply_offset(offset):
-                target_layer = self._layer_stack.get_layer_by_path(layer_path)
-                if target_layer is None:
-                    return
-                old_bounds = target_layer.bounds
-                self._layer_stack.set_layer_offset(
-                    target_layer,
-                    offset[0],
-                    offset[1],
-                    old_bounds=old_bounds,
-                )
-
-            self._document.push_callbacks(
-                label=label,
-                undo_fn=lambda: _apply_offset(before),
-                redo_fn=lambda: _apply_offset(after),
-                size_bytes=16,
-            )
-            return
-        if dirty_rect is None:
-            return
-        x0, y0, x1, y1 = dirty_rect
-        if x1 <= x0 or y1 <= y0:
-            return
-        before_arr = ctx.before_arr
-        if target == "mask":
-            after_arr = layer.mask.data
-        else:
-            after_arr = layer.image
-        before_patch = before_arr[y0:y1, x0:x1].copy()
-        after_patch = after_arr[y0:y1, x0:x1].copy()
-        if np.array_equal(before_patch, after_patch):
-            return
-        rect = (x0, y0, x1, y1)
-        label = ctx.label
-        self._document.push_callbacks(
-            label=label,
-            undo_fn=lambda: self._apply_layer_patch(layer_path, target, rect, before_patch),
-            redo_fn=lambda: self._apply_layer_patch(layer_path, target, rect, after_patch),
-            size_bytes=before_patch.nbytes + after_patch.nbytes,
-        )
 
     # ------------------------------------------------------------------
     # File operations
@@ -899,10 +761,12 @@ class EditorWindow:
     def new_project(self):
         # Simple: create white 1024x1024
         white = np.full((1024, 1024, 4), 255, dtype=np.uint8)
+        self._document.prepare_mutation()
         self._layer_stack.init_from_image(white)
+        self.application.reset_document_session()
         self._clear_history()
-        self._canvas.fit_in_view()
         self._project_path = None
+        self._fit_in_view_best_effort()
 
     def new_project_from_image(self):
         def _on_result(path):
@@ -912,10 +776,12 @@ class EditorWindow:
             self._settings.set("last_dir", self._last_dir)
             img = Image.open(path).convert("RGBA")
             arr = np.array(img, dtype=np.uint8)
+            self._document.prepare_mutation()
             self._layer_stack.init_from_image(arr)
+            self.application.reset_document_session()
             self._clear_history()
-            self._canvas.fit_in_view()
             self._project_path = None
+            self._fit_in_view_best_effort()
         open_file_dialog(
             self.ui, _on_result,
             title="New From Image", directory=self._last_dir,
@@ -935,14 +801,18 @@ class EditorWindow:
 
     def open_file_path(self, path: str):
         try:
+            self._document.prepare_mutation()
             self._layer_stack.load_project(path)
+            self.application.reset_document_session()
             self._clear_history()
-            self._canvas.fit_in_view()
             self._project_path = path
-            self._statusbar.text = f"Opened: {os.path.basename(path)}"
         except Exception as e:
             log.exception(f"Open project failed: {path}")
-            self._statusbar.text = f"Open error: {e}"
+            self._set_status_best_effort(f"Open error: {e}")
+            return
+        self._fit_in_view_best_effort()
+        self._set_status_best_effort(
+            f"Opened: {os.path.basename(path)}")
 
     def import_image(self):
         def _on_result(path):
@@ -959,10 +829,25 @@ class EditorWindow:
     def import_image_path(self, path: str):
         img = Image.open(path).convert("RGBA")
         arr = np.array(img, dtype=np.uint8)
+        self._document.prepare_mutation()
         self._layer_stack.init_from_image(arr)
+        self.application.reset_document_session()
         self._clear_history()
-        self._canvas.fit_in_view()
         self._project_path = None
+        self._fit_in_view_best_effort()
+
+    def _fit_in_view_best_effort(self):
+        try:
+            self._canvas.fit_in_view()
+        except Exception:
+            log.exception(
+                "Failed to fit the replacement document in legacy view")
+
+    def _set_status_best_effort(self, text: str):
+        try:
+            self._statusbar.text = text
+        except Exception:
+            log.exception("Failed to update legacy editor status")
 
     def _new_layer(self):
         self._document.execute(AddLayerCommand(
@@ -977,6 +862,9 @@ class EditorWindow:
 
         def _on_result(btn: str):
             if btn == "Yes":
+                for removed in (layer, *layer.all_descendants()):
+                    self.application.invalidate_generation_jobs_for_layer(
+                        removed.id, "target layer was deleted")
                 self._document.execute(RemoveLayerCommand(layer=layer))
 
         MessageBox.question(

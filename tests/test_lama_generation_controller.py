@@ -54,11 +54,12 @@ def test_start_remove_submits_patch_and_mask():
     event = controller.start_remove(layer)
 
     assert event.status == "Removing objects (LaMa)..."
-    assert controller.pending_layer is layer
+    assert controller.pending_context.layer_id == layer.id
     assert len(engine.calls) == 1
     image, mask = engine.calls[0]
     assert image.size == mask.size
-    assert layer.tool.source_patch is image
+    assert image is not layer.tool.source_patch
+    assert np.array_equal(np.array(image), np.array(layer.tool.source_patch))
 
 
 def test_poll_returns_pending_lama_layer_and_clears_pending():
@@ -77,5 +78,6 @@ def test_poll_returns_pending_lama_layer_and_clears_pending():
 
     event = controller.poll()
 
-    assert event.inference_result == (layer, result)
-    assert controller.pending_layer is None
+    context, image = event.inference_result
+    assert (context.layer_id, image) == (layer.id, result)
+    assert controller.pending_context is None

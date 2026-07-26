@@ -399,6 +399,9 @@ class NativeEditorView:
             raise RuntimeError("native canvas is already mounted")
         self.canvas_host.remove_child(self.canvas_placeholder)
         self.canvas_host.add_flex_child(canvas_view.widget, 1.0)
+        capture_widget = getattr(canvas_view, "pointer_capture_widget", None)
+        if capture_widget is not None:
+            self.canvas_host.add_fixed_child(capture_widget, 0.0)
         self.canvas_view = canvas_view
         self._request_repaint()
 

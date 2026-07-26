@@ -2,12 +2,15 @@ import os
 import subprocess
 import sys
 
+import numpy as np
+
 from diffusion_editor.app.application import (
     EditorApplication,
     EngineSet,
     ShutdownPhase,
 )
 from diffusion_editor.app.presentation import HeadlessEditorPresentation
+from diffusion_editor.document.commands import AddLayerCommand
 
 
 class _MemorySettings:
@@ -131,3 +134,22 @@ def test_shutdown_orders_view_workers_engines_and_gpu_resources():
         "grounding-engine",
         "canvas",
     ]
+
+
+def test_snapshot_listener_failure_cannot_turn_successful_undo_into_failure():
+    application = _application()
+    application.layer_stack.init_from_image(
+        np.zeros((4, 4, 4), dtype=np.uint8))
+    application.document.execute(AddLayerCommand(name="Other"))
+    observed = []
+    application.add_snapshot_listener(
+        lambda: (_ for _ in ()).throw(RuntimeError("observer failed")))
+    application.add_snapshot_listener(lambda: observed.append("snapshot"))
+
+    assert application.document.undo() == "New Layer"
+
+    assert len(application.layer_stack.layers) == 1
+    assert observed == ["snapshot"]
+    assert not application.history.can_undo
+    assert application.history.can_redo
+    application.close()

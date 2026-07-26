@@ -157,7 +157,8 @@ class MaskPaintTool(CanvasStrokeTool):
 class MaskEraserTool(CanvasStrokeTool):
     mode = BrushToolMode.MASK_ERASER
     label = "Mask Erase Stroke"
-    target = "mask"
+    # The operation commits both the layer mask and image alpha on end.
+    target = "mask_image"
 
     def begin(self, context, layer, x: int, y: int):
         x, y = context.canvas_to_layer_point(layer, x, y)

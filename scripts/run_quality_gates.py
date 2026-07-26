@@ -145,6 +145,20 @@ def main() -> int:
                 env=environment,
                 timeout=args.timeout,
             )
+            if backend == "opengl":
+                native_environment = environment.copy()
+                native_environment["SDL_VIDEODRIVER"] = "offscreen"
+                _run(
+                    "native editor opengl windowed smoke",
+                    _python_script(
+                        "scripts/smoke_native_root.py",
+                        "--windowed",
+                        "--frames",
+                        str(args.frames),
+                    ),
+                    env=native_environment,
+                    timeout=args.timeout,
+                )
     verify_runtime_identity("quality runner completion")
     print("All requested CPython 3.14t quality gates passed.")
     return 0

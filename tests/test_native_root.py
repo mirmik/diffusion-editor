@@ -21,6 +21,7 @@ from diffusion_editor.app.dialogs import FileDialogKind
 from diffusion_editor.app.generation_panels import GenerationPanelKind
 from diffusion_editor.app.layer_tree import LayerTreeAction, LayerTreeIntent
 from diffusion_editor.app.native_root import NativeEditorRoot, WindowedNativeComposition
+from diffusion_editor.app.native_shell import COMMAND_SPECS
 from diffusion_editor.app.presentation import ViewPorts
 from diffusion_editor.canvas.brush import BrushToolMode
 
@@ -393,6 +394,9 @@ def test_real_offscreen_canvas_renders_and_routes_image_space_paint(
             width=640,
             height=360) as root:
         root.tick()
+        assert {
+            spec.action_id for spec in COMMAND_SPECS
+        } <= set(root.view._command_handlers)
         assert root.canvas is not None
         assert (
             root.canvas.image_lease.ownership
@@ -507,8 +511,42 @@ def test_real_offscreen_canvas_renders_and_routes_image_space_paint(
         event.y = widget_point.y
         event.type = PointerEventType.Down
         root.composition.document.dispatch_pointer_event(event)
+        assert (
+            root.composition.document.pointer_capture
+            == root.canvas._capture_relay.handle
+        )
+        event.type = PointerEventType.Move
+        event.x = root.canvas.widget.bounds.x - 20
+        event.y = root.canvas.widget.bounds.y - 20
+        root.composition.document.dispatch_pointer_event(event)
         event.type = PointerEventType.Up
         root.composition.document.dispatch_pointer_event(event)
+        assert not root.composition.document.pointer_capture
+
+        painted = application.layer_stack.active_layer.image.copy()
+        assert application.history.can_undo
+        assert root.view.activate_command("edit.undo")
+        assert application.layer_stack.active_layer.image[8, 8, 3] == 0
+        assert root.view.activate_command("edit.redo")
+        np.testing.assert_array_equal(
+            application.layer_stack.active_layer.image,
+            painted,
+        )
+
+        revision = application.history.memory_revision
+        widget_point = root.canvas.canvas.image_to_widget(Point(20, 20))
+        event.x = widget_point.x
+        event.y = widget_point.y
+        event.type = PointerEventType.Down
+        root.composition.document.dispatch_pointer_event(event)
+        root.canvas.cancel_pointer_interaction()
+        assert not root.composition.document.pointer_capture
+        np.testing.assert_array_equal(
+            application.layer_stack.active_layer.image,
+            painted,
+        )
+        assert application.history.memory_revision == revision
+
         root.composition.resize(800, 480)
         root.tick()
 

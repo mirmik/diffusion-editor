@@ -1,11 +1,13 @@
 import numpy as np
 from PIL import Image
+from types import SimpleNamespace
 
 from diffusion_editor.app.application import EditorApplication, EngineSet
 from diffusion_editor.app.presentation import HeadlessEditorPresentation
 from diffusion_editor.generation.diffusion_controller import DiffusionControllerEvent
 from diffusion_editor.app.editor_window import EditorWindow
 from diffusion_editor.document.layer_stack import LayerStack
+from diffusion_editor.document.commands import AddLayerCommand
 
 
 class _Engine:
@@ -128,6 +130,43 @@ def test_export_image_path_uses_layer_stack_composite_not_canvas_buffer(tmp_path
 
     out = np.array(Image.open(path).convert("RGBA"))
     assert tuple(out[0, 0]) == (255, 0, 0, 255)
+
+
+def test_legacy_open_commits_project_path_before_fallible_fit(tmp_path):
+    engine = _Engine()
+    application = EditorApplication(
+        settings=_MemorySettings(),
+        engines=EngineSet(engine, engine, engine, engine, engine),
+    )
+    application.layer_stack.init_from_image(
+        np.zeros((4, 4, 4), dtype=np.uint8))
+    project_path = tmp_path / "opened.deproj"
+    application.layer_stack.save_project(str(project_path))
+    application.document.execute(AddLayerCommand(name="Unsaved"))
+
+    class Canvas:
+        def cancel_pointer_interaction(self):
+            pass
+
+        def fit_in_view(self):
+            raise RuntimeError("fit failed")
+
+    window = object.__new__(EditorWindow)
+    window.application = application
+    window._document = application.document
+    window._layer_stack = application.layer_stack
+    window._canvas = Canvas()
+    window.canvas_edit_coordinator = SimpleNamespace(discard=lambda: None)
+    window._project_path = str(tmp_path / "old.deproj")
+    window._statusbar = _Status()
+
+    window.open_file_path(str(project_path))
+
+    assert window._project_path == str(project_path)
+    assert len(window._layer_stack.layers) == 1
+    assert not application.history.can_undo
+    assert window._statusbar.text == "Opened: opened.deproj"
+    application.close()
 
 
 def test_close_releases_legacy_ui_before_host_graphics_shutdown():

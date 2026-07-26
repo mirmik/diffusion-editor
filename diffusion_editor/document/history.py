@@ -58,10 +58,20 @@ class HistoryManager:
             return
         self.push_callbacks(
             label=label,
-            undo_fn=lambda: self._apply_snapshot(before),
-            redo_fn=lambda: self._apply_snapshot(after),
+            undo_fn=lambda: self._apply_snapshot_or_restore(before, after),
+            redo_fn=lambda: self._apply_snapshot_or_restore(after, before),
             size_bytes=len(before) + len(after),
         )
+
+    def _apply_snapshot_or_restore(
+            self,
+            target: bytes,
+            rollback: bytes) -> None:
+        try:
+            self._apply_snapshot(target)
+        except BaseException:
+            self._apply_snapshot(rollback)
+            raise
 
     def push_callbacks(self, label: str, undo_fn: Callable[[], None],
                        redo_fn: Callable[[], None],
@@ -85,8 +95,9 @@ class HistoryManager:
     def undo(self) -> str | None:
         if not self._undo_stack:
             return None
-        entry = self._undo_stack.pop()
+        entry = self._undo_stack[-1]
         entry.undo_fn()
+        self._undo_stack.pop()
         self._redo_stack.append(entry)
         self._memory_revision += 1
         return entry.label
@@ -94,8 +105,9 @@ class HistoryManager:
     def redo(self) -> str | None:
         if not self._redo_stack:
             return None
-        entry = self._redo_stack.pop()
+        entry = self._redo_stack[-1]
         entry.redo_fn()
+        self._redo_stack.pop()
         self._undo_stack.append(entry)
         self._memory_revision += 1
         return entry.label

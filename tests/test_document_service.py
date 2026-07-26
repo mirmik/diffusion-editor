@@ -1,6 +1,10 @@
 """Tests for DocumentService and command bus integration."""
 
+import io
+import zipfile
+
 import numpy as np
+import pytest
 from PIL import Image
 
 from diffusion_editor.document.document_service import (
@@ -12,6 +16,7 @@ from diffusion_editor.document.commands import (
     ClearLayerPatchRectCommand, ReplaceLayerMaskCommand,
     ApplyGeneratedResultCommand, SetLayerSelectionCommand,
     AttachLayerToolCommand, DetachLayerToolCommand,
+    DrawGridCommand,
 )
 from diffusion_editor.document.layer import Layer
 from diffusion_editor.document.tool import DiffusionTool
@@ -64,6 +69,114 @@ def test_document_service_snapshot_action_skips_noop():
     service.execute_snapshot_action("noop", lambda: None)
 
     assert service.undo() is None
+
+
+def test_document_service_snapshot_action_rolls_back_failed_action():
+    stack = _DummyStack()
+    history = HistoryManager(stack.load_state)
+    service = DocumentService(stack, history, stack.load_state)
+
+    def fail_after_mutation():
+        stack.value = 7
+        raise RuntimeError("command failed")
+
+    with pytest.raises(RuntimeError, match="command failed"):
+        service.execute_snapshot_action("broken", fail_after_mutation)
+
+    assert stack.value == 0
+    assert history.can_undo is False
+    assert history.can_redo is False
+
+
+def test_document_service_rolls_back_when_post_action_snapshot_fails():
+    class FailingSnapshotStack(_DummyStack):
+        def __init__(self):
+            super().__init__()
+            self.serialize_calls = 0
+
+        def serialize_state(self) -> bytes:
+            self.serialize_calls += 1
+            if self.serialize_calls == 2:
+                raise RuntimeError("post-action serialization failed")
+            return super().serialize_state()
+
+    stack = FailingSnapshotStack()
+    history = HistoryManager(stack.load_state)
+    service = DocumentService(stack, history, stack.load_state)
+
+    with pytest.raises(RuntimeError, match="post-action serialization failed"):
+        service.execute_snapshot_action(
+            "broken snapshot",
+            lambda: setattr(stack, "value", 9),
+        )
+
+    assert stack.value == 0
+    assert history.can_undo is False
+    assert history.can_redo is False
+
+
+def test_document_service_ignores_zip_timestamps_for_noop_detection():
+    class TimestampedZipStack:
+        def __init__(self):
+            self.value = b"same document"
+            self.serialize_calls = 0
+
+        def serialize_state(self) -> bytes:
+            self.serialize_calls += 1
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as archive:
+                info = zipfile.ZipInfo("state.bin")
+                info.date_time = (
+                    2020 + self.serialize_calls,
+                    1, 1, 0, 0, 0,
+                )
+                archive.writestr(info, self.value)
+            return buf.getvalue()
+
+        def load_state(self, snapshot: bytes) -> None:
+            with zipfile.ZipFile(io.BytesIO(snapshot), "r") as archive:
+                self.value = archive.read("state.bin")
+
+    stack = TimestampedZipStack()
+    first = stack.serialize_state()
+    second = stack.serialize_state()
+    assert first != second
+    stack.serialize_calls = 0
+
+    history = HistoryManager(stack.load_state)
+    service = DocumentService(stack, history, stack.load_state)
+    service.execute_snapshot_action("semantic noop", lambda: None)
+
+    assert history.can_undo is False
+
+
+def test_document_service_restores_current_state_if_snapshot_undo_fails():
+    stack = _DummyStack()
+    fail_undo = False
+
+    def apply_snapshot(snapshot: bytes) -> None:
+        nonlocal fail_undo
+        stack.load_state(snapshot)
+        if fail_undo and snapshot == b"0":
+            stack.value = -1
+            raise RuntimeError("snapshot apply failed")
+
+    history = HistoryManager(apply_snapshot)
+    service = DocumentService(stack, history, apply_snapshot)
+    service.execute_snapshot_action(
+        "inc",
+        lambda: setattr(stack, "value", 1),
+    )
+    revision = history.memory_revision
+    fail_undo = True
+
+    with pytest.raises(RuntimeError, match="snapshot apply failed"):
+        service.undo()
+
+    assert stack.value == 1
+    assert history.can_undo is True
+    assert history.can_redo is False
+    assert history.memory_revision == revision
 
 
 def test_command_bus_execute_registers_history():
@@ -322,3 +435,86 @@ def test_document_service_apply_generated_result_command():
     assert np.any(layer.image[:, :, 3] > 0)
     assert service.undo() == "Apply Result"
     assert np.all(stack.active_layer.image == 0)
+
+
+def test_draw_grid_rejects_invalid_sections_before_mutation():
+    layer = Layer("Grid", 8, 8)
+    before = layer.image.copy()
+
+    with pytest.raises(ValueError, match="sections_y must be >= 1"):
+        DrawGridCommand(
+            layer=layer,
+            sections_x=2,
+            sections_y=0,
+        )
+
+    assert np.array_equal(layer.image, before)
+
+
+def test_draw_grid_rejects_non_integer_sections_before_mutation():
+    layer = Layer("Grid", 8, 8)
+    before = layer.image.copy()
+
+    with pytest.raises(ValueError, match="sections_y must be an integer"):
+        DrawGridCommand(
+            layer=layer,
+            sections_x=2,
+            sections_y=1.5,
+        )
+
+    assert np.array_equal(layer.image, before)
+
+
+def test_apply_generated_result_clips_offset_patch_and_is_undoable():
+    stack = LayerStack()
+    stack.on_changed = lambda: None
+    stack.init_from_image(np.zeros((5, 5, 4), dtype=np.uint8))
+    layer = Layer("Offset", 3, 3, x=1, y=1)
+    layer.image[:] = 17
+    layer.tool = DiffusionTool(
+        source_patch=None,
+        patch_x=0, patch_y=0, patch_w=4, patch_h=4,
+        prompt="", negative_prompt="",
+        strength=0.5, guidance_scale=7.0, steps=20, seed=1,
+    )
+    stack.insert_layer(layer)
+    history = HistoryManager(stack.load_state)
+    service = DocumentService(stack, history, stack.load_state)
+    pixels = np.zeros((4, 4, 3), dtype=np.uint8)
+    pixels[:, :, 0] = np.arange(4, dtype=np.uint8)[None, :]
+    pixels[:, :, 1] = np.arange(4, dtype=np.uint8)[:, None]
+    result = Image.fromarray(pixels, "RGB")
+
+    service.execute(ApplyGeneratedResultCommand(
+        layer=layer,
+        result_image=result,
+        label="Apply Offset Result",
+    ))
+
+    expected = np.zeros((3, 3, 4), dtype=np.uint8)
+    expected[:, :, :3] = pixels[1:4, 1:4]
+    expected[:, :, 3] = 255
+    assert np.array_equal(layer.image, expected)
+    assert service.undo() == "Apply Offset Result"
+    assert np.all(stack.active_layer.image == 17)
+
+
+def test_apply_generated_result_validates_before_replacing_layer():
+    stack = LayerStack()
+    stack.on_changed = lambda: None
+    stack.init_from_image(np.zeros((4, 4, 4), dtype=np.uint8))
+    layer = _diff_layer()
+    layer.image[:] = 23
+    layer.tool.patch_w = 0
+    stack.insert_layer(layer)
+    before = layer.image.copy()
+    command = ApplyGeneratedResultCommand(
+        layer=layer,
+        result_image=Image.new("RGB", (2, 2), "red"),
+        label="Invalid Result",
+    )
+
+    with pytest.raises(ValueError, match="patch_w"):
+        command.apply(stack)
+
+    assert np.array_equal(layer.image, before)

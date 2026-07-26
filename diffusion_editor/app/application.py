@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from enum import IntEnum
 import os
 from typing import Any, Callable, Protocol
+import uuid
 
 import numpy as np
 from tcbase import log
@@ -22,12 +23,17 @@ from ..engines.lama_engine import LamaEngine
 from ..engines.segmentation_engine import SegmentationEngine
 from ..generation.diffusion_controller import DiffusionGenerationController
 from ..generation.instruct_controller import InstructGenerationController
+from ..generation.job_context import (
+    ApplyFrozenGeneratedResultCommand,
+    FrozenArray,
+    InferenceJobContext,
+    JobDocumentState,
+    ResultApplicationPolicy,
+)
 from ..generation.lama_controller import LamaGenerationController
+from ..generation.provenance import capture_tool_state
 from ..generation.result_mapper import (
-    map_diffusion_result,
     map_grounding_result,
-    map_instruct_result,
-    map_lama_result,
     map_segmentation_result,
 )
 from ..generation.segmentation_controller import SegmentationGenerationController
@@ -120,25 +126,33 @@ class EditorApplication:
             self.history,
             self._apply_snapshot,
         )
+        self._document_revision = 0
+        self._observed_history_revision = self.document.memory_revision
+        self._document_session_id = self._new_document_session_id()
         self.agent_tool_registry = create_editor_tool_registry()
 
         composite_below = self._composite_below
+        document_state = self._generation_document_state
         self.diffusion_controller = DiffusionGenerationController(
             engine=self.engines.diffusion,
             layer_stack=self.layer_stack,
             composite_below=composite_below,
+            document_state=document_state,
         )
         self.lama_controller = LamaGenerationController(
             engine=self.engines.lama,
             composite_below=composite_below,
+            document_state=document_state,
         )
         self.instruct_controller = InstructGenerationController(
             engine=self.engines.instruct,
             composite_below=composite_below,
+            document_state=document_state,
         )
         self.segmentation_controller = SegmentationGenerationController(
             engine=self.engines.segmentation,
             composite_below=composite_below,
+            document_state=document_state,
         )
         self.grounding_controller = GroundingController(
             engine=self.engines.grounding,
@@ -244,8 +258,61 @@ class EditorApplication:
     def clear_history(self) -> None:
         self.document.clear_history()
 
+    @property
+    def document_session_id(self) -> str:
+        return self._document_session_id
+
+    @property
+    def document_revision(self) -> int:
+        self._sync_history_revision()
+        return self._document_revision
+
+    def mark_external_mutation(self) -> int:
+        """Reserve a revision for a mutation outside DocumentService.
+
+        Canvas transactions call this as soon as a direct gesture starts
+        mutating document state, before its eventual history command is
+        committed.
+        """
+        self._sync_history_revision()
+        self._document_revision += 1
+        return self._document_revision
+
+    def reset_document_session(self) -> None:
+        """Invalidate document-bound jobs after New/Open/Import."""
+        self._document_session_id = self._new_document_session_id()
+        try:
+            self.invalidate_generation_jobs("document was replaced")
+        except Exception as exc:
+            log.exception(
+                f"Failed to cancel generation jobs after document reset: {exc}")
+
+    def invalidate_generation_jobs(self, reason: str) -> bool:
+        invalidated = False
+        for controller in self._generation_controllers():
+            invalidate = getattr(controller, "invalidate_all", None)
+            if callable(invalidate):
+                invalidated = bool(invalidate(reason)) or invalidated
+        return invalidated
+
+    def invalidate_generation_jobs_for_layer(
+            self,
+            layer_id: str,
+            reason: str = "target layer changed") -> bool:
+        invalidated = False
+        for controller in self._generation_controllers():
+            invalidate = getattr(controller, "invalidate_layer", None)
+            if callable(invalidate):
+                invalidated = (
+                    bool(invalidate(layer_id, reason)) or invalidated
+                )
+        return invalidated
+
     def poll(self) -> None:
         """Poll controller events and project them without toolkit knowledge."""
+        if self.closed:
+            return
+        self._invalidate_stale_generation_jobs()
         self._poll_segmentation()
         self._poll_lama()
         self._poll_instruct()
@@ -259,6 +326,7 @@ class EditorApplication:
         """Stop workers and GPU resources in stable phase/registration order."""
         if self.closed:
             return
+        self.invalidate_generation_jobs("application is closing")
         self.closed = True
         self.running = False
         resources = sorted(
@@ -290,6 +358,106 @@ class EditorApplication:
             return DEFAULT_MODELS_DIR
         return os.path.expanduser(raw.strip()) or DEFAULT_MODELS_DIR
 
+    @staticmethod
+    def _new_document_session_id() -> str:
+        return f"document_{uuid.uuid4().hex}"
+
+    def _generation_document_state(self) -> JobDocumentState:
+        return JobDocumentState(
+            session_id=self._document_session_id,
+            revision=self.document_revision,
+        )
+
+    def _sync_history_revision(self) -> None:
+        current = self.document.memory_revision
+        if current == self._observed_history_revision:
+            return
+        self._observed_history_revision = current
+        self._document_revision += 1
+
+    def _generation_controllers(self) -> tuple[object, ...]:
+        return (
+            self.diffusion_controller,
+            self.instruct_controller,
+            self.lama_controller,
+            self.segmentation_controller,
+        )
+
+    def _invalidate_stale_generation_jobs(self) -> None:
+        status: str | None = None
+        for controller in self._generation_controllers():
+            contexts = tuple(getattr(
+                controller, "pending_contexts", ()))
+            for context in contexts:
+                reason = self._generation_rejection_reason(context)
+                if reason is None:
+                    continue
+                invalidate = getattr(controller, "invalidate_job", None)
+                if callable(invalidate) and invalidate(
+                        context.job_id, reason):
+                    status = f"Generation cancelled: {reason}"
+        if status is not None:
+            self.set_status(status)
+
+    def _generation_rejection_reason(
+            self, context: InferenceJobContext) -> str | None:
+        if context.application_policy != ResultApplicationPolicy.REJECT_STALE:
+            return (
+                "unsupported result application policy "
+                f"'{context.application_policy.value}'"
+            )
+        if context.document_session_id != self._document_session_id:
+            return "document session changed"
+        layer = self.layer_stack.find_layer_by_id(context.layer_id)
+        if layer is None:
+            return "target layer no longer exists"
+        current_tool_type = (
+            str(layer.tool.tool_type)
+            if layer.tool is not None
+            else None
+        )
+        if current_tool_type != context.tool_type:
+            return "target tool changed or was detached"
+        if (
+                context.tool_state_fingerprint
+                and capture_tool_state(layer.tool).fingerprint
+                != context.tool_state_fingerprint):
+            return "generation request settings changed"
+        if layer.bounds != context.layer_bounds:
+            return "target layer geometry changed"
+        if layer.pixel_revision != context.target_pixel_revision:
+            return "target layer pixels changed"
+        current_mask = FrozenArray.capture(layer.mask.to_uint8())
+        if (
+                context.target_mask is not None
+                and current_mask != context.target_mask):
+            return "target mask changed"
+        if context.paste is not None and not context.paste.matches_layer(layer):
+            return "request geometry or mask changed"
+        if context.base_revision != self.document_revision:
+            return "document revision changed"
+        return None
+
+    def _resolve_generation_target(
+            self,
+            context: InferenceJobContext,
+    ) -> tuple[Layer | None, str | None]:
+        reason = self._generation_rejection_reason(context)
+        if reason is not None:
+            return None, f"{context.kind.capitalize()} result rejected: {reason}"
+        return self.layer_stack.find_layer_by_id(context.layer_id), None
+
+    @staticmethod
+    def _generation_success_status(
+            base: str,
+            context: InferenceJobContext,
+    ) -> str:
+        provenance = context.result_provenance
+        if provenance is None or not provenance.warnings:
+            return base
+        warning = provenance.warnings[0]
+        return f"{base}; reproducibility warning: {warning[:160]}"
+
     def _apply_snapshot(self, snapshot: bytes) -> None:
         self.history_replaying = True
         try:
@@ -297,7 +465,11 @@ class EditorApplication:
         finally:
             self.history_replaying = False
             for listener in tuple(self._snapshot_listeners):
-                listener()
+                try:
+                    listener()
+                except Exception as exc:
+                    log.exception(
+                        f"Snapshot observer failed after commit: {exc}")
 
     def _composite_below(self, layer: Layer) -> np.ndarray | None:
         return np.ascontiguousarray(self.layer_stack.composite(exclude_layer=layer))
@@ -307,7 +479,11 @@ class EditorApplication:
         if event is None:
             return
         if event.segmentation_result is not None:
-            layer, seg_mask = event.segmentation_result
+            context, seg_mask = event.segmentation_result
+            layer, rejection = self._resolve_generation_target(context)
+            if rejection is not None:
+                self.set_status(rejection)
+                return
             command, status = map_segmentation_result(layer, seg_mask)
             if command is not None:
                 self.document.execute(command)
@@ -320,12 +496,25 @@ class EditorApplication:
         if event is None:
             return
         if event.inference_result is not None:
-            layer, result_image = event.inference_result
-            command, status = map_lama_result(layer, result_image)
-            if command is not None:
-                self.document.execute(command)
+            context, result_image = event.inference_result
+            layer, rejection = self._resolve_generation_target(context)
+            if rejection is not None or layer is None or context.paste is None:
+                status = rejection or "LaMa result rejected: invalid job context"
+                self.update_panel("lama", "error", error=status)
+                self.set_status(status)
+                return
+            self.document.execute(ApplyFrozenGeneratedResultCommand(
+                layer=layer,
+                result_image=result_image,
+                paste=context.paste,
+                label="Apply LaMa Result",
+                provenance=context.result_provenance,
+            ))
             self.update_panel("lama", "result")
-            self.set_status(status)
+            self.set_status(self._generation_success_status(
+                "Objects removed (LaMa)",
+                context,
+            ))
         elif event.inference_error is not None:
             self.update_panel(
                 "lama", "error", error=event.inference_error)
@@ -350,18 +539,35 @@ class EditorApplication:
                 and event.inference_error is None
                 and getattr(
                     self.instruct_controller,
-                    "pending_layer",
+                    "pending_context",
                     None,
                 ) is not None):
             self.update_panel(
                 "instruct", "running", status=event.status)
         if event.inference_result is not None:
-            layer, result_image, used_seed = event.inference_result
-            command, status = map_instruct_result(layer, result_image, used_seed)
-            if command is not None:
-                self.document.execute(command)
+            context, result_image, used_seed = event.inference_result
+            layer, rejection = self._resolve_generation_target(context)
+            if rejection is not None or layer is None or context.paste is None:
+                status = (
+                    rejection
+                    or "Instruct result rejected: invalid job context"
+                )
+                self.update_panel(
+                    "instruct", "inference-error", error=status)
+                self.set_status(status)
+                return
+            self.document.execute(ApplyFrozenGeneratedResultCommand(
+                layer=layer,
+                result_image=result_image,
+                paste=context.paste,
+                label="Apply Instruct Result",
+                provenance=context.result_provenance,
+            ))
             self.update_panel("instruct", "result")
-            self.set_status(status)
+            self.set_status(self._generation_success_status(
+                f"Instruction applied (seed={used_seed})",
+                context,
+            ))
         elif event.inference_error is not None:
             self.update_panel(
                 "instruct",
@@ -396,18 +602,35 @@ class EditorApplication:
                 and event.inference_error is None
                 and getattr(
                     self.diffusion_controller,
-                    "pending_layer",
+                    "pending_context",
                     None,
                 ) is not None):
             self.update_panel(
                 "diffusion", "running", status=event.status)
         if event.inference_result is not None:
-            pending, result_image, used_seed = event.inference_result
-            command, status = map_diffusion_result(pending, result_image, used_seed)
-            if command is not None:
-                self.document.execute(command)
+            context, result_image, used_seed = event.inference_result
+            layer, rejection = self._resolve_generation_target(context)
+            if rejection is not None or layer is None or context.paste is None:
+                status = (
+                    rejection
+                    or "Diffusion result rejected: invalid job context"
+                )
+                self.update_panel(
+                    "diffusion", "inference-error", error=status)
+                self.set_status(status)
+                return
+            self.document.execute(ApplyFrozenGeneratedResultCommand(
+                layer=layer,
+                result_image=result_image,
+                paste=context.paste,
+                label="Apply Diffusion Result",
+                provenance=context.result_provenance,
+            ))
             self.update_panel("diffusion", "result")
-            self.set_status(status)
+            self.set_status(self._generation_success_status(
+                f"Regenerated (seed={used_seed})",
+                context,
+            ))
         elif event.inference_error is not None:
             self.update_panel(
                 "diffusion",

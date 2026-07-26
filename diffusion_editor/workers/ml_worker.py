@@ -15,6 +15,17 @@ from typing import Any, Callable
 import numpy as np
 from PIL import Image
 
+from ..generation.provenance import (
+    FrozenJsonObject,
+    GenerationProvenance,
+    ModelIdentity,
+    ModelIdentityPolicy,
+    ModelIdentityStatus,
+    RequestProvenance,
+    enforce_model_identity_policy,
+    floating_model_identity,
+    resolve_local_model_identity,
+)
 from .ml_protocol import MAX_MESSAGE_BYTES, PROTOCOL_VERSION, encode_message
 
 
@@ -29,6 +40,11 @@ class _Backend:
         self._real = None
         self.diffusion_loaded = False
         self.instruct_loaded = False
+        self.diffusion_identity: ModelIdentity | None = None
+        self.diffusion_warnings: tuple[str, ...] = ()
+        self.ip_adapter_identity: ModelIdentity | None = None
+        self.instruct_identity: ModelIdentity | None = None
+        self.instruct_warnings: tuple[str, ...] = ()
 
     def execute(
         self,
@@ -73,20 +89,28 @@ class _Backend:
         if operation == "diffusion":
             progress("Running diffusion...")
             images = self._open_images(data, ("image", "mask", "ip_adapter"))
-            result, seed = self._real.diffusion(data, images)
+            result, seed, provenance = self._real.diffusion(data, images)
             output = output_dir / "result.png"
             result.save(output, format="PNG")
-            return {"output_path": str(output), "seed": seed}
+            return {
+                "output_path": str(output),
+                "seed": seed,
+                "provenance": provenance,
+            }
         if operation == "load_instruct":
             progress("Loading InstructPix2Pix model...")
             return self._real.load_instruct(data)
         if operation == "instruct":
             progress("Running InstructPix2Pix...")
             image = self._open_required(data, "image")
-            result, seed = self._real.instruct(data, image)
+            result, seed, provenance = self._real.instruct(data, image)
             output = output_dir / "result.png"
             result.save(output, format="PNG")
-            return {"output_path": str(output), "seed": seed}
+            return {
+                "output_path": str(output),
+                "seed": seed,
+                "provenance": provenance,
+            }
         if operation == "grounding":
             image = self._open_required(data, "image")
             detections = self._real.grounding(data, image, progress)
@@ -105,14 +129,39 @@ class _Backend:
         if operation == "load_diffusion":
             self.diffusion_loaded = True
             progress("Loading diffusion model...")
+            identity, warnings = resolve_local_model_identity(
+                str(data["model_path"]),
+                expected_content_hash=data.get("expected_content_hash"),
+                policy=data.get(
+                    "model_identity_policy",
+                    ModelIdentityPolicy.WARN.value,
+                ),
+            )
+            self.diffusion_identity = identity
+            self.diffusion_warnings = warnings
             return {
                 "model_path": str(data["model_path"]),
-                "model_info": {"path": Path(data["model_path"]).name, "device": "cpu"},
+                "model_info": {
+                    "path": Path(data["model_path"]).name,
+                    "device": "cpu",
+                    "dtype": "float32",
+                    "pipeline": "FakeDiffusionPipeline",
+                    "model_identity": identity.to_dict(),
+                    "warnings": list(warnings),
+                },
             }
         if operation == "load_ip_adapter":
             if not self.diffusion_loaded:
                 raise RuntimeError("No diffusion model loaded")
-            return {"loaded": True}
+            self.ip_adapter_identity = floating_model_identity(
+                "huggingface",
+                "h94/IP-Adapter",
+            )
+            return {
+                "loaded": True,
+                "model_identity": self.ip_adapter_identity.to_dict(),
+                "warnings": [self.ip_adapter_identity.warning],
+            }
         if operation == "diffusion":
             if not self.diffusion_loaded:
                 raise RuntimeError("No diffusion model loaded")
@@ -126,10 +175,89 @@ class _Backend:
             output = output_dir / "result.png"
             result.save(output, format="PNG")
             seed = 4242 if int(data["seed"]) == -1 else int(data["seed"])
-            return {"output_path": str(output), "seed": seed}
+            identity = self.diffusion_identity or ModelIdentity(
+                provider="local",
+                repository=None,
+                revision=None,
+                content_hash=None,
+                local_override=None,
+                status=ModelIdentityStatus.UNKNOWN,
+                warning="Fake diffusion model identity was not loaded",
+            )
+            warnings = list(self.diffusion_warnings)
+            runtime: dict[str, Any] = {
+                "backend": "fake",
+                "pipeline": "FakeDiffusionPipeline",
+                "scheduler": "FakeScheduler",
+                "device": "cpu",
+                "dtype": "float32",
+            }
+            if self.ip_adapter_identity is not None:
+                runtime["ip_adapter_model"] = (
+                    self.ip_adapter_identity.to_dict()
+                )
+                if self.ip_adapter_identity.warning:
+                    warnings.append(self.ip_adapter_identity.warning)
+            provenance = GenerationProvenance(
+                operation="diffusion",
+                model=identity,
+                request=RequestProvenance.capture(
+                    "diffusion",
+                    {
+                        key: data.get(key)
+                        for key in (
+                            "prompt",
+                            "negative_prompt",
+                            "strength",
+                            "steps",
+                            "guidance_scale",
+                            "seed",
+                            "mode",
+                            "masked_content",
+                            "ip_adapter_scale",
+                            "width",
+                            "height",
+                        )
+                    },
+                ),
+                seed=seed,
+                width=result.width,
+                height=result.height,
+                runtime=FrozenJsonObject.capture(runtime),
+                warnings=tuple(warnings),
+            )
+            return {
+                "output_path": str(output),
+                "seed": seed,
+                "provenance": provenance.to_dict(),
+            }
         if operation == "load_instruct":
             self.instruct_loaded = True
-            return {"loaded": True, "device": "cpu"}
+            identity = floating_model_identity(
+                "huggingface",
+                "timbrooks/instruct-pix2pix",
+                revision=(
+                    str(data["revision"])
+                    if data.get("revision") is not None else None
+                ),
+            )
+            warnings = enforce_model_identity_policy(
+                identity,
+                data.get(
+                    "model_identity_policy",
+                    ModelIdentityPolicy.WARN.value,
+                ),
+            )
+            self.instruct_identity = identity
+            self.instruct_warnings = warnings
+            return {
+                "loaded": True,
+                "device": "cpu",
+                "dtype": "float32",
+                "pipeline": "FakeInstructPix2PixPipeline",
+                "model_identity": identity.to_dict(),
+                "warnings": list(warnings),
+            }
         if operation == "instruct":
             if not self.instruct_loaded:
                 raise RuntimeError("InstructPix2Pix model not loaded")
@@ -139,7 +267,45 @@ class _Backend:
                 output, format="PNG"
             )
             seed = 4343 if int(data["seed"]) == -1 else int(data["seed"])
-            return {"output_path": str(output), "seed": seed}
+            identity = self.instruct_identity or floating_model_identity(
+                "huggingface",
+                "timbrooks/instruct-pix2pix",
+            )
+            with Image.open(output) as generated:
+                width, height = generated.size
+            provenance = GenerationProvenance(
+                operation="instruct",
+                model=identity,
+                request=RequestProvenance.capture(
+                    "instruct",
+                    {
+                        key: data.get(key)
+                        for key in (
+                            "instruction",
+                            "guidance_scale",
+                            "image_guidance_scale",
+                            "steps",
+                            "seed",
+                        )
+                    },
+                ),
+                seed=seed,
+                width=width,
+                height=height,
+                runtime=FrozenJsonObject.capture({
+                    "backend": "fake",
+                    "pipeline": "FakeInstructPix2PixPipeline",
+                    "scheduler": "FakeScheduler",
+                    "device": "cpu",
+                    "dtype": "float32",
+                }),
+                warnings=self.instruct_warnings,
+            )
+            return {
+                "output_path": str(output),
+                "seed": seed,
+                "provenance": provenance.to_dict(),
+            }
         if operation == "grounding":
             progress("Grounding: detecting...")
             image = self._open_required(data, "image")

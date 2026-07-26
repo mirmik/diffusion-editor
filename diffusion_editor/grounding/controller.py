@@ -45,7 +45,7 @@ class GroundingController:
             self,
             layer: Layer,
             params: GroundingParams) -> GroundingControllerEvent:
-        if self._engine.is_busy:
+        if self._engine.is_busy or self._pending_layer is not None:
             return GroundingControllerEvent()
 
         try:

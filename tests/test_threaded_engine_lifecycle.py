@@ -6,7 +6,10 @@ import time
 from PIL import Image
 
 from diffusion_editor.engines.lama_engine import LamaEngine
-from diffusion_editor.engines.threaded_lifecycle import EngineTaskQueue
+from diffusion_editor.engines.threaded_lifecycle import (
+    EngineTaskQueue,
+    SingleWorkerEventQueue,
+)
 from diffusion_editor.generation.types import LamaRequest, LamaResult
 
 
@@ -106,6 +109,68 @@ def test_terminal_event_is_visible_only_after_worker_slot_is_released():
         name="inference-test",
     )
     assert _poll(queue).result == "image"
+
+
+def test_back_to_back_terminal_events_cannot_be_inverted():
+    queue = SingleWorkerEventQueue[str]()
+    first_put_started = threading.Event()
+    release_first_put = threading.Event()
+    second_operation_started = threading.Event()
+    original_put = queue._events.put
+
+    def controlled_put(queued_event):
+        event, is_terminal = queued_event
+        if is_terminal and event == "first":
+            first_put_started.set()
+            assert release_first_put.wait(1.0)
+        original_put(queued_event)
+
+    queue._events.put = controlled_put
+
+    assert queue.submit(
+        lambda _cancel: "first",
+        name="first-terminal-order",
+    )
+    assert first_put_started.wait(1.0)
+
+    accepted: list[bool] = []
+
+    def submit_second():
+        def operation(_cancel):
+            second_operation_started.set()
+            return "second"
+
+        accepted.append(queue.submit(
+            operation,
+            name="second-terminal-order",
+        ))
+
+    contender = threading.Thread(target=submit_second)
+    contender.start()
+
+    # The first terminal Queue.put is deliberately paused. The lifecycle lock
+    # must keep a second submit from starting until that event is enqueued.
+    assert not second_operation_started.wait(0.05)
+    release_first_put.set()
+    contender.join(1.0)
+    assert not contender.is_alive()
+    assert accepted == [False]
+    assert not second_operation_started.is_set()
+    assert queue.is_busy
+    assert queue.poll_event() == "first"
+    assert not queue.is_busy
+
+    assert queue.submit(
+        lambda _cancel: "second",
+        name="second-terminal-order-after-poll",
+    )
+    deadline = time.monotonic() + 1.0
+    second = None
+    while second is None and time.monotonic() < deadline:
+        second = queue.poll_event()
+        time.sleep(0.001)
+    assert second == "second"
+    assert queue.drain_events() == ()
 
 
 def test_cancel_is_cooperative_and_publishes_no_result():

@@ -4,16 +4,20 @@ from __future__ import annotations
 
 from tcbase import log
 
+from ..generation.provenance import GenerationProvenance
 from ..generation.types import InstructInferenceResult, InstructRequest
 from ..workers.ml_process import MlProcessClient
 from .threaded_lifecycle import EngineTaskQueue
 
 
 class InstructEngine:
+    supports_job_ids = True
+
     def __init__(self, client: MlProcessClient | None = None):
         self._client = client or MlProcessClient()
         self._tasks = EngineTaskQueue()
         self._loaded = False
+        self.model_info: dict = {}
 
     @property
     def is_loaded(self) -> bool:
@@ -23,10 +27,11 @@ class InstructEngine:
     def is_busy(self) -> bool:
         return self._tasks.is_busy
 
-    def submit_load(self):
+    def submit_load(self, *, job_id: str | None = None):
         return self._tasks.submit(
             "load",
             lambda cancel: self._load(cancel),
+            job_id=job_id,
             name="instruct-load",
             on_error=lambda _exc: log.exception(
                 "InstructPix2Pix load failed"
@@ -34,15 +39,22 @@ class InstructEngine:
         )
 
     def _load(self, cancel):
-        self._client.request("load_instruct", {}, cancel)
+        result = self._client.request("load_instruct", {}, cancel)
+        self.model_info = dict(result)
         self._loaded = True
         return True
 
-    def submit_request(self, request: InstructRequest, meta=None):
+    def submit_request(
+            self,
+            request: InstructRequest,
+            meta=None,
+            *,
+            job_id: str | None = None):
         return self._tasks.submit(
             "inference",
             lambda cancel: self._run_inference(request, cancel),
             meta=meta,
+            job_id=job_id,
             name="instruct-inference",
             on_error=lambda _exc: log.exception(
                 "InstructPix2Pix inference failed"
@@ -65,6 +77,11 @@ class InstructEngine:
         return InstructInferenceResult(
             image=result["image"],
             seed=int(result["seed"]),
+            provenance=(
+                GenerationProvenance.from_dict(result["provenance"])
+                if isinstance(result.get("provenance"), dict)
+                else None
+            ),
         )
 
     def poll_event(self):
@@ -77,3 +94,4 @@ class InstructEngine:
         if self._tasks.shutdown(timeout):
             self._client.shutdown(timeout)
             self._loaded = False
+            self.model_info = {}
