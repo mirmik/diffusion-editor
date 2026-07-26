@@ -56,6 +56,7 @@ _COMPOSITE_FRAG_SRC = """import termin_prelude;
 
 struct CompositeParams {
     float opacity;
+    float source_premultiplied;
 };
 
 [[TerminScope("draw")]]
@@ -77,8 +78,11 @@ struct FragmentOutput {
 FragmentOutput fs_main(FragmentInput input) {
     float4 texel = u_texture.Sample(input.uv);
     float alpha = texel.a * u_composite.opacity;
+    float3 rgb = texel.rgb * u_composite.opacity;
+    if (u_composite.source_premultiplied < 0.5)
+        rgb *= texel.a;
     FragmentOutput output;
-    output.color = float4(texel.rgb * alpha, alpha);
+    output.color = float4(rgb, alpha);
     return output;
 }
 """
@@ -112,7 +116,7 @@ FragmentOutput fs_main(FragmentInput input) {
 
 # Python-side std140 layout of CompositeParams. A one-float constant buffer
 # still occupies a 16-byte block on all supported backends.
-_COMPOSITE_PARAMS_FMT = "=f12x"  # opacity + 12 bytes padding (16 total)
+_COMPOSITE_PARAMS_FMT = "=ff8x"  # opacity + source kind + std140 padding
 
 
 def _full_screen_quad_verts() -> np.ndarray:
@@ -653,7 +657,11 @@ class GPUCompositor:
                                Tgfx2BlendFactor.OneMinusSrcAlpha)
             ctx.bind_shader(self._composite_vs, self._composite_fs)
 
-            self._draw_texture_quad(temp, layer.opacity)
+            self._draw_texture_quad(
+                temp,
+                layer.opacity,
+                source_premultiplied=True,
+            )
             self._release_temp_tex(temp)
         else:
             if has_children:
@@ -673,11 +681,20 @@ class GPUCompositor:
         verts = _canvas_quad_verts(x0, y0, x1, y1, self._fbo_w, self._fbo_h)
         self._draw_texture_quad(tex, opacity, verts)
 
-    def _draw_texture_quad(self, texture: Tgfx2TextureHandle, opacity: float,
-                           verts: np.ndarray | None = None):
+    def _draw_texture_quad(
+            self,
+            texture: Tgfx2TextureHandle,
+            opacity: float,
+            verts: np.ndarray | None = None,
+            *,
+            source_premultiplied: bool = False):
         ctx = self._ctx
         ctx.bind_texture_by_name("u_texture", texture)
-        data = struct.pack(_COMPOSITE_PARAMS_FMT, float(opacity))
+        data = struct.pack(
+            _COMPOSITE_PARAMS_FMT,
+            float(opacity),
+            1.0 if source_premultiplied else 0.0,
+        )
         ctx.bind_uniform_by_name("u_composite", data)
         ctx.draw_immediate_triangles(self._quad_verts if verts is None else verts, 6)
 

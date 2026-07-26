@@ -9,6 +9,11 @@ import zipfile
 import numpy as np
 from PIL import Image
 
+from ..generation.provenance import (
+    GenerationProvenance,
+    ModelIdentity,
+    ModelIdentityPolicy,
+)
 from .archive_serialization import load_pil_from_zip, save_array_to_zip
 from .tool import DiffusionTool, InstructTool, LamaTool, Tool
 
@@ -68,7 +73,7 @@ def _source_file(tool, file_key: str) -> str | None:
 
 
 def _serialize_diffusion_tool(tool: DiffusionTool, file_key: str) -> dict:
-    return {
+    data = {
         "tool_type": tool.tool_type,
         "mode": tool.mode,
         "source_file": _source_file(tool, file_key),
@@ -89,22 +94,26 @@ def _serialize_diffusion_tool(tool: DiffusionTool, file_key: str) -> dict:
         "ip_adapter_scale": tool.ip_adapter_scale,
         "masked_content": tool.masked_content,
         "resize_to_model_resolution": tool.resize_to_model_resolution,
+        "model_identity_policy": tool.model_identity_policy.value,
     }
+    if tool.model_identity is not None:
+        data["model_identity"] = tool.model_identity.to_dict()
+    return _with_generation_provenance(data, tool)
 
 
 def _serialize_lama_tool(tool: LamaTool, file_key: str) -> dict:
-    return {
+    return _with_generation_provenance({
         "tool_type": tool.tool_type,
         "source_file": _source_file(tool, file_key),
         "patch_x": tool.patch_x,
         "patch_y": tool.patch_y,
         "patch_w": tool.patch_w,
         "patch_h": tool.patch_h,
-    }
+    }, tool)
 
 
 def _serialize_instruct_tool(tool: InstructTool, file_key: str) -> dict:
-    return {
+    return _with_generation_provenance({
         "tool_type": tool.tool_type,
         "source_file": _source_file(tool, file_key),
         "patch_x": tool.patch_x,
@@ -116,7 +125,14 @@ def _serialize_instruct_tool(tool: InstructTool, file_key: str) -> dict:
         "guidance_scale": tool.guidance_scale,
         "steps": tool.steps,
         "seed": tool.seed,
-    }
+    }, tool)
+
+
+def _with_generation_provenance(data: dict, tool: Tool) -> dict:
+    provenance = getattr(tool, "generation_provenance", None)
+    if provenance is not None:
+        data["generation_provenance"] = provenance.to_dict()
+    return data
 
 
 def _load_source_patch(d: dict, zf: zipfile.ZipFile) -> Image.Image | None:
@@ -153,6 +169,19 @@ def _load_diffusion_tool(d: dict, zf: zipfile.ZipFile) -> ToolLoadResult:
     tool.ip_adapter_scale = d.get("ip_adapter_scale", 0.6)
     tool.masked_content = d.get("masked_content", "original")
     tool.resize_to_model_resolution = d.get("resize_to_model_resolution", False)
+    identity = d.get("model_identity")
+    if isinstance(identity, dict):
+        try:
+            tool.model_identity = ModelIdentity.from_dict(identity)
+        except (TypeError, ValueError) as exc:
+            logger.warning("Ignoring invalid model identity: %s", exc)
+    policy = d.get("model_identity_policy", ModelIdentityPolicy.WARN.value)
+    try:
+        tool.model_identity_policy = ModelIdentityPolicy(str(policy))
+    except ValueError:
+        logger.warning("Unknown model identity policy while loading: %s", policy)
+        tool.model_identity_policy = ModelIdentityPolicy.WARN
+    _load_generation_provenance(tool, d)
     return ToolLoadResult(
         tool=tool,
         legacy_patch_rect=_load_legacy_patch_rect(d),
@@ -167,6 +196,7 @@ def _load_lama_tool(d: dict, zf: zipfile.ZipFile) -> ToolLoadResult:
         patch_w=d["patch_w"],
         patch_h=d["patch_h"],
     )
+    _load_generation_provenance(tool, d)
     return ToolLoadResult(tool=tool)
 
 
@@ -183,7 +213,18 @@ def _load_instruct_tool(d: dict, zf: zipfile.ZipFile) -> ToolLoadResult:
         steps=d.get("steps", 20),
         seed=d.get("seed", -1),
     )
+    _load_generation_provenance(tool, d)
     return ToolLoadResult(
         tool=tool,
         legacy_patch_rect=_load_legacy_patch_rect(d),
     )
+
+
+def _load_generation_provenance(tool: Tool, data: dict) -> None:
+    raw = data.get("generation_provenance")
+    if not isinstance(raw, dict):
+        return
+    try:
+        tool.generation_provenance = GenerationProvenance.from_dict(raw)
+    except (TypeError, ValueError) as exc:
+        logger.warning("Ignoring invalid generation provenance: %s", exc)

@@ -14,6 +14,7 @@ from termin.gui_native import (
     Point,
     PointerEventType,
     Rect,
+    Size,
     TcDocument,
 )
 from tgfx import Tgfx2Context
@@ -36,6 +37,7 @@ class NativeEditorCanvas:
             request_repaint: Callable[[], None],
             gpu_compositing: bool = True) -> None:
         self._closed = False
+        self._document = document
         self._request_repaint = request_repaint
         self._graphics_owner = graphics_owner
         self._graphics = None
@@ -51,6 +53,16 @@ class NativeEditorCanvas:
         self.canvas = document.create_canvas()
         self.canvas.widget.stable_id = "diffusion-editor.canvas"
         self.widget = self.canvas.widget
+        # Canvas itself reserves pointer capture for middle-button panning.
+        # A zero-size live relay owns capture for edit gestures and forwards
+        # raw window coordinates back through Canvas image-space conversion.
+        self._capture_relay = document.create_scene_view()
+        self._capture_relay.widget.stable_id = (
+            "diffusion-editor.canvas.capture-relay"
+        )
+        self._capture_relay.widget.min_size = Size(0.0, 0.0)
+        self._capture_relay.widget.preferred_size = Size(0.0, 0.0)
+        self._capture_relay.set_pointer_handler(self._on_captured_pointer)
         self._image_lease = lease_factory()
         self._overlay_lease = lease_factory()
         self._image_lease.bind_canvas(self.canvas, CanvasTextureLayer.IMAGE)
@@ -86,6 +98,10 @@ class NativeEditorCanvas:
     def overlay_lease(self):
         return self._overlay_lease
 
+    @property
+    def pointer_capture_widget(self):
+        return self._capture_relay.widget
+
     def fit_in_view(self) -> None:
         self._require_open()
         self.canvas.fit_in_view()
@@ -115,19 +131,78 @@ class NativeEditorCanvas:
             return True
         return False
 
+    def cancel_pointer_interaction(self) -> None:
+        """Cancel an edit and release the relay's document-wide capture."""
+        controller = getattr(self, "controller", None)
+        cancel = getattr(controller, "pointer_cancel", None)
+        first_error: BaseException | None = None
+        first_traceback = None
+        try:
+            if cancel is not None:
+                cancel()
+        except BaseException as exc:
+            first_error = exc
+            first_traceback = exc.__traceback__
+        document = getattr(self, "_document", None)
+        relay = getattr(self, "_capture_relay", None)
+        try:
+            if (
+                    document is not None
+                    and relay is not None
+                    and document.pointer_capture == relay.handle):
+                document.release_pointer_capture(relay.handle)
+        except BaseException as exc:
+            if first_error is None:
+                first_error = exc
+                first_traceback = exc.__traceback__
+        if first_error is not None:
+            raise first_error.with_traceback(first_traceback)
+
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
-        if self._layer_stack.on_changed is self._stack_changed_callback:
-            self._layer_stack.on_changed = self._previous_stack_changed
+        errors: list[tuple[BaseException, object]] = []
+
+        def cleanup(callback) -> None:
+            try:
+                callback()
+            except BaseException as exc:
+                errors.append((exc, exc.__traceback__))
+
+        layer_stack = getattr(self, "_layer_stack", None)
+        stack_callback = getattr(self, "_stack_changed_callback", None)
+        if (
+                layer_stack is not None
+                and layer_stack.on_changed is stack_callback):
+            layer_stack.on_changed = getattr(
+                self, "_previous_stack_changed", None)
+        cleanup(self.cancel_pointer_interaction)
+        document = getattr(self, "_document", None)
+        relay = getattr(self, "_capture_relay", None)
+        if document is not None and relay is not None:
+            if document.pointer_capture == relay.handle:
+                cleanup(lambda: document.release_pointer_capture(relay.handle))
+            cleanup(lambda: relay.set_pointer_handler(None))
         # The current Python binding advertises ``None`` but rejects it at
         # runtime, so detach application state with a capture-free no-op.
-        self.canvas.set_paint_callback(lambda _context: None)
+        canvas = getattr(self, "canvas", None)
+        if canvas is not None:
+            cleanup(
+                lambda: canvas.set_paint_callback(lambda _context: None))
         # The leases are released while their renderer and Canvas are alive.
-        self._overlay_lease.close()
-        self._image_lease.close()
-        self.controller.dispose()
+        overlay_lease = getattr(self, "_overlay_lease", None)
+        if overlay_lease is not None:
+            cleanup(overlay_lease.close)
+        image_lease = getattr(self, "_image_lease", None)
+        if image_lease is not None:
+            cleanup(image_lease.close)
+        controller = getattr(self, "controller", None)
+        if controller is not None:
+            cleanup(controller.dispose)
+        if errors:
+            error, traceback = errors[0]
+            raise error.with_traceback(traceback)
 
     def _on_stack_changed(self) -> None:
         if self._previous_stack_changed is not None:
@@ -226,11 +301,31 @@ class NativeEditorCanvas:
                 int(event.button),
                 int(event.modifiers),
             )
+            if self.controller.pointer_interaction_active:
+                if not self._document.set_pointer_capture(
+                        self._capture_relay.handle):
+                    self.controller.pointer_cancel()
         elif event.type == PointerEventType.Move:
             self.controller.pointer_move(image_point.x, image_point.y)
         elif event.type == PointerEventType.Up:
             self.controller.pointer_up(image_point.x, image_point.y)
             self._sync_gpu_image()
+        elif event.type == PointerEventType.Cancel:
+            self.cancel_pointer_interaction()
+            self._sync_gpu_image()
+
+    def _on_captured_pointer(self, _world_point: Point, event) -> bool:
+        if self._closed:
+            return False
+        image_point = self.canvas.widget_to_image(Point(event.x, event.y))
+        try:
+            self._on_pointer_input(image_point, event)
+        finally:
+            if event.type in (PointerEventType.Up, PointerEventType.Cancel):
+                if self._document.pointer_capture == self._capture_relay.handle:
+                    self._document.release_pointer_capture(
+                        self._capture_relay.handle)
+        return True
 
     def _paint_annotations(self, context) -> None:
         if self._closed:

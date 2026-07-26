@@ -244,6 +244,8 @@ def _tool_draw_grid(args, config):
 
         sx = int(args["sections_x"])
         sy = int(args["sections_y"])
+        if sx < 1 or sy < 1:
+            return "sections_x and sections_y must both be at least 1."
         r = int(args.get("r", 255))
         g = int(args.get("g", 0))
         b = int(args.get("b", 0))
@@ -464,8 +466,8 @@ def create_editor_tool_registry() -> ToolRegistry | None:
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "sections_x": {"type": "integer", "description": "Number of vertical divisions (columns)."},
-                    "sections_y": {"type": "integer", "description": "Number of horizontal divisions (rows)."},
+                    "sections_x": {"type": "integer", "minimum": 1, "description": "Number of vertical divisions (columns)."},
+                    "sections_y": {"type": "integer", "minimum": 1, "description": "Number of horizontal divisions (rows)."},
                     "r": {"type": "integer", "description": "Red channel (0-255). Default 255."},
                     "g": {"type": "integer", "description": "Green channel (0-255). Default 0."},
                     "b": {"type": "integer", "description": "Blue channel (0-255). Default 0."},

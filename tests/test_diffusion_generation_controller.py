@@ -80,7 +80,7 @@ def test_start_regeneration_loads_requested_model_before_inference():
     event = controller.start_regeneration(layer)
 
     assert event.status == "Loading model for regeneration..."
-    assert controller.pending_layer is layer
+    assert controller.pending_context.layer_id == layer.id
     assert engine.calls == [("load", "next.safetensors", "v_prediction")]
 
 
@@ -122,7 +122,12 @@ def test_start_regeneration_loads_ip_adapter_when_reference_is_present():
     event = controller.start_regeneration(layer)
 
     assert event.status == "Loading IP-Adapter..."
-    assert controller.pending_layer is layer
+    assert controller.pending_context.layer_id == layer.id
+    assert controller.pending_context.reference_image.size == (2, 2)
+    ref.image[:] = 0
+    frozen_reference = np.array(
+        controller.pending_context.reference_image.to_image())
+    assert tuple(frozen_reference[0, 0]) == (10, 20, 30)
     assert engine.calls == [("load_ip_adapter",)]
 
 
@@ -143,8 +148,9 @@ def test_poll_inference_returns_pending_layer_and_clears_pending():
 
     event = controller.poll()
 
-    assert event.inference_result == (layer, result_image, 123)
-    assert controller.pending_layer is None
+    context, image, seed = event.inference_result
+    assert (context.layer_id, image, seed) == (layer.id, result_image, 123)
+    assert controller.pending_context is None
 
 
 def test_regeneration_requested_during_explicit_model_load_is_queued():
@@ -157,6 +163,9 @@ def test_regeneration_requested_during_explicit_model_load_is_queued():
         layer_stack=stack,
         composite_below=lambda _layer: None,
     )
+    engine.is_busy = False
+    controller.submit_load_model("loaded.safetensors")
+    engine.is_busy = True
 
     queued = controller.start_regeneration(layer)
 

@@ -17,9 +17,11 @@ shape when an engine later moves to a process worker.
 - Workers publish immutable event objects through a thread-safe queue.
 - The UI learns about completion, errors, and status only by polling that
   queue. It does not inspect worker-mutated result or error flags.
-- A terminal event becomes visible only after the worker slot is released.
-  This lets a controller safely submit the next operation while handling the
-  event.
+- A terminal event is enqueued before worker ownership is released. The queue
+  remains busy until polling consumes that terminal event, and releases the
+  slot before returning it. This prevents a back-to-back request from
+  overtaking or being matched to the previous result while still letting a
+  controller submit the next operation as it handles the event.
 - Polling removes an event exactly once.
 
 ## Cancellation and shutdown

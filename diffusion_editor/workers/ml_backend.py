@@ -4,10 +4,23 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import secrets
 from typing import Any, Callable
 
 import numpy as np
 from PIL import Image, ImageFilter
+
+from ..generation.provenance import (
+    FrozenJsonObject,
+    GenerationProvenance,
+    ModelIdentity,
+    ModelIdentityPolicy,
+    ModelIdentityStatus,
+    RequestProvenance,
+    enforce_model_identity_policy,
+    floating_model_identity,
+    resolve_local_model_identity,
+)
 
 
 _VPRED_HINTS = (
@@ -22,8 +35,17 @@ class RealMlBackend:
         self._diffusion_pipe = None
         self._diffusion_mode: str | None = None
         self._diffusion_path: str | None = None
+        self._diffusion_identity: ModelIdentity | None = None
+        self._diffusion_warnings: tuple[str, ...] = ()
+        self._diffusion_device: str | None = None
+        self._diffusion_dtype: str | None = None
         self._ip_adapter_loaded = False
+        self._ip_adapter_identity: ModelIdentity | None = None
         self._instruct_pipe = None
+        self._instruct_identity: ModelIdentity | None = None
+        self._instruct_warnings: tuple[str, ...] = ()
+        self._instruct_device: str | None = None
+        self._instruct_dtype: str | None = None
         self._dino_model = None
         self._dino_processor = None
         self._dino_key: tuple[str, str] | None = None
@@ -65,6 +87,14 @@ class RealMlBackend:
         self.unload_diffusion()
         model_path = str(data["model_path"])
         device = self._device(data.get("device"))
+        identity, identity_warnings = resolve_local_model_identity(
+            model_path,
+            expected_content_hash=data.get("expected_content_hash"),
+            policy=data.get(
+                "model_identity_policy",
+                ModelIdentityPolicy.WARN.value,
+            ),
+        )
         name = os.path.basename(model_path).lower()
         guessed = (
             "v_prediction"
@@ -87,6 +117,10 @@ class RealMlBackend:
         pipe.to(device)
         self._diffusion_pipe = pipe
         self._diffusion_path = model_path
+        self._diffusion_identity = identity
+        self._diffusion_warnings = identity_warnings
+        self._diffusion_device = device
+        self._diffusion_dtype = str(self._dtype(device)).removeprefix("torch.")
         self._diffusion_mode = "txt2img"
         scheduler = pipe.scheduler
         return {
@@ -100,6 +134,10 @@ class RealMlBackend:
                 "guessed_from_name": guessed,
                 "override": data.get("prediction_type"),
                 "device": device,
+                "dtype": self._diffusion_dtype,
+                "pipeline": type(pipe).__name__,
+                "model_identity": identity.to_dict(),
+                "warnings": list(identity_warnings),
             },
         }
 
@@ -107,7 +145,12 @@ class RealMlBackend:
         self._diffusion_pipe = None
         self._diffusion_path = None
         self._diffusion_mode = None
+        self._diffusion_identity = None
+        self._diffusion_warnings = ()
+        self._diffusion_device = None
+        self._diffusion_dtype = None
         self._ip_adapter_loaded = False
+        self._ip_adapter_identity = None
         try:
             import torch
             if torch.cuda.is_available():
@@ -124,7 +167,15 @@ class RealMlBackend:
             weight_name="ip-adapter_sdxl.bin",
         )
         self._ip_adapter_loaded = True
-        return {"loaded": True}
+        self._ip_adapter_identity = floating_model_identity(
+            "huggingface",
+            "h94/IP-Adapter",
+        )
+        return {
+            "loaded": True,
+            "model_identity": self._ip_adapter_identity.to_dict(),
+            "warnings": [self._ip_adapter_identity.warning],
+        }
 
     def _ensure_diffusion_mode(self, mode: str) -> None:
         from diffusers import (
@@ -162,16 +213,14 @@ class RealMlBackend:
         self,
         data: dict[str, Any],
         images: dict[str, Image.Image | None],
-    ) -> tuple[Image.Image, int]:
+    ) -> tuple[Image.Image, int, dict[str, Any]]:
         import torch
 
         mode = str(data["mode"])
         self._ensure_diffusion_mode(mode)
         pipe = self._diffusion_pipe
         assert pipe is not None
-        seed = int(data["seed"])
-        if seed == -1:
-            seed = int(torch.randint(0, 2**32, (1,)).item())
+        seed = self._resolve_seed(int(data["seed"]))
         generator = torch.Generator(device="cpu").manual_seed(seed)
         width = max(8, int(data["width"]) // 8 * 8)
         height = max(8, int(data["height"]) // 8 * 8)
@@ -195,6 +244,7 @@ class RealMlBackend:
                     image,
                     images["mask"],
                     str(data["masked_content"]),
+                    seed=seed,
                 )
             kwargs["image"] = image
             kwargs["strength"] = float(data["strength"])
@@ -215,13 +265,23 @@ class RealMlBackend:
         if ip_image is not None and self._ip_adapter_loaded:
             pipe.set_ip_adapter_scale(float(data["ip_adapter_scale"]))
             kwargs["ip_adapter_image"] = ip_image.convert("RGB")
-        return pipe(**kwargs).images[0], seed
+        output = pipe(**kwargs).images[0]
+        provenance = self._diffusion_provenance(
+            data,
+            pipe=pipe,
+            seed=seed,
+            width=width,
+            height=height,
+        )
+        return output, seed, provenance.to_dict()
 
     @staticmethod
     def _prepare_masked_content(
         image: Image.Image,
         mask: Image.Image | None,
         mode: str,
+        *,
+        seed: int,
     ) -> Image.Image:
         if mask is None:
             return image
@@ -233,7 +293,7 @@ class RealMlBackend:
         if mode == "fill":
             replacement = np.array(image.filter(ImageFilter.GaussianBlur(32)))
         elif mode == "latent_noise":
-            replacement = np.random.randint(
+            replacement = np.random.default_rng(seed).integers(
                 0, 256, image_array.shape, dtype=np.uint8
             )
         elif mode == "latent_nothing":
@@ -246,6 +306,14 @@ class RealMlBackend:
             "RGB",
         )
 
+    @staticmethod
+    def _resolve_seed(request_seed: int) -> int:
+        if request_seed == -1:
+            return secrets.randbits(32)
+        if request_seed < 0 or request_seed >= 2**32:
+            raise ValueError("seed must be -1 or an unsigned 32-bit integer")
+        return request_seed
+
     def load_instruct(self, data: dict[str, Any]) -> dict[str, Any]:
         from diffusers import (
             EulerAncestralDiscreteScheduler,
@@ -253,30 +321,58 @@ class RealMlBackend:
         )
 
         device = self._device(data.get("device"))
+        identity = floating_model_identity(
+            "huggingface",
+            "timbrooks/instruct-pix2pix",
+            revision=(
+                str(data["revision"])
+                if data.get("revision") is not None else None
+            ),
+        )
+        identity_warnings = enforce_model_identity_policy(
+            identity,
+            data.get(
+                "model_identity_policy",
+                ModelIdentityPolicy.WARN.value,
+            ),
+        )
         pipe = StableDiffusionInstructPix2PixPipeline.from_pretrained(
             "timbrooks/instruct-pix2pix",
             torch_dtype=self._dtype(device),
             safety_checker=None,
+            revision=(
+                str(data["revision"])
+                if data.get("revision") is not None else None
+            ),
         )
         pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(
             pipe.scheduler.config
         )
         pipe.to(device)
         self._instruct_pipe = pipe
-        return {"loaded": True, "device": device}
+        self._instruct_identity = identity
+        self._instruct_warnings = identity_warnings
+        self._instruct_device = device
+        self._instruct_dtype = str(self._dtype(device)).removeprefix("torch.")
+        return {
+            "loaded": True,
+            "device": device,
+            "dtype": self._instruct_dtype,
+            "pipeline": type(pipe).__name__,
+            "model_identity": identity.to_dict(),
+            "warnings": list(identity_warnings),
+        }
 
     def instruct(
         self,
         data: dict[str, Any],
         image: Image.Image,
-    ) -> tuple[Image.Image, int]:
+    ) -> tuple[Image.Image, int, dict[str, Any]]:
         import torch
 
         if self._instruct_pipe is None:
             raise RuntimeError("InstructPix2Pix model not loaded")
-        seed = int(data["seed"])
-        if seed == -1:
-            seed = int(torch.randint(0, 2**32, (1,)).item())
+        seed = self._resolve_seed(int(data["seed"]))
         generator = torch.Generator(device="cpu").manual_seed(seed)
         result = self._instruct_pipe(
             prompt=str(data["instruction"]),
@@ -286,7 +382,123 @@ class RealMlBackend:
             image_guidance_scale=float(data["image_guidance_scale"]),
             generator=generator,
         ).images[0]
-        return result, seed
+        provenance = self._instruct_provenance(data, seed, result.size)
+        return result, seed, provenance.to_dict()
+
+    @staticmethod
+    def _package_version(name: str) -> str | None:
+        try:
+            from importlib.metadata import version
+            return version(name)
+        except Exception:
+            return None
+
+    def _diffusion_provenance(
+            self,
+            data: dict[str, Any],
+            *,
+            pipe,
+            seed: int,
+            width: int,
+            height: int,
+    ) -> GenerationProvenance:
+        identity = self._diffusion_identity or ModelIdentity(
+            provider="local",
+            repository=(
+                Path(self._diffusion_path).name
+                if self._diffusion_path else None
+            ),
+            revision=None,
+            content_hash=None,
+            local_override=self._diffusion_path,
+            status=ModelIdentityStatus.UNKNOWN,
+            warning="Diffusion model identity was not resolved",
+        )
+        warnings = list(self._diffusion_warnings)
+        runtime: dict[str, Any] = {
+            "pipeline": type(pipe).__name__,
+            "scheduler": type(pipe.scheduler).__name__,
+            "device": self._diffusion_device,
+            "dtype": self._diffusion_dtype,
+            "torch_version": self._package_version("torch"),
+            "diffusers_version": self._package_version("diffusers"),
+            "transformers_version": self._package_version("transformers"),
+        }
+        if self._ip_adapter_identity is not None:
+            runtime["ip_adapter_model"] = self._ip_adapter_identity.to_dict()
+            if self._ip_adapter_identity.warning:
+                warnings.append(self._ip_adapter_identity.warning)
+        request = RequestProvenance.capture(
+            "diffusion",
+            {
+                key: data.get(key)
+                for key in (
+                    "prompt",
+                    "negative_prompt",
+                    "strength",
+                    "steps",
+                    "guidance_scale",
+                    "seed",
+                    "mode",
+                    "masked_content",
+                    "ip_adapter_scale",
+                    "width",
+                    "height",
+                )
+            },
+        )
+        return GenerationProvenance(
+            operation="diffusion",
+            model=identity,
+            request=request,
+            seed=seed,
+            width=width,
+            height=height,
+            runtime=FrozenJsonObject.capture(runtime),
+            warnings=tuple(warnings),
+        )
+
+    def _instruct_provenance(
+            self,
+            data: dict[str, Any],
+            seed: int,
+            size: tuple[int, int],
+    ) -> GenerationProvenance:
+        identity = self._instruct_identity or floating_model_identity(
+            "huggingface",
+            "timbrooks/instruct-pix2pix",
+        )
+        request = RequestProvenance.capture(
+            "instruct",
+            {
+                key: data.get(key)
+                for key in (
+                    "instruction",
+                    "guidance_scale",
+                    "image_guidance_scale",
+                    "steps",
+                    "seed",
+                )
+            },
+        )
+        return GenerationProvenance(
+            operation="instruct",
+            model=identity,
+            request=request,
+            seed=seed,
+            width=int(size[0]),
+            height=int(size[1]),
+            runtime=FrozenJsonObject.capture({
+                "pipeline": type(self._instruct_pipe).__name__,
+                "scheduler": type(self._instruct_pipe.scheduler).__name__,
+                "device": self._instruct_device,
+                "dtype": self._instruct_dtype,
+                "torch_version": self._package_version("torch"),
+                "diffusers_version": self._package_version("diffusers"),
+                "transformers_version": self._package_version("transformers"),
+            }),
+            warnings=self._instruct_warnings,
+        )
 
     def grounding(
         self,

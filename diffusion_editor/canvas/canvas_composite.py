@@ -162,11 +162,26 @@ class CanvasCompositeBridge:
             return
 
         x0, y0, x1, y1 = local_rect
-        cx0, cy0, cx1, cy1 = canvas_rect
-        below = self.composite_rect_below(layer, cy0, cy1, cx0, cx1)
-        above = layer.image[y0:y1, x0:x1].astype(np.float32)
-        above[:, :, 3] = np.clip(above[:, :, 3] * (1.0 - erase), 0, 255)
-        self._blend_into_composite(canvas_rect, above, below)
+        original = layer.image[y0:y1, x0:x1].copy()
+        preview = original.copy()
+        preview_alpha = (
+            preview[:, :, 3].astype(np.float32) * (1.0 - erase)
+        )
+        preview[:, :, 3] = np.clip(preview_alpha, 0, 255).astype(np.uint8)
+
+        # A mask-erase preview is not committed to the layer yet.  Render the
+        # temporary pixels through the canonical document compositor so upper
+        # layers, group opacity, solo and straight-alpha conversion stay
+        # identical to a full rebuild.
+        layer.image[y0:y1, x0:x1] = preview
+        self._layer_stack.mark_layer_dirty(
+            layer, canvas_rect, pixels_changed=False)
+        try:
+            self._replace_with_canonical_rect(canvas_rect)
+        finally:
+            layer.image[y0:y1, x0:x1] = original
+            self._layer_stack.mark_layer_dirty(
+                layer, canvas_rect, pixels_changed=False)
 
     @property
     def display_tex(self):
@@ -193,30 +208,21 @@ class CanvasCompositeBridge:
             layer: Layer,
             local_rect: Rect,
             canvas_rect: Rect) -> None:
-        x0, y0, x1, y1 = local_rect
-        cx0, cy0, cx1, cy1 = canvas_rect
-        below = self.composite_rect_below(layer, cy0, cy1, cx0, cx1)
-        above = layer.image[y0:y1, x0:x1].astype(np.float32)
-        self._blend_into_composite(canvas_rect, above, below)
+        del layer, local_rect
+        self._replace_with_canonical_rect(canvas_rect)
 
-    def _blend_into_composite(
-            self,
-            canvas_rect: Rect,
-            above: np.ndarray,
-            below: np.ndarray) -> None:
+    def _replace_with_canonical_rect(self, canvas_rect: Rect) -> None:
         if self._composite is None:
             return
         cx0, cy0, cx1, cy1 = canvas_rect
-        sa = above[:, :, 3:4] / 255.0
-        inv_sa = 1.0 - sa
-        da = below[:, :, 3:4] / 255.0
-        out_a = sa + da * inv_sa
-        safe_a = np.maximum(out_a, 1.0 / 255.0)
-        out_rgb = (above[:, :, :3] * sa + below[:, :, :3] * da * inv_sa) / safe_a
-        self._composite[cy0:cy1, cx0:cx1, :3] = np.clip(
-            out_rgb, 0, 255).astype(np.uint8)
-        self._composite[cy0:cy1, cx0:cx1, 3:4] = np.clip(
-            out_a * 255.0, 0, 255).astype(np.uint8)
+        cx0 = max(0, min(cx0, self._layer_stack.width))
+        cy0 = max(0, min(cy0, self._layer_stack.height))
+        cx1 = max(0, min(cx1, self._layer_stack.width))
+        cy1 = max(0, min(cy1, self._layer_stack.height))
+        if cx1 <= cx0 or cy1 <= cy0:
+            return
+        canonical = self._layer_stack.composite_rect(cx0, cy0, cx1, cy1)
+        self._composite[cy0:cy1, cx0:cx1] = canonical
         if self._update_image_region is None:
             self._set_image(self._composite)
         else:

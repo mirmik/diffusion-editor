@@ -6,6 +6,7 @@ from collections.abc import Callable
 from queue import Empty, Queue
 import threading
 from typing import Generic, Literal, TypeVar
+import uuid
 
 from ..generation.types import EnginePollEvent
 
@@ -22,16 +23,20 @@ class SingleWorkerEventQueue(Generic[EventT]):
     """Atomically owns one worker thread and its immutable outbound events."""
 
     def __init__(self) -> None:
-        self._events: Queue[EventT] = Queue()
+        self._events: Queue[tuple[EventT, bool]] = Queue()
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
+        self._terminal_pending = False
         self._cancel = threading.Event()
         self._accepting = True
 
     @property
     def is_busy(self) -> bool:
         with self._lock:
-            return self._thread is not None
+            return (
+                self._thread is not None
+                or (self._accepting and self._terminal_pending)
+            )
 
     @property
     def cancellation_requested(self) -> bool:
@@ -45,7 +50,11 @@ class SingleWorkerEventQueue(Generic[EventT]):
         discard_pending: bool = False,
     ) -> bool:
         with self._lock:
-            if not self._accepting or self._thread is not None:
+            if (
+                not self._accepting
+                or self._thread is not None
+                or self._terminal_pending
+            ):
                 return False
             if discard_pending:
                 while True:
@@ -74,22 +83,29 @@ class SingleWorkerEventQueue(Generic[EventT]):
         finally:
             current = threading.current_thread()
             with self._lock:
+                # Enqueue the terminal event before publishing the idle state.
+                # Otherwise a back-to-back submit can finish and enqueue its
+                # terminal event in the window between these two transitions.
+                if terminal_event is not None:
+                    self._events.put((terminal_event, True))
+                    self._terminal_pending = True
                 if self._thread is current:
                     self._thread = None
-            # A controller handling a terminal event may immediately submit the
-            # next operation, so publish it only after releasing worker
-            # ownership.
-            if terminal_event is not None:
-                self._events.put(terminal_event)
 
     def emit(self, event: EventT) -> None:
-        self._events.put(event)
+        self._events.put((event, False))
 
     def poll_event(self) -> EventT | None:
-        try:
-            return self._events.get_nowait()
-        except Empty:
-            return None
+        # Serialize terminal publication with polling so a controller never
+        # observes that event until the worker slot has also been released.
+        with self._lock:
+            try:
+                event, is_terminal = self._events.get_nowait()
+            except Empty:
+                return None
+            if is_terminal:
+                self._terminal_pending = False
+            return event
 
     def drain_events(self) -> tuple[EventT, ...]:
         events: list[EventT] = []
@@ -133,9 +149,12 @@ class EngineTaskQueue:
         operation: Callable[[threading.Event], object | None],
         *,
         meta: object | None = None,
+        job_id: str | None = None,
         name: str,
         on_error: Callable[[Exception], None] | None = None,
     ) -> bool:
+        terminal_job_id = job_id or f"engine_job_{uuid.uuid4().hex}"
+
         def run(cancel: threading.Event) -> EnginePollEvent:
             result: object | None = None
             error: str | None = None
@@ -156,6 +175,7 @@ class EngineTaskQueue:
                 result=result,
                 error=error,
                 meta=meta,
+                job_id=terminal_job_id,
             )
 
         return self._worker.submit(run, name=name)

@@ -90,6 +90,63 @@ class TestCompositeCorrectness:
         assert result[:6, :, 3].sum() == 0
         assert result[:, :6, 3].sum() == 0
 
+    def test_public_composite_is_straight_rgba(self):
+        stack = LayerStack(tile_size=8)
+        image = np.array(
+            [[[203, 91, 17, 37], [88, 99, 111, 0]]],
+            dtype=np.uint8,
+        )
+        stack.init_from_image(image)
+
+        result = stack.composite()
+
+        # A straight-alpha boundary preserves the colour of a translucent
+        # source.  RGB hidden behind zero alpha is normalized to zero.
+        np.testing.assert_array_equal(
+            result,
+            np.array([[[203, 91, 17, 37], [0, 0, 0, 0]]], dtype=np.uint8),
+        )
+
+    def test_group_opacity_matches_porter_duff_reference(self):
+        stack = LayerStack(tile_size=8)
+        stack._width = 1
+        stack._height = 1
+        bottom = Layer(
+            "bottom", 1, 1, _solid_image(1, 1, 20, 40, 240, 128))
+        group = Layer(
+            "group", 1, 1, _solid_image(1, 1, 200, 20, 40, 128))
+        child = Layer(
+            "child", 1, 1, _solid_image(1, 1, 10, 220, 30, 128))
+        group.add_child(child)
+        group.opacity = 0.4
+        stack._layers = [group, bottom]
+        stack._active_layer = group
+        stack._rebuild_caches()
+
+        def _premultiplied(color):
+            rgba = np.asarray(color, dtype=np.float64) / 255.0
+            return np.concatenate((rgba[:3] * rgba[3], rgba[3:4]))
+
+        def _over(source, destination):
+            return source + destination * (1.0 - source[3])
+
+        bottom_p = _premultiplied((20, 40, 240, 128))
+        child_p = _premultiplied((10, 220, 30, 128))
+        own_p = _premultiplied((200, 20, 40, 128))
+        subtree = _over(own_p, child_p) * group.opacity
+        expected_p = _over(subtree, bottom_p)
+        expected = np.concatenate((
+            expected_p[:3] / expected_p[3],
+            expected_p[3:4],
+        ))
+        expected = np.rint(expected * 255.0).astype(np.uint8)
+
+        np.testing.assert_allclose(
+            stack.composite()[0, 0],
+            expected,
+            atol=1,
+        )
+
 
 # ---------- prefix cache behaviour ----------
 
@@ -251,6 +308,20 @@ class TestStructuralOps:
         assert len(stack.layers) == 1
         result = stack.composite()
         np.testing.assert_array_equal(result, expected)
+
+    def test_translucent_flatten_is_idempotent(self):
+        stack = LayerStack(tile_size=8)
+        image = _solid_image(4, 4, 203, 91, 17, 37)
+        stack.init_from_image(image)
+        expected = stack.composite().copy()
+
+        stack.flatten()
+        once = stack.composite().copy()
+        stack.flatten()
+        twice = stack.composite()
+
+        np.testing.assert_array_equal(once, expected)
+        np.testing.assert_array_equal(twice, expected)
 
     def test_init_from_image(self):
         stack = _make_stack(5)
@@ -511,6 +582,30 @@ class TestDeepNesting:
         assert prefix_mid is not None
         assert prefix_mid[0, 0, 3] > 0  # includes leaf
 
+    def test_translucent_nested_solo_is_not_blended_twice(self):
+        stack = LayerStack(tile_size=8)
+        stack._width = 2
+        stack._height = 2
+        ancestor = Layer("ancestor", 2, 2, _solid_image(
+            2, 2, 255, 0, 0, 128))
+        middle = Layer("middle", 2, 2, _solid_image(
+            2, 2, 0, 255, 0, 128))
+        solo = Layer("solo", 2, 2, _solid_image(
+            2, 2, 40, 100, 220, 96))
+        middle.add_child(solo)
+        ancestor.add_child(middle)
+        stack._layers = [ancestor]
+        stack._active_layer = solo
+        stack.set_solo_layer(solo)
+
+        reference = LayerStack(tile_size=8)
+        reference.init_from_image(solo.image.copy())
+
+        np.testing.assert_array_equal(
+            stack.composite(),
+            reference.composite(),
+        )
+
 
 # ---------- get_prefix_below_rect ----------
 
@@ -535,6 +630,40 @@ class TestPrefixBelowRect:
         rect = stack.get_prefix_below_rect(top, -10, -10, 70, 70)
         assert rect.shape == (64, 64, 4)
 
+    def test_composite_rect_matches_canonical_full_composite(self):
+        stack = _make_stack(4, w=64, h=64)
+        full = stack.composite()
+
+        rect = stack.composite_rect(7, 11, 53, 47)
+
+        np.testing.assert_array_equal(rect, full[11:47, 7:53])
+
+    @pytest.mark.parametrize("group_opacity", (0.0, 0.5, 1.0))
+    def test_nested_prefix_applies_ancestor_group_opacity(
+            self, group_opacity):
+        stack = LayerStack(tile_size=8)
+        stack.init_from_image(_solid_image(
+            1, 1, 0, 0, 255, 255))
+        group = Layer("group", 1, 1)
+        stack.insert_layer(group)
+        lower = Layer(
+            "lower", 1, 1, _solid_image(1, 1, 255, 0, 0, 255))
+        stack.insert_layer(lower)
+        stack.move_layer(lower, group, 0)
+        target = Layer(
+            "target", 1, 1, _solid_image(1, 1, 0, 255, 0, 255))
+        stack.insert_layer(target)
+        stack.move_layer(target, group, 0)
+        stack.set_opacity(group, group_opacity)
+
+        prefix = stack.get_prefix_below(target)
+        prefix_rect = stack.get_prefix_below_rect(target, 0, 0, 1, 1)
+        stack.set_visibility(target, False)
+        expected = stack.composite()
+
+        np.testing.assert_array_equal(prefix, expected)
+        np.testing.assert_array_equal(prefix_rect, expected)
+
 
 def test_cache_memory_bytes_reports_renderer_cache_size():
     stack = _make_stack(2, w=16, h=16)
@@ -542,3 +671,57 @@ def test_cache_memory_bytes_reports_renderer_cache_size():
 
     assert isinstance(stack.cache_memory_bytes(), int)
     assert stack.cache_memory_bytes() >= 0
+
+
+def test_flat_prefix_cache_aliases_previous_composite_storage():
+    stack = _make_stack(3, w=64, h=64)
+
+    stack.composite()
+
+    one_float_tile = 64 * 64 * 4 * np.dtype(np.float32).itemsize
+    assert stack.cache_memory_bytes() <= 3 * one_float_tile
+
+
+def test_render_cache_memory_limit_preserves_composite_correctness():
+    reference = _make_stack(5, w=64, h=64)
+    expected = reference.composite()
+    limited = _make_stack(5, w=64, h=64)
+    one_float_tile = 64 * 64 * 4 * np.dtype(np.float32).itemsize
+    limited.set_cache_memory_limit_bytes(one_float_tile)
+
+    actual = limited.composite()
+
+    np.testing.assert_array_equal(actual, expected)
+    assert limited.cache_memory_bytes() <= one_float_tile
+    assert limited.cache_memory_limit_bytes == one_float_tile
+
+
+def test_translucent_stack_without_cache_stays_linear():
+    stack = LayerStack()
+    stack.on_changed = lambda: None
+    stack.init_from_image(_solid_image(16, 16, 255, 0, 0, 255))
+    for index in range(14):
+        stack.add_layer(
+            f"Layer {index}",
+            _solid_image(16, 16, 0, 20 + index, 120, 180),
+        )
+    for layer in stack.layers:
+        stack.set_opacity(layer, 0.5)
+    expected = stack.composite()
+    stack.set_cache_memory_limit_bytes(0)
+
+    renderer = stack._renderer
+    original = renderer._layer_canvas_tile
+    calls = 0
+
+    def counted(layer, tx, ty):
+        nonlocal calls
+        calls += 1
+        return original(layer, tx, ty)
+
+    renderer._layer_canvas_tile = counted
+    actual = stack.composite()
+
+    np.testing.assert_array_equal(actual, expected)
+    assert calls == 15
+    assert stack.cache_memory_bytes() == 0

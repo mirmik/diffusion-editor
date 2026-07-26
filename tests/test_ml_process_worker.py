@@ -98,6 +98,12 @@ def test_fake_worker_smokes_all_three_model_families_without_main_imports():
         )
         assert diffusion["image"].size == (8, 6)
         assert diffusion["seed"] == 4242
+        assert diffusion["provenance"]["schema_version"] == 1
+        assert diffusion["provenance"]["request"]["kind"] == "diffusion"
+        assert (
+            diffusion["provenance"]["model"]["status"]
+            == "unknown"
+        )
 
         client.request("load_instruct", {}, threading.Event())
         instruct = client.request(
@@ -113,6 +119,11 @@ def test_fake_worker_smokes_all_three_model_families_without_main_imports():
             images={"image": _image()},
         )
         assert instruct["seed"] == 4343
+        assert instruct["provenance"]["operation"] == "instruct"
+        assert (
+            instruct["provenance"]["model"]["status"]
+            == "floating"
+        )
 
         grounding = client.request(
             "grounding",
@@ -196,6 +207,8 @@ def test_diffusion_engine_maps_process_result_and_state():
         event = _poll(engine)
         assert isinstance(event.result, DiffusionInferenceResult)
         assert event.result.seed == 4242
+        assert event.result.provenance is not None
+        assert event.result.provenance.operation == "diffusion"
     finally:
         engine.shutdown()
 
@@ -246,6 +259,8 @@ def test_instruct_and_grounding_engines_map_process_results():
         event = _poll(instruct)
         assert isinstance(event.result, InstructInferenceResult)
         assert event.result.seed == 4343
+        assert event.result.provenance is not None
+        assert event.result.provenance.operation == "instruct"
     finally:
         instruct.shutdown()
 
@@ -268,5 +283,7 @@ def test_instruct_and_grounding_engines_map_process_results():
             time.sleep(0.001)
         assert result_event is not None
         assert result_event.result.detections[0].label == "object"
+        assert result_event.result.canvas_width == 8
+        assert result_event.result.canvas_height == 6
     finally:
         grounding.shutdown()

@@ -93,11 +93,13 @@ class LayerTreeCoordinator:
             document: DocumentService,
             *,
             tool_factory: ToolFactory | None = None,
+            before_remove_layer: Callable[[Layer], None] | None = None,
             before_detach_tool: Callable[[Layer], None] | None = None,
             set_status: Callable[[str], None] | None = None) -> None:
         self._layer_stack = layer_stack
         self._document = document
         self._tool_factory = tool_factory
+        self._before_remove_layer = before_remove_layer
         self._before_detach_tool = before_detach_tool
         self._set_status = set_status or (lambda _text: None)
         self._view: LayerTreePresentation | None = None
@@ -131,6 +133,8 @@ class LayerTreeCoordinator:
                     name=self._layer_stack.next_name("Layer")))
         elif action == LayerTreeAction.REMOVE:
             if self._can_remove(layer):
+                if self._before_remove_layer is not None:
+                    self._before_remove_layer(layer)
                 self._document.execute(RemoveLayerCommand(layer=layer))
             else:
                 self.refresh()

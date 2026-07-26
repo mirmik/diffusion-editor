@@ -4,12 +4,16 @@ from __future__ import annotations
 
 from tcbase import log
 
+from ..generation.provenance import GenerationProvenance
 from ..generation.types import DiffusionInferenceResult, DiffusionRequest
 from ..workers.ml_process import MlProcessClient
 from .threaded_lifecycle import EngineTaskQueue
 
 
 class DiffusionEngine:
+    supports_job_ids = True
+    supports_model_identity_policy = True
+
     def __init__(self, client: MlProcessClient | None = None):
         self._client = client or MlProcessClient()
         self._tasks = EngineTaskQueue()
@@ -33,21 +37,47 @@ class DiffusionEngine:
     def ip_adapter_loaded(self) -> bool:
         return self._ip_adapter_loaded
 
-    def submit_load(self, path: str, prediction_type: str | None = None):
+    def submit_load(
+            self,
+            path: str,
+            prediction_type: str | None = None,
+            *,
+            expected_content_hash: str | None = None,
+            model_identity_policy: str = "warn",
+            job_id: str | None = None):
         return self._tasks.submit(
             "load",
-            lambda cancel: self._load(path, prediction_type, cancel),
+            lambda cancel: self._load(
+                path,
+                prediction_type,
+                cancel,
+                expected_content_hash=expected_content_hash,
+                model_identity_policy=model_identity_policy,
+            ),
             meta=path,
+            job_id=job_id,
             name="diffusion-model-load",
             on_error=lambda _exc: log.exception(f"Model load failed: {path}"),
         )
 
-    def _load(self, path, prediction_type, cancel):
+    def _load(
+            self,
+            path,
+            prediction_type,
+            cancel,
+            *,
+            expected_content_hash,
+            model_identity_policy):
         self._clear_state()
         log.info(f"[Diffusion worker] Loading model: {path}")
         result = self._client.request(
             "load_diffusion",
-            {"model_path": path, "prediction_type": prediction_type},
+            {
+                "model_path": path,
+                "prediction_type": prediction_type,
+                "expected_content_hash": expected_content_hash,
+                "model_identity_policy": model_identity_policy,
+            },
             cancel,
             on_progress=lambda message: log.info(
                 f"[Diffusion worker] {message}"
@@ -59,12 +89,13 @@ class DiffusionEngine:
         log.info(f"[Diffusion worker] Model loaded: {self.model_info}")
         return self._model_path
 
-    def submit_load_ip_adapter(self):
+    def submit_load_ip_adapter(self, *, job_id: str | None = None):
         if not self.is_loaded:
             return False
         return self._tasks.submit(
             "load_ip_adapter",
             lambda cancel: self._load_ip_adapter(cancel),
+            job_id=job_id,
             name="diffusion-ip-adapter-load",
             on_error=lambda _exc: log.exception("IP-Adapter load failed"),
         )
@@ -79,11 +110,17 @@ class DiffusionEngine:
         self._ip_adapter_loaded = True
         return True
 
-    def submit_request(self, request: DiffusionRequest, meta=None):
+    def submit_request(
+            self,
+            request: DiffusionRequest,
+            meta=None,
+            *,
+            job_id: str | None = None):
         return self._tasks.submit(
             "inference",
             lambda cancel: self._run_inference(request, cancel),
             meta=meta,
+            job_id=job_id,
             name="diffusion-inference",
             on_error=lambda _exc: log.exception(
                 f"Diffusion inference failed (mode={request.mode})"
@@ -129,6 +166,11 @@ class DiffusionEngine:
         inference_result = DiffusionInferenceResult(
             image=result["image"],
             seed=int(result["seed"]),
+            provenance=(
+                GenerationProvenance.from_dict(result["provenance"])
+                if isinstance(result.get("provenance"), dict)
+                else None
+            ),
         )
         log.info(
             f"[Diffusion worker] Generation completed "

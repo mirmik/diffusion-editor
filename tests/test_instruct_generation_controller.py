@@ -70,7 +70,7 @@ def test_start_apply_loads_model_when_needed():
 
     assert event.model_loading is True
     assert event.status == "Loading InstructPix2Pix model..."
-    assert controller.pending_layer is layer
+    assert controller.pending_context.layer_id == layer.id
     assert engine.calls == [("load",)]
 
 
@@ -110,5 +110,6 @@ def test_poll_inference_returns_pending_layer_and_clears_pending():
 
     event = controller.poll()
 
-    assert event.inference_result == (layer, result, 456)
-    assert controller.pending_layer is None
+    context, image, seed = event.inference_result
+    assert (context.layer_id, image, seed) == (layer.id, result, 456)
+    assert controller.pending_context is None

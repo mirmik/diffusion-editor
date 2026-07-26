@@ -43,6 +43,13 @@ class GroundingRequest:
 
 @dataclass(frozen=True)
 class GroundingDetection:
+    """One detection in document/canvas coordinates.
+
+    Bounding-box endpoints are canvas pixel edges (``x1``/``y1`` exclusive).
+    When present, ``mask`` covers the complete canvas rather than the active
+    layer's local bounds.
+    """
+
     label: str
     x0: int
     y0: int
@@ -54,6 +61,10 @@ class GroundingDetection:
 
 @dataclass(frozen=True)
 class GroundingResult:
+    """Grounding output bound to the composite canvas used for inference."""
+
+    canvas_width: int
+    canvas_height: int
     detections: tuple[GroundingDetection, ...]
 
 

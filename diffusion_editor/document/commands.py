@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from numbers import Integral
 from typing import Callable, Protocol
 
 import numpy as np
@@ -202,6 +203,18 @@ class DrawGridCommand:
     color: tuple[int, int, int, int] = (255, 0, 0, 128)
     thickness: int = 1
     label: str = "Draw Grid"
+
+    def __post_init__(self) -> None:
+        if isinstance(self.sections_x, bool) or not isinstance(
+                self.sections_x, Integral):
+            raise ValueError("sections_x must be an integer >= 1")
+        if isinstance(self.sections_y, bool) or not isinstance(
+                self.sections_y, Integral):
+            raise ValueError("sections_y must be an integer >= 1")
+        if self.sections_x < 1:
+            raise ValueError("sections_x must be >= 1")
+        if self.sections_y < 1:
+            raise ValueError("sections_y must be >= 1")
 
     def apply(self, layer_stack: LayerStack) -> None:
         t = max(1, self.thickness)
@@ -524,7 +537,6 @@ class ApplyGeneratedResultCommand:
         tool = layer.tool
         if tool is None:
             return
-        layer.image[:] = 0
         if layer.has_mask():
             mask_pil = Image.fromarray(layer.mask.to_uint8(), "L")
             mask_pil = mask_pil.filter(ImageFilter.MaxFilter(7))
@@ -532,8 +544,9 @@ class ApplyGeneratedResultCommand:
             mask_arg = np.array(mask_pil, dtype=np.uint8)
         else:
             mask_arg = None
-        paste_result(
-            layer.image,
+        replacement = np.zeros_like(layer.image)
+        intersects = paste_result(
+            replacement,
             self.result_image,
             tool.patch_x - layer.x,
             tool.patch_y - layer.y,
@@ -541,6 +554,9 @@ class ApplyGeneratedResultCommand:
             tool.patch_h,
             mask=mask_arg,
         )
+        if not intersects:
+            return
+        layer.image[:] = replacement
         layer_stack.mark_layer_dirty(layer)
         if layer_stack.on_changed:
             layer_stack.on_changed()

@@ -9,7 +9,7 @@ on:
       sdk_asset:
         description: Termin SDK release asset to download
         required: false
-        default: termin-sdk-linux-x86_64-py310-latest-ci.tar.zst
+        default: termin-sdk-linux-x86_64-py314t-latest-ci.tar.zst
   repository_dispatch:
     types: [termin-sdk-published]
 
@@ -19,18 +19,13 @@ permissions:
 env:
   TERMIN_REPO: mirmik/termin
   TERMIN_SDK_RELEASE_TAG: sdk-latest-ci
-  DEFAULT_TERMIN_SDK_ASSET: termin-sdk-linux-x86_64-py310-latest-ci.tar.zst
+  DEFAULT_TERMIN_SDK_ASSET: termin-sdk-linux-x86_64-py314t-latest-ci.tar.zst
 
 jobs:
   tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-
-      - name: Setup Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.10"
 
       - name: Install system dependencies
         run: |
@@ -44,61 +39,58 @@ jobs:
           INPUT_ASSET: ${{ github.event.inputs.sdk_asset }}
         run: |
           asset="${DISPATCH_ASSET:-${INPUT_ASSET:-$DEFAULT_TERMIN_SDK_ASSET}}"
+          case "$asset" in
+            termin-sdk-linux-x86_64-py314t-*.tar.zst) ;;
+            *)
+              echo "::error title=Wrong Termin SDK runtime::Expected a Linux x86-64 py314t SDK archive, got '$asset'."
+              exit 2
+              ;;
+          esac
+          checksum="${asset%.tar.zst}.sha256"
           echo "asset=$asset" >> "$GITHUB_OUTPUT"
+          echo "checksum=$checksum" >> "$GITHUB_OUTPUT"
 
-      - name: Download Termin SDK
+      - name: Download and verify Termin SDK
         env:
           GH_TOKEN: ${{ secrets.TERMIN_RELEASE_TOKEN || github.token }}
         run: |
           mkdir -p "$RUNNER_TEMP/termin-sdk"
-          gh release download "$TERMIN_SDK_RELEASE_TAG" \
-            --repo "$TERMIN_REPO" \
-            --pattern "${{ steps.sdk.outputs.asset }}" \
-            --dir "$RUNNER_TEMP"
+          if ! gh release download "$TERMIN_SDK_RELEASE_TAG" \
+              --repo "$TERMIN_REPO" \
+              --pattern "${{ steps.sdk.outputs.asset }}" \
+              --pattern "${{ steps.sdk.outputs.checksum }}" \
+              --dir "$RUNNER_TEMP"; then
+            echo "::error title=Termin SDK unavailable::The canonical CPython 3.14t SDK asset or checksum is not published in $TERMIN_REPO@$TERMIN_SDK_RELEASE_TAG."
+            exit 2
+          fi
+          (
+            cd "$RUNNER_TEMP"
+            sha256sum --check "${{ steps.sdk.outputs.checksum }}"
+          )
           tar --zstd -xf "$RUNNER_TEMP/${{ steps.sdk.outputs.asset }}" -C "$RUNNER_TEMP/termin-sdk"
           test -d "$RUNNER_TEMP/termin-sdk/lib"
           test -d "$RUNNER_TEMP/termin-sdk/wheels"
           test -f "$RUNNER_TEMP/termin-sdk/manifest.json"
           test -f "$RUNNER_TEMP/termin-sdk/python-runtime-manifest.json"
+          test -x "$RUNNER_TEMP/termin-sdk/bin/termin_python"
+          python3 -m diffusion_editor.sdk_runtime verify-python-executable \
+            --sdk "$RUNNER_TEMP/termin-sdk" \
+            --python "$RUNNER_TEMP/termin-sdk/bin/termin_python"
 
-      - name: Install Python dependencies
+      - name: Install canonical CPython 3.14t environment
         env:
           TERMIN_SDK: ${{ runner.temp }}/termin-sdk
-        run: |
-          python -m pip install --upgrade pip setuptools wheel
-          termin_requirements_output="$(
-            python -m diffusion_editor.sdk_runtime requirements --sdk "$TERMIN_SDK"
-          )"
-          mapfile -t termin_requirements <<< "$termin_requirements_output"
-          python -m pip install --no-index --no-deps \
-            --find-links "$TERMIN_SDK/wheels" "${termin_requirements[@]}"
-          python -m pip install Pillow numpy PyYAML pysdl2 pytest
-          python -m pip install --no-build-isolation --no-deps -e .
+          VENV: ${{ runner.temp }}/diffusion-editor-venv
+          BOOTSTRAP_PYTHON: python3
+        run: ./install-deps.sh
 
-      - name: Verify Termin imports
+      - name: Run canonical CPython 3.14t quality gate
         env:
           TERMIN_SDK: ${{ runner.temp }}/termin-sdk
-        run: |
-          python -m diffusion_editor.sdk_runtime verify-installed \
-            --sdk "$TERMIN_SDK" --imports
-
-      - name: Render OpenGL runtime smoke
-        env:
-          TERMIN_SDK: ${{ runner.temp }}/termin-sdk
-          TERMIN_BACKEND: opengl
+          PYTHON: ${{ runner.temp }}/diffusion-editor-venv/bin/python
           LIBGL_ALWAYS_SOFTWARE: "1"
-        run: xvfb-run -a python scripts/smoke_termin_runtime.py
-
-      - name: Exercise native editor OpenGL scenario
-        env:
-          TERMIN_SDK: ${{ runner.temp }}/termin-sdk
-          TERMIN_BACKEND: opengl
-          SDL_VIDEODRIVER: offscreen
-          LIBGL_ALWAYS_SOFTWARE: "1"
-          TERMIN_SDK_SHADER_CACHE_ROOT: ${{ runner.temp }}/native-editor-shaders
-        run: python scripts/smoke_native_root.py --windowed --frames 3
-
-      - name: Run tests
-        env:
-          TERMIN_SDK: ${{ runner.temp }}/termin-sdk
-        run: python -m pytest -q
+        run: >-
+          xvfb-run -a ./run-quality-gates.sh
+          --render-backend opengl
+          --frames 3
+          --timeout 180

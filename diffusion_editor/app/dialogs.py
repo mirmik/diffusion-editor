@@ -111,9 +111,15 @@ class ApplicationDialogCoordinator:
     def new_project(self) -> None:
         self._require_open()
         white = np.full((1024, 1024, 4), 255, dtype=np.uint8)
+        self._application.document.prepare_mutation()
         self._application.layer_stack.init_from_image(white)
-        self._document_reset(None)
-        self._application.set_status("New 1024x1024 document")
+        self._commit_document_reset(None)
+        self._present_document_reset(None)
+        self._best_effort(
+            lambda: self._application.set_status(
+                "New 1024x1024 document"),
+            "update status after creating a document",
+        )
 
     def new_project_from_image(self) -> None:
         self._show_file(
@@ -213,25 +219,44 @@ class ApplicationDialogCoordinator:
     def open_project_path(self, path: str) -> None:
         self._require_open()
         try:
+            self._application.document.prepare_mutation()
             self._application.layer_stack.load_project(path)
-            self._remember_parent(path)
-            self._document_reset(path)
-            self._application.set_status(f"Opened: {os.path.basename(path)}")
+            self._commit_document_reset(path)
         except Exception as exc:
             self._operation_error("Open Project", path, exc)
+            return
+        self._best_effort(
+            lambda: self._remember_parent(path),
+            "remember project directory",
+        )
+        self._present_document_reset(path)
+        self._best_effort(
+            lambda: self._application.set_status(
+                f"Opened: {os.path.basename(path)}"),
+            "update status after opening a project",
+        )
 
     def import_image_path(self, path: str) -> None:
         self._require_open()
         try:
             image = Image.open(path).convert("RGBA")
+            self._application.document.prepare_mutation()
             self._application.layer_stack.init_from_image(
                 np.array(image, dtype=np.uint8))
-            self._remember_parent(path)
-            self._document_reset(None)
-            self._application.set_status(
-                f"Imported: {os.path.basename(path)}")
+            self._commit_document_reset(None)
         except Exception as exc:
             self._operation_error("Import Image", path, exc)
+            return
+        self._best_effort(
+            lambda: self._remember_parent(path),
+            "remember imported image directory",
+        )
+        self._present_document_reset(None)
+        self._best_effort(
+            lambda: self._application.set_status(
+                f"Imported: {os.path.basename(path)}"),
+            "update status after importing an image",
+        )
 
     def export_image_path(self, path: str) -> None:
         self._require_open()
@@ -282,14 +307,24 @@ class ApplicationDialogCoordinator:
             path += ".deproj"
         try:
             self._application.layer_stack.save_project(path)
-            self._application.project_path = path
-            self._remember_parent(path)
-            self._application.set_window_title(
-                f"{os.path.basename(path)} — Diffusion Editor")
-            self._application.set_status(
-                f"Saved: {os.path.basename(path)}")
         except Exception as exc:
             self._operation_error("Save Project", path, exc)
+            return
+        self._application.project_path = path
+        self._best_effort(
+            lambda: self._remember_parent(path),
+            "remember saved project directory",
+        )
+        self._best_effort(
+            lambda: self._application.set_window_title(
+                f"{os.path.basename(path)} — Diffusion Editor"),
+            "update title after saving a project",
+        )
+        self._best_effort(
+            lambda: self._application.set_status(
+                f"Saved: {os.path.basename(path)}"),
+            "update status after saving a project",
+        )
 
     def _apply_settings(self, state: SettingsState | None) -> None:
         if state is None or self._closed:
@@ -339,17 +374,35 @@ class ApplicationDialogCoordinator:
 
         self._view.show_file_dialog(spec, finished)
 
-    def _document_reset(self, project_path: str | None) -> None:
+    def _commit_document_reset(self, project_path: str | None) -> None:
+        self._application.reset_document_session()
         self._application.clear_history()
         self._application.project_path = project_path
-        self._application.set_window_title(
-            "Diffusion Editor"
-            if project_path is None
-            else f"{os.path.basename(project_path)} — Diffusion Editor")
-        self._canvas.fit_in_view()
+
+    def _present_document_reset(self, project_path: str | None) -> None:
+        self._best_effort(
+            lambda: self._application.set_window_title(
+                "Diffusion Editor"
+                if project_path is None
+                else (
+                    f"{os.path.basename(project_path)} "
+                    "— Diffusion Editor")),
+            "update title after replacing the document",
+        )
+        self._best_effort(
+            self._canvas.fit_in_view,
+            "fit the replacement document in view",
+        )
 
     def _remember_parent(self, path: str) -> None:
         self._application.set_last_dir(os.path.dirname(path))
+
+    @staticmethod
+    def _best_effort(callback: Callable[[], None], description: str) -> None:
+        try:
+            callback()
+        except Exception:
+            log.exception(f"Failed to {description}")
 
     def _project_file_name(self) -> str:
         path = self._application.project_path

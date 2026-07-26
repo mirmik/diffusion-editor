@@ -9,11 +9,18 @@ from __future__ import annotations
 
 from PIL import Image
 
+from ..generation.provenance import (
+    GenerationProvenance,
+    ModelIdentity,
+    ModelIdentityPolicy,
+)
+
 
 class Tool:
     """Abstract auto-drawer attached to a Layer."""
 
     tool_type: str = ""
+    generation_provenance: GenerationProvenance | None = None
 
 
 class DiffusionTool(Tool):
@@ -46,6 +53,9 @@ class DiffusionTool(Tool):
         self.ip_adapter_scale: float = 0.6
         self.masked_content: str = "original"
         self.resize_to_model_resolution: bool = False
+        self.model_identity: ModelIdentity | None = None
+        self.model_identity_policy = ModelIdentityPolicy.WARN
+        self.generation_provenance = None
 
 
 class LamaTool(Tool):
@@ -59,6 +69,7 @@ class LamaTool(Tool):
         self.patch_y = patch_y
         self.patch_w = patch_w
         self.patch_h = patch_h
+        self.generation_provenance = None
 
 
 class InstructTool(Tool):
@@ -82,3 +93,4 @@ class InstructTool(Tool):
         self.guidance_scale = guidance_scale
         self.steps = steps
         self.seed = seed
+        self.generation_provenance = None

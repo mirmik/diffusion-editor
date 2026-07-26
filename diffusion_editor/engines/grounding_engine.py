@@ -43,7 +43,6 @@ class GroundingEngine:
         return self._tasks.submit(
             lambda cancel: self._run(request, cancel),
             name="grounding-inference",
-            discard_pending=True,
         )
 
     def poll_event(self) -> GroundingEngineEvent | None:
@@ -52,7 +51,11 @@ class GroundingEngine:
     def _status(self, message: str) -> None:
         self._tasks.emit(GroundingEngineEvent(status=message))
 
-    def _run(self, request: GroundingRequest, cancel) -> None:
+    def _run(
+        self,
+        request: GroundingRequest,
+        cancel,
+    ) -> GroundingEngineEvent:
         params = request.params
         try:
             result = self._client.request(
@@ -88,22 +91,23 @@ class GroundingEngine:
                 for item in result["detections"]
             )
             if not detections:
-                self._tasks.emit(
-                    GroundingEngineEvent(status="Grounding: nothing found")
+                return GroundingEngineEvent(
+                    status="Grounding: nothing found"
                 )
-                return
             found = ", ".join(
                 f"{item.label} ({item.score:.0%})" for item in detections
             )
-            self._tasks.emit(
-                GroundingEngineEvent(
-                    status=f"Grounding: {len(detections)} hit(s): {found}",
-                    result=GroundingResult(detections=detections),
-                )
+            return GroundingEngineEvent(
+                status=f"Grounding: {len(detections)} hit(s): {found}",
+                result=GroundingResult(
+                    canvas_width=int(request.image.shape[1]),
+                    canvas_height=int(request.image.shape[0]),
+                    detections=detections,
+                ),
             )
         except Exception as exc:
             log.error(f"Grounding: {exc}")
-            self._tasks.emit(GroundingEngineEvent(error=str(exc)))
+            return GroundingEngineEvent(error=str(exc))
 
     def cancel(self) -> bool:
         return self._tasks.cancel()

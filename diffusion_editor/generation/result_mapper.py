@@ -72,7 +72,7 @@ def map_diffusion_result(layer: Layer | None, result_image: Image.Image, used_se
 
 def map_grounding_result(layer: Layer | None, result: GroundingResult
                          ) -> Tuple[SetLayerSelectionCommand | None, str]:
-    """Build selection command/status for Grounding DINO/SAM output."""
+    """Build a canvas-space selection from Grounding DINO/SAM output."""
     count = len(result.detections)
     if count == 0:
         return None, "Grounding: nothing found"
@@ -84,20 +84,42 @@ def map_grounding_result(layer: Layer | None, result: GroundingResult
     if layer is None:
         return None, status
 
-    height, width = layer.height, layer.width
+    width = int(result.canvas_width)
+    height = int(result.canvas_height)
+    if width <= 0 or height <= 0:
+        return None, (
+            "Grounding error: invalid worker canvas size "
+            f"{width}x{height}"
+        )
+
     combined_selection = np.zeros((height, width), dtype=np.float32)
     for item in result.detections:
-        if item.mask is not None and item.mask.any():
-            combined_selection = np.maximum(
-                combined_selection,
-                item.mask.astype(np.float32)[:height, :width],
-            )
-            continue
+        if item.mask is not None:
+            mask = np.asarray(item.mask)
+            if mask.shape != (height, width):
+                return None, (
+                    "Grounding error: worker mask shape "
+                    f"{mask.shape} does not match canvas "
+                    f"{(height, width)}"
+                )
+            try:
+                mask = mask.astype(np.float32, copy=False)
+            except (TypeError, ValueError):
+                return None, "Grounding error: worker mask is not numeric"
+            if not np.isfinite(mask).all():
+                return None, "Grounding error: worker mask is not finite"
+            if mask.any():
+                mask = np.clip(mask, 0.0, 1.0)
+                combined_selection = np.maximum(combined_selection, mask)
+                continue
 
-        x0 = max(0, item.x0)
-        y0 = max(0, item.y0)
-        x1 = min(width, item.x1)
-        y1 = min(height, item.y1)
+        try:
+            x0 = max(0, int(item.x0))
+            y0 = max(0, int(item.y0))
+            x1 = min(width, int(item.x1))
+            y1 = min(height, int(item.y1))
+        except (TypeError, ValueError, OverflowError):
+            return None, "Grounding error: worker box coordinates are invalid"
         if x0 < x1 and y0 < y1:
             combined_selection[y0:y1, x0:x1] = 1.0
 
@@ -105,7 +127,7 @@ def map_grounding_result(layer: Layer | None, result: GroundingResult
         return None, status
     return (
         SetLayerSelectionCommand(
-            mask=combined_selection,
+            mask=np.ascontiguousarray(combined_selection),
             label="Detect Objects",
         ),
         status,

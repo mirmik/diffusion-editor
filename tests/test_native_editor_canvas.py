@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 from termin.gui_native import DynamicTextureOwnership
 
 from diffusion_editor.canvas.native_editor_canvas import NativeEditorCanvas
@@ -152,3 +153,63 @@ def test_native_canvas_releases_leases_before_gpu_compositor():
         ("image", "close"),
         ("controller", "dispose"),
     ]
+
+
+def test_cancel_releases_document_capture_when_controller_raises():
+    native, trace, _previous = _native_canvas_shell()
+
+    class Relay:
+        handle = "relay"
+
+    class Document:
+        pointer_capture = "relay"
+
+        def release_pointer_capture(self, handle):
+            assert handle == "relay"
+            trace.append(("document", "release-capture"))
+            self.pointer_capture = None
+
+    native._capture_relay = Relay()
+    native._document = Document()
+    native.controller.pointer_cancel = lambda: (_ for _ in ()).throw(
+        RuntimeError("cancel failed"))
+
+    with pytest.raises(RuntimeError, match="cancel failed"):
+        native.cancel_pointer_interaction()
+
+    assert native._document.pointer_capture is None
+    assert ("document", "release-capture") in trace
+
+
+def test_close_finishes_all_cleanup_when_cancellation_raises():
+    native, trace, previous = _native_canvas_shell()
+
+    class Relay:
+        handle = "relay"
+
+        def set_pointer_handler(self, handler):
+            assert handler is None
+            trace.append(("relay", "detach-handler"))
+
+    class Document:
+        pointer_capture = "relay"
+
+        def release_pointer_capture(self, handle):
+            assert handle == "relay"
+            trace.append(("document", "release-capture"))
+            self.pointer_capture = None
+
+    native._capture_relay = Relay()
+    native._document = Document()
+    native.controller.pointer_cancel = lambda: (_ for _ in ()).throw(
+        RuntimeError("cancel failed"))
+
+    with pytest.raises(RuntimeError, match="cancel failed"):
+        native.close()
+
+    assert native._layer_stack.on_changed is previous
+    assert native._document.pointer_capture is None
+    assert native.overlay_lease.ownership == DynamicTextureOwnership.RELEASED
+    assert native.image_lease.ownership == DynamicTextureOwnership.RELEASED
+    assert ("relay", "detach-handler") in trace
+    assert ("controller", "dispose") in trace

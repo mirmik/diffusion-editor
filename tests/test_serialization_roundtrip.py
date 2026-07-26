@@ -41,9 +41,9 @@ def _build_stack() -> tuple[LayerStack, Layer]:
     tool.ip_adapter_layer_id = top.id
     tool.ip_adapter_layer_name_hint = top.name
     diff.tool = tool
-    top.add_child(diff)
+    stack.insert_layer(diff)
+    stack.move_layer(diff, top, 0)
     stack.mark_layer_dirty(top)
-    stack.active_layer = diff
     return stack, diff
 
 
@@ -167,6 +167,7 @@ def test_legacy_project_without_layer_ids_gets_unique_ids():
 
     src = zipfile.ZipFile(io.BytesIO(original), "r")
     manifest = json.loads(src.read("manifest.json"))
+    manifest["format_version"] = 7
 
     def strip_ids(layer_dict):
         layer_dict.pop("id", None)

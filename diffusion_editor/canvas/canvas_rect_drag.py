@@ -109,6 +109,13 @@ class CanvasRectDragController:
     def set_show_patch_rect(self, show: bool) -> None:
         self._show_patch_rect = show
 
+    @property
+    def dragging(self) -> bool:
+        return (
+            self._selection_rect_drag.dragging
+            or self._patch_rect_drag.dragging
+        )
+
     def begin_selection_rect(self, x: int, y: int) -> bool:
         return self._selection_rect_drag.begin(x, y)
 
@@ -139,6 +146,16 @@ class CanvasRectDragController:
             )
 
         return CanvasRectDragFinish(handled=False)
+
+    def cancel(self) -> bool:
+        selection_dragging = self._selection_rect_drag.dragging
+        patch_dragging = self._patch_rect_drag.dragging
+        was_dragging = selection_dragging or patch_dragging
+        if selection_dragging:
+            self._selection_rect_drag.set_enabled(False)
+        if patch_dragging:
+            self._patch_rect_drag.set_enabled(False)
+        return was_dragging
 
     def selection_preview_rect(self) -> Rect | None:
         return self._selection_rect_drag.preview_rect()

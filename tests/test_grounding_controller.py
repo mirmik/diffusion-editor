@@ -64,6 +64,23 @@ def test_start_detection_submits_grounding_request():
     assert engine.calls[0].params.prompt == "cup."
 
 
+def test_start_detection_waits_until_previous_terminal_event_is_polled():
+    first = Layer("First", 8, 8)
+    second = Layer("Second", 8, 8)
+    engine = _Engine()
+    controller = GroundingController(
+        engine=engine,
+        composite=lambda: np.zeros((8, 8, 4), dtype=np.uint8),
+    )
+
+    assert controller.start_detection(first, _params()).status
+    event = controller.start_detection(second, _params())
+
+    assert event == type(event)()
+    assert len(engine.calls) == 1
+    assert controller.pending_layer is first
+
+
 def test_poll_returns_pending_layer_and_grounding_result():
     layer = Layer("Layer", 8, 8)
     engine = _Engine()
@@ -72,16 +89,20 @@ def test_poll_returns_pending_layer_and_grounding_result():
         composite=lambda: np.zeros((8, 8, 4), dtype=np.uint8),
     )
     controller.start_detection(layer, _params())
-    result = GroundingResult(detections=(
-        GroundingDetection(
-            label="cup",
-            x0=1,
-            y0=2,
-            x1=4,
-            y1=6,
-            score=0.9,
+    result = GroundingResult(
+        canvas_width=8,
+        canvas_height=8,
+        detections=(
+            GroundingDetection(
+                label="cup",
+                x0=1,
+                y0=2,
+                x1=4,
+                y1=6,
+                score=0.9,
+            ),
         ),
-    ))
+    )
     engine.poll_result = GroundingEngineEvent(
         status="Grounding: 1 hit(s): cup (90%)",
         result=result,
