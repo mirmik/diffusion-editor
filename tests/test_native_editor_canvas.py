@@ -65,8 +65,14 @@ def _native_canvas_shell():
             assert callable(callback)
             trace.append(("canvas", "detach-paint"))
 
-    previous = lambda: None
-    stack = SimpleNamespace(width=10, height=8, on_changed=previous)
+    class Subscription:
+        closed = False
+
+        def unsubscribe(self):
+            self.closed = True
+
+    subscription = Subscription()
+    stack = SimpleNamespace(width=10, height=8)
     native = NativeEditorCanvas.__new__(NativeEditorCanvas)
     native._closed = False
     native._request_repaint = lambda: trace.append(("view", "repaint"))
@@ -74,12 +80,10 @@ def _native_canvas_shell():
     native._image_lease = image_lease
     native._overlay_lease = overlay_lease
     native._layer_stack = stack
-    native._previous_stack_changed = previous
-    native._stack_changed_callback = lambda: None
-    stack.on_changed = native._stack_changed_callback
+    native._stack_subscription = subscription
     native.controller = Controller()
     native.canvas = Canvas()
-    return native, trace, previous
+    return native, trace, subscription
 
 
 def test_native_canvas_switches_borrowed_and_owned_textures_explicitly():
@@ -134,13 +138,13 @@ def test_native_canvas_reallocates_owned_texture_after_resize():
 
 
 def test_native_canvas_releases_leases_before_gpu_compositor():
-    native, trace, previous = _native_canvas_shell()
+    native, trace, subscription = _native_canvas_shell()
     native._sync_gpu_image()
 
     native.close()
     native.close()
 
-    assert native._layer_stack.on_changed is previous
+    assert subscription.closed
     assert native.image_lease.ownership == DynamicTextureOwnership.RELEASED
     assert native.overlay_lease.ownership == DynamicTextureOwnership.RELEASED
     lifecycle = [
@@ -182,7 +186,7 @@ def test_cancel_releases_document_capture_when_controller_raises():
 
 
 def test_close_finishes_all_cleanup_when_cancellation_raises():
-    native, trace, previous = _native_canvas_shell()
+    native, trace, subscription = _native_canvas_shell()
 
     class Relay:
         handle = "relay"
@@ -207,7 +211,7 @@ def test_close_finishes_all_cleanup_when_cancellation_raises():
     with pytest.raises(RuntimeError, match="cancel failed"):
         native.close()
 
-    assert native._layer_stack.on_changed is previous
+    assert subscription.closed
     assert native._document.pointer_capture is None
     assert native.overlay_lease.ownership == DynamicTextureOwnership.RELEASED
     assert native.image_lease.ownership == DynamicTextureOwnership.RELEASED

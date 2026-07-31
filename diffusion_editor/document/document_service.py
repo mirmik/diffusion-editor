@@ -64,6 +64,7 @@ class CallbackCommand:
     undo_fn: Callable[[], None]
     redo_fn: Callable[[], None]
     size_bytes: int = 0
+    coalesce_key: object | None = None
 
     def do(self) -> None:
         self.do_fn()
@@ -85,6 +86,7 @@ class CommandBus:
             undo_fn=command.undo_fn,
             redo_fn=command.redo_fn,
             size_bytes=command.size_bytes,
+            coalesce_key=command.coalesce_key,
         )
 
 
@@ -92,11 +94,14 @@ class DocumentService:
     """Application-level façade over LayerStack/history mutations."""
 
     def __init__(self, layer_stack: LayerStack, history: HistoryManager,
-                 apply_snapshot: Callable[[bytes], None]):
+                 apply_snapshot: Callable[[bytes], None],
+                 after_history_navigation: Callable[[], None] | None = None):
         self._layer_stack = layer_stack
         self._history = history
         self._apply_snapshot = apply_snapshot
         self._commands = CommandBus(history)
+        self._after_history_navigation = (
+            after_history_navigation or (lambda: None))
         self._before_mutation_listeners: list[Callable[[], None]] = []
 
     def add_before_mutation_listener(
@@ -137,11 +142,17 @@ class DocumentService:
 
     def undo(self) -> str | None:
         self.prepare_mutation()
-        return self._history.undo()
+        label = self._history.undo()
+        if label is not None:
+            self._after_history_navigation()
+        return label
 
     def redo(self) -> str | None:
         self.prepare_mutation()
-        return self._history.redo()
+        label = self._history.redo()
+        if label is not None:
+            self._after_history_navigation()
+        return label
 
     def memory_bytes(self) -> int:
         return self._history.memory_bytes()
@@ -156,6 +167,15 @@ class DocumentService:
     def execute_snapshot_action(self, label: str, action: Callable[[], None]) -> None:
         self.prepare_mutation()
         before = self._layer_stack.serialize_state()
+        if len(before) * 2 > self._history.max_memory_bytes:
+            # The mutation is still valid, but retaining even an optimistic
+            # before/after pair would violate the configured history budget.
+            try:
+                action()
+            except BaseException:
+                self._apply_snapshot(before)
+                raise
+            return
         try:
             action()
             after = self._layer_stack.serialize_state()
@@ -184,6 +204,21 @@ class DocumentService:
             raise
 
     def execute(self, command: SnapshotCommand) -> None:
+        apply_with_history = getattr(command, "apply_with_history", None)
+        if callable(apply_with_history):
+            self.prepare_mutation()
+            delta = apply_with_history(self._layer_stack)
+            if delta is None:
+                return
+            self._commands.push(CallbackCommand(
+                label=command.label,
+                do_fn=lambda: None,
+                undo_fn=delta.undo_fn,
+                redo_fn=delta.redo_fn,
+                size_bytes=delta.size_bytes,
+                coalesce_key=delta.coalesce_key,
+            ))
+            return
         self.execute_snapshot_action(
             command.label,
             lambda: command.apply(self._layer_stack),
@@ -192,10 +227,12 @@ class DocumentService:
     def push_callbacks(self, label: str,
                        undo_fn: Callable[[], None],
                        redo_fn: Callable[[], None],
-                       size_bytes: int = 0) -> None:
+                       size_bytes: int = 0,
+                       coalesce_key: object | None = None) -> None:
         self._history.push_callbacks(
             label=label,
             undo_fn=undo_fn,
             redo_fn=redo_fn,
             size_bytes=size_bytes,
+            coalesce_key=coalesce_key,
         )

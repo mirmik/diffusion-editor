@@ -30,7 +30,7 @@ def _intent(action, layer=None, **kwargs):
     )
 
 
-def test_layer_tree_projects_nested_stable_ids_and_restores_callback():
+def test_layer_tree_projects_nested_stable_ids_and_unsubscribes_independently():
     stack, service = _stack_and_service()
     background = stack.active_layer
     stack.add_layer("Group")
@@ -39,8 +39,7 @@ def test_layer_tree_projects_nested_stable_ids_and_restores_callback():
     stack.insert_layer(child)
     stack.move_layer(child, group, 0)
     calls = []
-    previous = lambda: calls.append("changed")
-    stack.on_changed = previous
+    external = stack.subscribe(lambda _event: calls.append("changed"))
 
     coordinator = LayerTreeCoordinator(stack, service)
     state = coordinator.state
@@ -49,14 +48,15 @@ def test_layer_tree_projects_nested_stable_ids_and_restores_callback():
         group.id, background.id]
     assert state.roots[0].children[0].stable_id == child.id
     assert state.active_id == child.id
-    assert stack.on_changed is not previous
-
     stack.set_layer_name(child, "Renamed externally")
     assert calls == ["changed"]
     assert coordinator.state.roots[0].children[0].name == "Renamed externally"
 
     coordinator.close()
-    assert stack.on_changed is previous
+    stack.set_layer_name(child, "Renamed again")
+    assert calls == ["changed", "changed"]
+    assert coordinator.state.roots[0].children[0].name == "Renamed externally"
+    external.unsubscribe()
 
 
 def test_layer_tree_executes_edit_intents_with_undoable_solo():

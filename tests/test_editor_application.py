@@ -10,7 +10,7 @@ from diffusion_editor.app.application import (
     ShutdownPhase,
 )
 from diffusion_editor.app.presentation import HeadlessEditorPresentation
-from diffusion_editor.document.commands import AddLayerCommand
+from diffusion_editor.document.commands import AddLayerCommand, FlattenLayersCommand
 
 
 class _MemorySettings:
@@ -141,14 +141,16 @@ def test_snapshot_listener_failure_cannot_turn_successful_undo_into_failure():
     application.layer_stack.init_from_image(
         np.zeros((4, 4, 4), dtype=np.uint8))
     application.document.execute(AddLayerCommand(name="Other"))
+    application.document.clear_history()
+    application.document.execute(FlattenLayersCommand())
     observed = []
     application.add_snapshot_listener(
         lambda: (_ for _ in ()).throw(RuntimeError("observer failed")))
     application.add_snapshot_listener(lambda: observed.append("snapshot"))
 
-    assert application.document.undo() == "New Layer"
+    assert application.document.undo() == "Flatten Layers"
 
-    assert len(application.layer_stack.layers) == 1
+    assert len(application.layer_stack.layers) == 2
     assert observed == ["snapshot"]
     assert not application.history.can_undo
     assert application.history.can_redo

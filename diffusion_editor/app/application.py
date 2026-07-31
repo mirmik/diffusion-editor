@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import IntEnum
 import os
+import time
 from typing import Any, Callable, Protocol
-import uuid
 
 import numpy as np
 from tcbase import log
@@ -16,6 +16,8 @@ from ..document.document_service import DocumentService
 from ..document.history import HistoryManager
 from ..document.layer import Layer
 from ..document.layer_stack import LayerStack
+from ..document.change_event import DocumentChangeEvent
+from ..document.session import DocumentSession, RecoveryRecord, RecoveryStore
 from ..engines.diffusion_engine import DiffusionEngine
 from ..engines.grounding_engine import GroundingEngine
 from ..engines.instruct_engine import InstructEngine
@@ -108,7 +110,6 @@ class EditorApplication:
         self.status_text = "Ready"
         self.window_title = "Diffusion Editor"
         self.command_states: dict[str, tuple[bool, bool]] = {}
-        self.project_path: str | None = None
         self.last_dir = str(self.settings.get("last_dir", ""))
         self.models_dir = self._load_models_dir()
         self.history_memory_limit_bytes = self._load_history_memory_limit_bytes()
@@ -117,6 +118,17 @@ class EditorApplication:
         self.history_replaying = False
 
         self.layer_stack = LayerStack()
+        self.session = DocumentSession()
+        recovery_root = str(self.settings.get(
+            "recovery_dir",
+            os.path.expanduser("~/.cache/diffusion-editor/recovery"),
+        ))
+        self.recovery_store = RecoveryStore(recovery_root)
+        self.recovery_interval_seconds = max(5.0, float(
+            self.settings.get("recovery_interval_seconds", 30.0)))
+        self._next_recovery_at = time.monotonic() + self.recovery_interval_seconds
+        self._session_subscription = self.layer_stack.subscribe(
+            self._on_document_change)
         self.history = HistoryManager(
             self._apply_snapshot,
             max_memory_bytes=self.history_memory_limit_bytes,
@@ -125,10 +137,8 @@ class EditorApplication:
             self.layer_stack,
             self.history,
             self._apply_snapshot,
+            after_history_navigation=self.reconcile_document_session,
         )
-        self._document_revision = 0
-        self._observed_history_revision = self.document.memory_revision
-        self._document_session_id = self._new_document_session_id()
         self.agent_tool_registry = create_editor_tool_registry()
 
         composite_below = self._composite_below
@@ -260,12 +270,23 @@ class EditorApplication:
 
     @property
     def document_session_id(self) -> str:
-        return self._document_session_id
+        return self.session.session_id
 
     @property
     def document_revision(self) -> int:
-        self._sync_history_revision()
-        return self._document_revision
+        return self.session.revision
+
+    @property
+    def project_path(self) -> str | None:
+        return self.session.path
+
+    @project_path.setter
+    def project_path(self, value: str | None) -> None:
+        self.session.path = value
+
+    @property
+    def document_dirty(self) -> bool:
+        return self.session.dirty
 
     def mark_external_mutation(self) -> int:
         """Reserve a revision for a mutation outside DocumentService.
@@ -274,18 +295,57 @@ class EditorApplication:
         mutating document state, before its eventual history command is
         committed.
         """
-        self._sync_history_revision()
-        self._document_revision += 1
-        return self._document_revision
+        return self.session.mark_external_mutation()
 
-    def reset_document_session(self) -> None:
+    def reset_document_session(
+            self,
+            project_path: str | None = None,
+            *,
+            clean: bool = True) -> None:
         """Invalidate document-bound jobs after New/Open/Import."""
-        self._document_session_id = self._new_document_session_id()
+        old_session_id = self.session.session_id
+        snapshot = self.layer_stack.serialize_state()
+        self.session.reset(
+            revision=self.layer_stack.revision,
+            path=project_path,
+            snapshot=snapshot,
+            clean=clean,
+        )
+        self.recovery_store.discard(old_session_id)
         try:
             self.invalidate_generation_jobs("document was replaced")
         except Exception as exc:
             log.exception(
                 f"Failed to cancel generation jobs after document reset: {exc}")
+
+    def mark_document_saved(self, path: str) -> None:
+        snapshot = self.layer_stack.serialize_state()
+        old_session_id = self.session.session_id
+        self.session.mark_saved(path, snapshot)
+        self.recovery_store.discard(old_session_id)
+
+    def reconcile_document_session(self) -> None:
+        self.session.reconcile(self.layer_stack.serialize_state())
+
+    @property
+    def available_recovery(self) -> RecoveryRecord | None:
+        return self.recovery_store.latest()
+
+    def restore_recovery(self, record: RecoveryRecord) -> None:
+        snapshot = self.recovery_store.load(record)
+        self.document.prepare_mutation()
+        self.layer_stack.load_state(snapshot)
+        self.clear_history()
+        self.reset_document_session(None, clean=False)
+        self.recovery_store.discard(record.session_id)
+        self.set_status("Recovered unsaved document")
+
+    def discard_recovery(self, record: RecoveryRecord) -> None:
+        self.recovery_store.discard(record.session_id)
+
+    def discard_unsaved_changes(self) -> None:
+        self.recovery_store.discard(self.session.session_id)
+        self.session.mark_discarded()
 
     def invalidate_generation_jobs(self, reason: str) -> bool:
         invalidated = False
@@ -312,6 +372,7 @@ class EditorApplication:
         """Poll controller events and project them without toolkit knowledge."""
         if self.closed:
             return
+        self._maybe_write_recovery()
         self._invalidate_stale_generation_jobs()
         self._poll_segmentation()
         self._poll_lama()
@@ -329,6 +390,9 @@ class EditorApplication:
         self.invalidate_generation_jobs("application is closing")
         self.closed = True
         self.running = False
+        if not self.session.dirty:
+            self.recovery_store.discard(self.session.session_id)
+        self._session_subscription.unsubscribe()
         resources = sorted(
             self._shutdown_resources,
             key=lambda resource: (resource.phase, resource.order),
@@ -358,22 +422,27 @@ class EditorApplication:
             return DEFAULT_MODELS_DIR
         return os.path.expanduser(raw.strip()) or DEFAULT_MODELS_DIR
 
-    @staticmethod
-    def _new_document_session_id() -> str:
-        return f"document_{uuid.uuid4().hex}"
-
     def _generation_document_state(self) -> JobDocumentState:
         return JobDocumentState(
-            session_id=self._document_session_id,
+            session_id=self.session.session_id,
             revision=self.document_revision,
         )
 
-    def _sync_history_revision(self) -> None:
-        current = self.document.memory_revision
-        if current == self._observed_history_revision:
+    def _on_document_change(self, event: DocumentChangeEvent) -> None:
+        self.session.record_change(event)
+
+    def _maybe_write_recovery(self) -> None:
+        now = time.monotonic()
+        if now < self._next_recovery_at:
             return
-        self._observed_history_revision = current
-        self._document_revision += 1
+        self._next_recovery_at = now + self.recovery_interval_seconds
+        if not self.session.dirty or not self.layer_stack.layers:
+            return
+        try:
+            self.recovery_store.write(
+                self.session, self.layer_stack.serialize_state())
+        except Exception:
+            log.exception("Failed to write document recovery snapshot")
 
     def _generation_controllers(self) -> tuple[object, ...]:
         return (
@@ -406,7 +475,7 @@ class EditorApplication:
                 "unsupported result application policy "
                 f"'{context.application_policy.value}'"
             )
-        if context.document_session_id != self._document_session_id:
+        if context.document_session_id != self.session.session_id:
             return "document session changed"
         layer = self.layer_stack.find_layer_by_id(context.layer_id)
         if layer is None:

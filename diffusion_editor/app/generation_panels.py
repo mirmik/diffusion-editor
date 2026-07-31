@@ -16,6 +16,7 @@ from ..document.commands import (
     UpdateDiffusionToolCommand,
     UpdateInstructToolCommand,
 )
+from ..document.change_event import DocumentChangeEvent
 from ..document.layer import Layer
 from ..document.tool import DiffusionTool, InstructTool, LamaTool
 from .application import EditorApplication
@@ -196,9 +197,7 @@ class GenerationPanelsCoordinator:
             if self._instruct_phase == GenerationPhase.READY
             else "Not loaded"
         )
-        self._previous_stack_changed = self._stack.on_changed
-        self._stack_changed_callback = self._on_stack_changed
-        self._stack.on_changed = self._stack_changed_callback
+        self._stack_subscription = self._stack.subscribe(self._on_stack_changed)
         self._state = self._build_state()
 
     @property
@@ -383,8 +382,7 @@ class GenerationPanelsCoordinator:
         self._view = None
         self._diffusion_drafts.clear()
         self._instruct_drafts.clear()
-        if self._stack.on_changed is self._stack_changed_callback:
-            self._stack.on_changed = self._previous_stack_changed
+        self._stack_subscription.unsubscribe()
 
     def _build_state(self) -> GenerationPanelsState:
         layer = self._stack.active_layer
@@ -775,9 +773,7 @@ class GenerationPanelsCoordinator:
             )
         return f"patch: {patch_info}  mask: {mask_status}"
 
-    def _on_stack_changed(self) -> None:
-        if self._previous_stack_changed is not None:
-            self._previous_stack_changed()
+    def _on_stack_changed(self, _event: DocumentChangeEvent) -> None:
         self.refresh()
 
     def _require_open(self) -> None:

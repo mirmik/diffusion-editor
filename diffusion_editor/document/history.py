@@ -10,6 +10,7 @@ class HistoryEntry:
     undo_fn: Callable[[], None]
     redo_fn: Callable[[], None]
     size_bytes: int = 0
+    coalesce_key: object | None = None
 
 
 class HistoryManager:
@@ -75,13 +76,43 @@ class HistoryManager:
 
     def push_callbacks(self, label: str, undo_fn: Callable[[], None],
                        redo_fn: Callable[[], None],
-                       size_bytes: int = 0) -> None:
-        self._undo_stack.append(HistoryEntry(
-            label=label, undo_fn=undo_fn, redo_fn=redo_fn,
-            size_bytes=size_bytes))
+                       size_bytes: int = 0,
+                       coalesce_key: object | None = None) -> None:
+        size_bytes = max(0, int(size_bytes))
         self._redo_stack.clear()
+        if (
+                coalesce_key is not None
+                and self._undo_stack
+                and self._undo_stack[-1].coalesce_key == coalesce_key):
+            previous = self._undo_stack[-1]
+            replacement = HistoryEntry(
+                label=label,
+                undo_fn=previous.undo_fn,
+                redo_fn=redo_fn,
+                size_bytes=size_bytes,
+                coalesce_key=coalesce_key,
+            )
+            self._undo_stack.pop()
+            self._admit(replacement)
+            self._memory_revision += 1
+            return
+        entry = HistoryEntry(
+            label=label, undo_fn=undo_fn, redo_fn=redo_fn,
+            size_bytes=size_bytes, coalesce_key=coalesce_key)
+        self._admit(entry)
         self._memory_revision += 1
-        self._enforce_limits()
+
+    def _admit(self, entry: HistoryEntry) -> None:
+        if entry.size_bytes > self._max_memory_bytes:
+            return
+        while len(self._undo_stack) >= self._max_entries:
+            self._undo_stack.pop(0)
+        while (
+                self._undo_stack
+                and self.memory_bytes() + entry.size_bytes
+                > self._max_memory_bytes):
+            self._undo_stack.pop(0)
+        self._undo_stack.append(entry)
 
     def memory_bytes(self) -> int:
         """Estimated memory held by undo/redo entries."""

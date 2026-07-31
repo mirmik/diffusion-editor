@@ -26,6 +26,7 @@ from diffusion_editor.app.native_generation_panels import (
 )
 from diffusion_editor.app.presentation import PanelUpdate, ViewPorts
 from diffusion_editor.document.layer import Layer
+from diffusion_editor.document.change_event import DocumentChangeKind
 from diffusion_editor.document.tool import (
     DiffusionTool,
     InstructTool,
@@ -465,7 +466,8 @@ def test_native_generation_panels_sync_without_feedback_and_edit_all_fields(
     application.layer_stack.active_layer = instruct_layer
     assert panel.instruct_group.widget.visible
     instruct_layer.tool = None
-    application.layer_stack.on_changed()
+    application.layer_stack.publish_change(
+        DocumentChangeKind.METADATA, layers=(instruct_layer,))
     assert panel.empty_label.visible
 
     panel.close()

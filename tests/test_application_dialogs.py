@@ -22,9 +22,11 @@ from diffusion_editor.app.dialogs import (
     ApplicationDialogCoordinator,
     FileDialogKind,
     SettingsState,
+    UnsavedDecision,
 )
 from diffusion_editor.app.native_dialogs import NativeApplicationDialogs
 from diffusion_editor.document.commands import AddLayerCommand
+from diffusion_editor.document.session import RecoveryRecord
 
 
 class _Settings:
@@ -76,6 +78,8 @@ class _Dialogs:
         self.settings = []
         self.grounding = []
         self.errors = []
+        self.unsaved = []
+        self.recoveries = []
 
     def show_file_dialog(self, spec, callback):
         self.files.append((spec, callback))
@@ -89,6 +93,12 @@ class _Dialogs:
     def show_error(self, title, message):
         self.errors.append((title, message))
 
+    def show_unsaved_changes(self, action, callback):
+        self.unsaved.append((action, callback))
+
+    def show_recovery(self, record, callback):
+        self.recoveries.append((record, callback))
+
 
 def _application(tmp_path):
     engines = [_Engine() for _ in range(5)]
@@ -99,6 +109,7 @@ def _application(tmp_path):
     image = np.zeros((8, 10, 4), dtype=np.uint8)
     image[:, :, 3] = 255
     app.layer_stack.init_from_image(image)
+    app.reset_document_session(None)
     return app, engines[-1]
 
 
@@ -182,6 +193,8 @@ def test_open_commit_remains_coherent_when_remembering_directory_fails(
         RuntimeError("settings write failed"))
 
     coordinator.open_project_path(str(project_path))
+    _action, callback = view.unsaved[-1]
+    callback(UnsavedDecision.DISCARD)
 
     assert app.project_path == str(project_path)
     assert app.document_session_id != old_session
@@ -418,4 +431,36 @@ def test_native_grounding_accept_cancel_validation_and_reopen(tmp_path):
     finally:
         service.close()
         assert document.overlay_count == 0
+        tc_ui_document_destroy(document)
+
+
+def test_native_unsaved_and_recovery_dialogs_report_typed_decisions(tmp_path):
+    document = tc_ui_document_create()
+    service = NativeApplicationDialogs(
+        document,
+        lambda: Rect(0.0, 0.0, 800.0, 600.0),
+        lambda: None,
+    )
+    unsaved = []
+    recovered = []
+    record = RecoveryRecord(
+        session_id="document_test",
+        created_at=1.0,
+        project_path=None,
+        snapshot_path=tmp_path / "document_test.deproj",
+        snapshot_bytes=10,
+    )
+    try:
+        service.show_unsaved_changes("quit the editor", unsaved.append)
+        dialog = service._lifecycle_dialogs[-1]
+        assert dialog.activate("discard")
+        assert unsaved == [UnsavedDecision.DISCARD]
+
+        service.show_recovery(record, recovered.append)
+        recovery_dialog = service._lifecycle_dialogs[-1]
+        assert recovery_dialog.activate("yes")
+        assert recovered == [True]
+        assert document.overlay_count == 0
+    finally:
+        service.close()
         tc_ui_document_destroy(document)

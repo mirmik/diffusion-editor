@@ -3,6 +3,7 @@ import numpy as np
 from diffusion_editor.canvas.brush import BrushToolMode
 from diffusion_editor.canvas.editor_canvas_controller import EditorCanvasController
 from diffusion_editor.document.layer_stack import LayerStack
+from diffusion_editor.document.change_event import DocumentChangeKind
 
 
 def _controller(image):
@@ -104,3 +105,37 @@ def test_controller_eyedropper_and_brush_adjustment_are_toolkit_neutral():
 
     assert picked == [(12, 34, 56, 255)]
     assert controller.brush.size == initial_size + 5
+
+
+def test_typed_pixel_event_uses_regional_canvas_refresh():
+    image = np.zeros((12, 12, 4), dtype=np.uint8)
+    stack, controller, images, _overlays, regions, _overlay_regions = (
+        _controller(image))
+    layer = stack.active_layer
+    layer.image[2:5, 3:7] = (255, 0, 0, 255)
+    stack.mark_layer_dirty(layer, layer.local_rect_to_canvas((3, 2, 7, 5)))
+
+    event = stack.publish_change(
+        DocumentChangeKind.PIXELS,
+        layers=(layer,),
+        dirty_rect=(3, 2, 7, 5),
+    )
+    controller.handle_document_change(event)
+
+    assert len(images) == 1
+    assert [(x, y, data.shape[:2]) for x, y, data in regions] == [
+        (3, 2, (3, 4))]
+
+
+def test_metadata_event_does_not_upload_canvas_pixels():
+    image = np.zeros((12, 12, 4), dtype=np.uint8)
+    stack, controller, images, _overlays, regions, _overlay_regions = (
+        _controller(image))
+    layer = stack.active_layer
+
+    event = stack.publish_change(
+        DocumentChangeKind.METADATA, layers=(layer,))
+    controller.handle_document_change(event)
+
+    assert len(images) == 1
+    assert regions == []

@@ -19,6 +19,7 @@ from ..document.commands import (
     SetLayerVisibilityCommand,
 )
 from ..document.document_service import DocumentService
+from ..document.change_event import DocumentChangeEvent
 from ..document.layer import Layer
 from ..document.layer_stack import LayerStack
 from ..document.tool import Tool
@@ -104,9 +105,7 @@ class LayerTreeCoordinator:
         self._set_status = set_status or (lambda _text: None)
         self._view: LayerTreePresentation | None = None
         self._closed = False
-        self._previous_stack_changed = layer_stack.on_changed
-        self._stack_changed_callback = self._on_stack_changed
-        layer_stack.on_changed = self._stack_changed_callback
+        self._stack_subscription = layer_stack.subscribe(self._on_stack_changed)
         self._state = self._build_state()
 
     @property
@@ -206,12 +205,9 @@ class LayerTreeCoordinator:
             return
         self._closed = True
         self._view = None
-        if self._layer_stack.on_changed is self._stack_changed_callback:
-            self._layer_stack.on_changed = self._previous_stack_changed
+        self._stack_subscription.unsubscribe()
 
-    def _on_stack_changed(self) -> None:
-        if self._previous_stack_changed is not None:
-            self._previous_stack_changed()
+    def _on_stack_changed(self, _event: DocumentChangeEvent) -> None:
         self.refresh()
 
     def _build_state(self) -> LayerTreeState:

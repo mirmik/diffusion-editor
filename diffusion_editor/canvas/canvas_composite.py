@@ -151,6 +151,28 @@ class CanvasCompositeBridge:
             return
         self._rebuild_cpu_composite()
 
+    def apply_published_pixel_change(
+            self, layer: Layer, local_rect: Rect | None) -> None:
+        """Refresh display after LayerStack already invalidated changed pixels."""
+        if self.using_gpu:
+            self._gpu_compositor.mark_dirty(layer, local_rect)
+            self._gpu_compositor.composite()
+            self._composite_stale = True
+            return
+        if local_rect is None:
+            self._rebuild_cpu_composite()
+            return
+        self._replace_with_canonical_rect(layer.local_rect_to_canvas(local_rect))
+
+    def apply_published_composite_change(self) -> None:
+        """Recompose without treating unchanged layer pixels as dirty."""
+        if self.using_gpu:
+            self._gpu_compositor.mark_composite_dirty()
+            self._gpu_compositor.composite()
+            self._composite_stale = True
+            return
+        self._rebuild_cpu_composite()
+
     def preview_erased_layer_rect(
             self,
             layer: Layer,

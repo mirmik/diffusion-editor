@@ -15,6 +15,7 @@ from termin.gui_native import (
 )
 
 from ..grounding.types import GROUNDING_MODELS, SAM2_MODELS, GroundingParams
+from ..document.session import RecoveryRecord
 from .application import (
     MAX_HISTORY_MEMORY_LIMIT_GIB,
     MIN_HISTORY_MEMORY_LIMIT_GIB,
@@ -23,6 +24,7 @@ from .dialogs import (
     FileDialogKind,
     FileDialogSpec,
     SettingsState,
+    UnsavedDecision,
 )
 
 
@@ -45,6 +47,7 @@ class NativeApplicationDialogs:
         self._settings_callback = None
         self._grounding_callback = None
         self._message_boxes = []
+        self._lifecycle_dialogs = []
         self._build_settings_dialog()
         self._build_grounding_dialog()
 
@@ -108,6 +111,62 @@ class NativeApplicationDialogs:
         box.show(self._viewport())
         self._request_repaint()
 
+    def show_unsaved_changes(
+            self,
+            action: str,
+            on_finished: Callable[[UnsavedDecision], None]) -> None:
+        self._require_open()
+        dialog = self._document.create_dialog("Unsaved Changes")
+        dialog.widget.stable_id = "diffusion-editor.dialog.unsaved"
+        dialog.actions = [
+            DialogAction("save", "Save", is_default=True),
+            DialogAction("discard", "Discard"),
+            DialogAction("cancel", "Cancel", is_cancel=True),
+        ]
+        label = self._document.create_label(
+            f"Save changes before you {action}?")
+        label.widget.preferred_size = Size(420.0, 48.0)
+        dialog.set_content(label)
+        self._lifecycle_dialogs.append(dialog)
+
+        def finished(result) -> None:
+            if dialog in self._lifecycle_dialogs:
+                self._lifecycle_dialogs.remove(dialog)
+            if not self._closed:
+                on_finished(UnsavedDecision(result.action_id))
+
+        self._connections.append(dialog.connect_finished(finished))
+        dialog.show(self._viewport())
+        self._request_repaint()
+
+    def show_recovery(
+            self,
+            record: RecoveryRecord,
+            on_finished: Callable[[bool], None]) -> None:
+        self._require_open()
+        source = record.project_path or "an unsaved document"
+        dialog = self._document.create_dialog("Recover Document")
+        dialog.widget.stable_id = "diffusion-editor.dialog.recovery"
+        dialog.actions = [
+            DialogAction("yes", "Recover", is_default=True),
+            DialogAction("no", "Discard", is_cancel=True),
+        ]
+        label = self._document.create_label(
+            f"Recover the last autosave for {source}?")
+        label.widget.preferred_size = Size(420.0, 48.0)
+        dialog.set_content(label)
+        self._lifecycle_dialogs.append(dialog)
+
+        def finished(result) -> None:
+            if dialog in self._lifecycle_dialogs:
+                self._lifecycle_dialogs.remove(dialog)
+            if not self._closed:
+                on_finished(result.action_id == "yes")
+
+        self._connections.append(dialog.connect_finished(finished))
+        dialog.show(self._viewport())
+        self._request_repaint()
+
     def close(self) -> None:
         if self._closed:
             return
@@ -122,11 +181,15 @@ class NativeApplicationDialogs:
         for box in tuple(self._message_boxes):
             if box.open:
                 self._document.dismiss_overlay(box.handle)
+        for dialog in tuple(self._lifecycle_dialogs):
+            if dialog.open:
+                dialog.close()
         self._file_callbacks.clear()
         self._settings_callback = None
         self._grounding_callback = None
         self._connections.clear()
         self._message_boxes.clear()
+        self._lifecycle_dialogs.clear()
 
     def _file_dialog(self, kind: FileDialogKind):
         dialog = self._file_dialogs.get(kind)

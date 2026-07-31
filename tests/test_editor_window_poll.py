@@ -160,7 +160,7 @@ def test_legacy_open_commits_project_path_before_fallible_fit(tmp_path):
     window._project_path = str(tmp_path / "old.deproj")
     window._statusbar = _Status()
 
-    window.open_file_path(str(project_path))
+    window._open_file_path_unchecked(str(project_path))
 
     assert window._project_path == str(project_path)
     assert len(window._layer_stack.layers) == 1

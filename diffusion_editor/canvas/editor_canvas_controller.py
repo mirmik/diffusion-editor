@@ -8,6 +8,7 @@ from typing import Callable
 import numpy as np
 
 from ..document.layer import Layer
+from ..document.change_event import DocumentChangeEvent, DocumentChangeKind
 from ..document.layer_stack import LayerStack
 from .brush import Brush, BrushToolMode
 from .canvas_composite import CanvasCompositeBridge
@@ -140,6 +141,32 @@ class EditorCanvasController:
             return
         self._composite_bridge.rebuild()
         self._composite_bridge.update_composite()
+        self._overlay_bridge.clear()
+        self._overlay_bridge.rebuild()
+        self._request_repaint()
+
+    def handle_document_change(self, event: DocumentChangeEvent) -> None:
+        """Apply the least expensive refresh implied by a typed event."""
+        if event.kind == DocumentChangeKind.PIXELS:
+            layer = (
+                self._layer_stack.find_layer_by_id(event.layer_ids[0])
+                if len(event.layer_ids) == 1 else None
+            )
+            if layer is None:
+                self.refresh()
+                return
+            self._composite_bridge.apply_published_pixel_change(
+                layer, event.dirty_rect)
+        elif event.kind in {
+                DocumentChangeKind.TRANSFORM,
+                DocumentChangeKind.VISIBILITY,
+                DocumentChangeKind.OPACITY}:
+            self._composite_bridge.apply_published_composite_change()
+        elif event.kind in {
+                DocumentChangeKind.STRUCTURE,
+                DocumentChangeKind.SNAPSHOT_RESTORE}:
+            self.refresh()
+            return
         self._overlay_bridge.clear()
         self._overlay_bridge.rebuild()
         self._request_repaint()

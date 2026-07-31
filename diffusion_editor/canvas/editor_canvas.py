@@ -11,6 +11,7 @@ from tcgui.widgets.canvas import Canvas
 from tcgui.widgets.events import KeyEvent
 
 from ..document.layer_stack import LayerStack
+from ..document.change_event import DocumentChangeEvent, DocumentChangeKind
 from ..document.layer import Layer
 from ..document.tool import LamaTool, InstructTool
 from .brush import Brush, BrushToolMode
@@ -92,7 +93,7 @@ class EditorCanvas(Canvas):
         self.on_edit_cancel: callable = None  # (layer: Layer, target: str)
 
         # Wire layer stack
-        layer_stack.on_changed = self._on_stack_changed
+        self._stack_subscription = layer_stack.subscribe(self._on_stack_changed)
 
         # Wire canvas callbacks for painting
         self.on_canvas_mouse_down = self._handle_mouse_down
@@ -140,9 +141,31 @@ class EditorCanvas(Canvas):
     def _show_mask(self) -> bool:
         return self._overlay_bridge.show_mask
 
-    def _on_stack_changed(self):
-        self._composite_bridge.rebuild()
-        self._update_composite()
+    def _on_stack_changed(self, event: DocumentChangeEvent):
+        if event.kind == DocumentChangeKind.PIXELS:
+            layer = (
+                self._layer_stack.find_layer_by_id(event.layer_ids[0])
+                if len(event.layer_ids) == 1 else None
+            )
+            if layer is None:
+                self._composite_bridge.rebuild()
+                self._update_composite()
+                return
+            self._composite_bridge.apply_published_pixel_change(
+                layer, event.dirty_rect)
+        elif event.kind in {
+                DocumentChangeKind.TRANSFORM,
+                DocumentChangeKind.VISIBILITY,
+                DocumentChangeKind.OPACITY}:
+            self._composite_bridge.apply_published_composite_change()
+        elif event.kind in {
+                DocumentChangeKind.STRUCTURE,
+                DocumentChangeKind.SNAPSHOT_RESTORE}:
+            self._composite_bridge.rebuild()
+            self._update_composite()
+            return
+        self._overlay_bridge.clear()
+        self._update_overlay()
 
     def _update_composite(self):
         composite = self._composite_bridge.update_composite()
@@ -535,4 +558,7 @@ class EditorCanvas(Canvas):
         try:
             self.cancel_pointer_interaction()
         finally:
-            self._composite_bridge.dispose()
+            try:
+                self._stack_subscription.unsubscribe()
+            finally:
+                self._composite_bridge.dispose()

@@ -354,7 +354,13 @@ def main() -> int:
                     root.generation_panels_coordinator.state.diffusion.phase
                     != GenerationPhase.RUNNING):
                 raise RuntimeError("fake native generation did not start")
-            rendered += int(root.tick().rendered)
+            generation_deadline = time.monotonic() + 2.0
+            while (
+                    root.generation_panels_coordinator.state.diffusion.phase
+                    == GenerationPhase.RUNNING
+                    and time.monotonic() < generation_deadline):
+                rendered += int(root.tick().rendered)
+                time.sleep(0.01)
             if (
                     root.generation_panels_coordinator.state.diffusion.phase
                     != GenerationPhase.RESULT):

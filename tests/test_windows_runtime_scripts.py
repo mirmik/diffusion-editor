@@ -83,4 +83,7 @@ def test_linux_ci_uses_sdk_owned_cp314t_environment():
 
     assert "termin-sdk-linux-x86_64-py314t-latest-ci.tar.zst" in workflow
     assert "run: ./install-deps.sh" in workflow
-    assert "run: ./venv/bin/python -m pytest -q" in workflow
+    assert "xvfb-run -a ./run-quality-gates.sh" in workflow
+    assert "PYTHON: ${{ runner.temp }}/diffusion-editor-venv/bin/python" in workflow
+    assert "actions/setup-python" not in workflow
+    assert "python-version: '3.10'" not in workflow

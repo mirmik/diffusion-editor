@@ -14,6 +14,7 @@ from tcbase import log
 
 from ..agent.config import DEFAULT_AGENT_BASE_URL, DEFAULT_AGENT_MODEL
 from ..grounding.types import GroundingParams
+from ..document.session import RecoveryRecord
 from .application import (
     MAX_HISTORY_MEMORY_LIMIT_GIB,
     MIN_HISTORY_MEMORY_LIMIT_GIB,
@@ -32,6 +33,12 @@ class FileDialogKind(str, Enum):
     OPEN_FILE = "open_file"
     SAVE_FILE = "save_file"
     OPEN_DIRECTORY = "open_directory"
+
+
+class UnsavedDecision(str, Enum):
+    SAVE = "save"
+    DISCARD = "discard"
+    CANCEL = "cancel"
 
 
 @dataclass(frozen=True)
@@ -74,6 +81,16 @@ class ApplicationDialogPresentation(Protocol):
 
     def show_error(self, title: str, message: str) -> None: ...
 
+    def show_unsaved_changes(
+            self,
+            action: str,
+            on_finished: Callable[[UnsavedDecision], None]) -> None: ...
+
+    def show_recovery(
+            self,
+            record: RecoveryRecord,
+            on_finished: Callable[[bool], None]) -> None: ...
+
 
 class ApplicationDialogCoordinator:
     """Bridge native dialog results to application-owned operations."""
@@ -100,6 +117,7 @@ class ApplicationDialogCoordinator:
             "file.save_as": self.save_project_as,
             "file.import": self.import_image,
             "file.export": self.export_image,
+            "app.quit": self.request_quit,
             "edit.settings": self.show_settings,
             "layer.detect": self.show_grounding,
         }
@@ -107,8 +125,16 @@ class ApplicationDialogCoordinator:
     def bind_view(self, view: ApplicationDialogPresentation) -> None:
         self._require_open()
         self._view = view
+        record = self._application.available_recovery
+        if record is not None:
+            view.show_recovery(record, lambda restore: self._finish_recovery(
+                record, restore))
 
     def new_project(self) -> None:
+        self._confirm_destructive(
+            "create a new document", self._new_project_unchecked)
+
+    def _new_project_unchecked(self) -> None:
         self._require_open()
         white = np.full((1024, 1024, 4), 255, dtype=np.uint8)
         self._application.document.prepare_mutation()
@@ -217,6 +243,12 @@ class ApplicationDialogCoordinator:
         )
 
     def open_project_path(self, path: str) -> None:
+        self._confirm_destructive(
+            "open another project",
+            lambda: self._open_project_path_unchecked(path),
+        )
+
+    def _open_project_path_unchecked(self, path: str) -> None:
         self._require_open()
         try:
             self._application.document.prepare_mutation()
@@ -237,13 +269,19 @@ class ApplicationDialogCoordinator:
         )
 
     def import_image_path(self, path: str) -> None:
+        self._confirm_destructive(
+            "replace the document with an image",
+            lambda: self._import_image_path_unchecked(path),
+        )
+
+    def _import_image_path_unchecked(self, path: str) -> None:
         self._require_open()
         try:
             image = Image.open(path).convert("RGBA")
             self._application.document.prepare_mutation()
             self._application.layer_stack.init_from_image(
                 np.array(image, dtype=np.uint8))
-            self._commit_document_reset(None)
+            self._commit_document_reset(None, clean=False)
         except Exception as exc:
             self._operation_error("Import Image", path, exc)
             return
@@ -295,13 +333,17 @@ class ApplicationDialogCoordinator:
         self._closed = True
         self._view = None
 
+    def request_quit(self) -> None:
+        self._confirm_destructive(
+            "quit the editor", self._application.request_stop)
+
     def _new_from_image_path(self, path: str) -> None:
         self.import_image_path(path)
         if self._application.project_path is None:
             self._application.set_status(
                 f"New from image: {os.path.basename(path)}")
 
-    def _save_project_path(self, path: str) -> None:
+    def _save_project_path(self, path: str) -> bool:
         self._require_open()
         if not path.lower().endswith(".deproj"):
             path += ".deproj"
@@ -309,8 +351,8 @@ class ApplicationDialogCoordinator:
             self._application.layer_stack.save_project(path)
         except Exception as exc:
             self._operation_error("Save Project", path, exc)
-            return
-        self._application.project_path = path
+            return False
+        self._application.mark_document_saved(path)
         self._best_effort(
             lambda: self._remember_parent(path),
             "remember saved project directory",
@@ -325,6 +367,7 @@ class ApplicationDialogCoordinator:
                 f"Saved: {os.path.basename(path)}"),
             "update status after saving a project",
         )
+        return True
 
     def _apply_settings(self, state: SettingsState | None) -> None:
         if state is None or self._closed:
@@ -374,10 +417,71 @@ class ApplicationDialogCoordinator:
 
         self._view.show_file_dialog(spec, finished)
 
-    def _commit_document_reset(self, project_path: str | None) -> None:
-        self._application.reset_document_session()
+    def _commit_document_reset(
+            self,
+            project_path: str | None,
+            *,
+            clean: bool = True) -> None:
         self._application.clear_history()
-        self._application.project_path = project_path
+        self._application.reset_document_session(
+            project_path, clean=clean)
+
+    def _confirm_destructive(
+            self,
+            action: str,
+            continuation: Callable[[], None]) -> None:
+        self._require_open()
+        if not self._application.document_dirty:
+            continuation()
+            return
+        if self._view is None:
+            return
+        self._view.show_unsaved_changes(
+            action,
+            lambda decision: self._finish_destructive(
+                decision, continuation),
+        )
+
+    def _finish_destructive(
+            self,
+            decision: UnsavedDecision,
+            continuation: Callable[[], None]) -> None:
+        if self._closed or decision == UnsavedDecision.CANCEL:
+            return
+        if decision == UnsavedDecision.DISCARD:
+            self._application.discard_unsaved_changes()
+            continuation()
+            return
+        path = self._application.project_path
+        if path is not None:
+            if self._save_project_path(path):
+                continuation()
+            return
+        self._show_file(
+            FileDialogSpec(
+                FileDialogKind.SAVE_FILE,
+                "Save Project",
+                self._application.last_dir,
+                _PROJECT_FILTER,
+                self._project_file_name(),
+            ),
+            lambda selected: (
+                continuation() if self._save_project_path(selected) else None),
+        )
+
+    def _finish_recovery(
+            self, record: RecoveryRecord, restore: bool) -> None:
+        if self._closed:
+            return
+        try:
+            if restore:
+                self._application.restore_recovery(record)
+                self._present_document_reset(None)
+            else:
+                self._application.discard_recovery(record)
+        except Exception as exc:
+            self._operation_error(
+                "Recover Document", str(record.snapshot_path), exc)
 
     def _present_document_reset(self, project_path: str | None) -> None:
         self._best_effort(

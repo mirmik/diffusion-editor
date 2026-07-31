@@ -247,6 +247,7 @@ class NativeEditorRoot:
         self.dispatcher = dispatcher if dispatcher is not None else Dispatcher()
         self.dispatch_limit = dispatch_limit
         self.closed = False
+        self._window_close_prompted = False
         self.discarded_on_close = 0
         handlers: dict[str, CommandHandler] = {
             "app.quit": application.request_stop,
@@ -313,7 +314,7 @@ class NativeEditorRoot:
                         application.document,
                         history_replaying=(
                             lambda: application.history_replaying),
-                        on_history_changed=self._refresh_commands,
+                        on_history_changed=self._on_canvas_history_changed,
                         on_mutation_begin=application.mark_external_mutation,
                         cancel_interaction=(
                             self.canvas.cancel_pointer_interaction),
@@ -642,6 +643,10 @@ class NativeEditorRoot:
         if setter is not None:
             setter(title)
 
+    def _on_canvas_history_changed(self) -> None:
+        self.application.reconcile_document_session()
+        self._refresh_commands()
+
     def defer(self, callback: Callable[[], None]):
         if self.closed:
             raise RuntimeError("native editor root is closed")
@@ -655,8 +660,12 @@ class NativeEditorRoot:
         stats: DispatchStats = self.dispatcher.run_pending(self.dispatch_limit)
         if stats.busy or stats.internal_error:
             raise RuntimeError("native dispatcher failed to drain cleanly")
-        if self.composition.should_close:
-            self.application.request_stop()
+        if self.composition.should_close and not self._window_close_prompted:
+            self._window_close_prompted = True
+            if self.dialog_coordinator is not None:
+                self.dialog_coordinator.request_quit()
+            else:
+                self.application.request_stop()
         if self.application.running:
             self.application.poll()
         if self.agent_chat is not None:

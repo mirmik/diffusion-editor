@@ -29,6 +29,7 @@ from tcgui.widgets.splitter import Splitter
 
 from ..agent.chat_panel import DEFAULT_AGENT_BASE_URL, DEFAULT_AGENT_MODEL, AgentChatPanel
 from ..document.layer import Layer
+from ..document.change_event import DocumentChangeEvent
 from ..document.tool import DiffusionTool, LamaTool, InstructTool
 from ..canvas.brush import BrushToolMode
 from ..canvas.editor_canvas import EditorCanvas
@@ -175,6 +176,7 @@ class EditorWindow:
             self._layer_stack,
             self._document,
             history_replaying=lambda: self.application.history_replaying,
+            on_history_changed=self.application.reconcile_document_session,
             on_mutation_begin=self.application.mark_external_mutation,
             cancel_interaction=self._canvas.cancel_pointer_interaction,
         )
@@ -200,6 +202,7 @@ class EditorWindow:
             self.canvas_status_coordinator.close,
         )
         self._menu_bar.register_shortcuts(self.ui)
+        self._offer_recovery()
 
     # Temporary scalar compatibility seam for the legacy view. The values
     # live on EditorApplication even while existing tcgui callbacks retain
@@ -401,15 +404,12 @@ class EditorWindow:
 
     def _wire_callbacks(self):
         # Layer stack
-        old_on_changed = self._layer_stack.on_changed
-
-        def _on_stack_changed():
-            if old_on_changed:
-                old_on_changed()
+        def _on_stack_changed(_event: DocumentChangeEvent):
             self._on_layer_changed()
             self._layer_panel.sync_from_stack()
             self.request_repaint()
-        self._layer_stack.on_changed = _on_stack_changed
+        self._stack_subscription = self._layer_stack.subscribe(
+            _on_stack_changed)
 
         # Canvas
         self._canvas.on_color_picked = self._on_color_picked
@@ -759,33 +759,41 @@ class EditorWindow:
     # ------------------------------------------------------------------
 
     def new_project(self):
+        self._confirm_destructive(
+            "create a new document", self._new_project_unchecked)
+
+    def _new_project_unchecked(self):
         # Simple: create white 1024x1024
         white = np.full((1024, 1024, 4), 255, dtype=np.uint8)
         self._document.prepare_mutation()
         self._layer_stack.init_from_image(white)
-        self.application.reset_document_session()
         self._clear_history()
-        self._project_path = None
+        self.application.reset_document_session(None)
         self._fit_in_view_best_effort()
 
     def new_project_from_image(self):
         def _on_result(path):
             if not path:
                 return
-            self._last_dir = os.path.dirname(path)
-            self._settings.set("last_dir", self._last_dir)
-            img = Image.open(path).convert("RGBA")
-            arr = np.array(img, dtype=np.uint8)
-            self._document.prepare_mutation()
-            self._layer_stack.init_from_image(arr)
-            self.application.reset_document_session()
-            self._clear_history()
-            self._project_path = None
-            self._fit_in_view_best_effort()
+            self._confirm_destructive(
+                "replace the document with an image",
+                lambda: self._new_project_from_image_unchecked(path),
+            )
         open_file_dialog(
             self.ui, _on_result,
             title="New From Image", directory=self._last_dir,
             filter_str="Images | *.png *.jpg *.jpeg *.bmp *.tiff *.webp")
+
+    def _new_project_from_image_unchecked(self, path: str) -> None:
+        self._last_dir = os.path.dirname(path)
+        self._settings.set("last_dir", self._last_dir)
+        img = Image.open(path).convert("RGBA")
+        arr = np.array(img, dtype=np.uint8)
+        self._document.prepare_mutation()
+        self._layer_stack.init_from_image(arr)
+        self._clear_history()
+        self.application.reset_document_session(None, clean=False)
+        self._fit_in_view_best_effort()
 
     def open_file(self):
         def _on_result(path):
@@ -800,12 +808,17 @@ class EditorWindow:
             filter_str="Diffusion Editor Project | *.deproj")
 
     def open_file_path(self, path: str):
+        self._confirm_destructive(
+            "open another project",
+            lambda: self._open_file_path_unchecked(path),
+        )
+
+    def _open_file_path_unchecked(self, path: str):
         try:
             self._document.prepare_mutation()
             self._layer_stack.load_project(path)
-            self.application.reset_document_session()
             self._clear_history()
-            self._project_path = path
+            self.application.reset_document_session(path)
         except Exception as e:
             log.exception(f"Open project failed: {path}")
             self._set_status_best_effort(f"Open error: {e}")
@@ -827,13 +840,18 @@ class EditorWindow:
             filter_str="Images | *.png *.jpg *.jpeg *.bmp *.tiff *.webp")
 
     def import_image_path(self, path: str):
+        self._confirm_destructive(
+            "replace the document with an image",
+            lambda: self._import_image_path_unchecked(path),
+        )
+
+    def _import_image_path_unchecked(self, path: str):
         img = Image.open(path).convert("RGBA")
         arr = np.array(img, dtype=np.uint8)
         self._document.prepare_mutation()
         self._layer_stack.init_from_image(arr)
-        self.application.reset_document_session()
         self._clear_history()
-        self._project_path = None
+        self.application.reset_document_session(None, clean=False)
         self._fit_in_view_best_effort()
 
     def _fit_in_view_best_effort(self):
@@ -980,18 +998,21 @@ class EditorWindow:
     def _rename_layer(self, layer: Layer, name: str):
         self._document.execute(SetLayerNameCommand(layer=layer, name=name))
 
-    def save_file(self):
+    def save_file(self, on_saved=None):
         if self._project_path:
             try:
                 self._layer_stack.save_project(self._project_path)
+                self.application.mark_document_saved(self._project_path)
                 self._statusbar.text = f"Saved: {self._project_path}"
+                if on_saved is not None:
+                    on_saved()
             except Exception as e:
                 log.exception(f"Save project failed: {self._project_path}")
                 self._statusbar.text = f"Save error: {e}"
         else:
-            self.save_file_as()
+            self.save_file_as(on_saved=on_saved)
 
-    def save_file_as(self):
+    def save_file_as(self, on_saved=None):
         def _on_result(path):
             if not path:
                 return
@@ -1001,8 +1022,10 @@ class EditorWindow:
             self._settings.set("last_dir", self._last_dir)
             try:
                 self._layer_stack.save_project(path)
-                self._project_path = path
+                self.application.mark_document_saved(path)
                 self._statusbar.text = f"Saved: {os.path.basename(path)}"
+                if on_saved is not None:
+                    on_saved()
             except Exception as e:
                 log.exception(f"Save project failed: {path}")
                 self._statusbar.text = f"Save error: {e}"
@@ -1066,7 +1089,53 @@ class EditorWindow:
         self._canvas.fit_in_view()
 
     def _quit(self):
-        self.application.request_stop()
+        self.request_stop()
+
+    def _confirm_destructive(self, action: str, continuation) -> None:
+        if not self.application.document_dirty:
+            continuation()
+            return
+        dlg = Dialog()
+        dlg.title = "Unsaved Changes"
+        dlg.buttons = ["Save", "Discard", "Cancel"]
+        dlg.default_button = "Save"
+        dlg.cancel_button = "Cancel"
+        content = Label()
+        content.text = f"Save changes before you {action}?"
+        dlg.content = content
+
+        def finished(result: str) -> None:
+            if result == "Discard":
+                self.application.discard_unsaved_changes()
+                continuation()
+            elif result == "Save":
+                self.save_file(on_saved=continuation)
+
+        dlg.on_result = finished
+        dlg.show(self.ui)
+
+    def _offer_recovery(self) -> None:
+        record = self.application.available_recovery
+        if record is None:
+            return
+
+        def finished(result: str) -> None:
+            if result == "Yes":
+                try:
+                    self.application.restore_recovery(record)
+                    self._fit_in_view_best_effort()
+                except Exception:
+                    log.exception("Recover document failed")
+            else:
+                self.application.discard_recovery(record)
+
+        MessageBox.question(
+            self.ui,
+            "Recover Document",
+            "Recover the last complete autosave?",
+            buttons=Buttons.YES_NO,
+            on_result=finished,
+        )
 
     # ------------------------------------------------------------------
     # Layer tools
@@ -1455,7 +1524,8 @@ class EditorWindow:
         return self.application.running
 
     def request_stop(self) -> None:
-        self.application.request_stop()
+        self._confirm_destructive(
+            "quit the editor", self.application.request_stop)
 
     def request_repaint(self) -> None:
         self._repaint_requested = True
@@ -1470,6 +1540,9 @@ class EditorWindow:
         if self._closed:
             return
         self._closed = True
+        subscription = getattr(self, "_stack_subscription", None)
+        if subscription is not None:
+            subscription.unsubscribe()
         self.application.close()
         # tcgui owns offscreen textures on the borrowed graphics context.
         # Release them before the host destroys its window/session.

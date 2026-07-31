@@ -12,6 +12,8 @@ import numpy as np
 from PIL import Image, ImageFilter
 
 from ..document.layer import Layer
+from ..document.change_event import DocumentChangeKind
+from ..document.commands import CommandDelta, _array_delta_after_apply
 from ..document.result_paste import paste_result
 from ..document.tool import Tool
 from .provenance import (
@@ -328,5 +330,16 @@ class ApplyFrozenGeneratedResultCommand:
             if hasattr(self.layer.tool, "model_identity"):
                 self.layer.tool.model_identity = self.provenance.model
         layer_stack.mark_layer_dirty(self.layer)
-        if layer_stack.on_changed:
-            layer_stack.on_changed()
+        layer_stack.publish_change(
+            DocumentChangeKind.PIXELS, layers=(self.layer,))
+
+    def apply_with_history(self, layer_stack) -> CommandDelta | None:
+        before = self.layer.image.copy()
+        self.apply(layer_stack)
+        return _array_delta_after_apply(
+            layer_stack,
+            self.layer.image,
+            before,
+            layer=self.layer,
+            pixels=True,
+        )

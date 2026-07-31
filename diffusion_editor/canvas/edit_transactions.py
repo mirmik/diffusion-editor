@@ -15,6 +15,7 @@ from typing import Callable, Protocol
 import numpy as np
 
 from ..document.document_service import DocumentService
+from ..document.change_event import DocumentChangeKind
 from ..document.layer import Layer
 from ..document.layer_stack import LayerStack
 from ..document.mask import coerce_mask_data
@@ -282,6 +283,7 @@ class CanvasEditTransactionCoordinator:
                 raise RuntimeError(
                     f"cannot apply canvas edit: layer {layer_id!r} is detached"
                 )
+            old_bounds = target_layer.bounds
             self._layer_stack.set_layer_offset(
                 target_layer,
                 offset[0],
@@ -289,13 +291,27 @@ class CanvasEditTransactionCoordinator:
                 old_bounds=target_layer.bounds,
                 notify=False,
             )
-            self._notify_changed()
+            self._notify_changed(
+                DocumentChangeKind.TRANSFORM,
+                layer=target_layer,
+                dirty_rect=self._layer_stack._union_rect(
+                    old_bounds, target_layer.bounds),
+            )
 
         self._document.push_callbacks(
             label=context.label,
             undo_fn=lambda: apply_offset(before),
             redo_fn=lambda: apply_offset(after),
             size_bytes=16,
+        )
+        self._notify_changed(
+            DocumentChangeKind.TRANSFORM,
+            layer=layer,
+            dirty_rect=self._layer_stack._union_rect(
+                (before[0], before[1], before[0] + layer.width,
+                 before[1] + layer.height),
+                layer.bounds,
+            ),
         )
         self._notify_history_changed()
 
@@ -325,6 +341,16 @@ class CanvasEditTransactionCoordinator:
             redo_fn=lambda: self._apply_patch(layer_id, target, rect, after),
             size_bytes=before.nbytes + after.nbytes,
         )
+        layer = (
+            self._layer_stack.find_layer_by_id(layer_id)
+            if layer_id is not None else None
+        )
+        if target == "image" and layer is not None:
+            self._notify_changed(
+                DocumentChangeKind.PIXELS, layer=layer, dirty_rect=rect)
+        else:
+            self._notify_changed(
+                DocumentChangeKind.METADATA, layer=layer)
         self._notify_history_changed()
 
     def _finish_mask_image_edit(
@@ -371,6 +397,8 @@ class CanvasEditTransactionCoordinator:
                 + after_image_patch.nbytes
             ),
         )
+        self._notify_changed(
+            DocumentChangeKind.PIXELS, layer=layer, dirty_rect=rect)
         self._notify_history_changed()
 
     def _apply_mask_image_patch(
@@ -397,7 +425,8 @@ class CanvasEditTransactionCoordinator:
             layer,
             rect=layer.local_rect_to_canvas(rect),
         )
-        self._notify_changed()
+        self._notify_changed(
+            DocumentChangeKind.PIXELS, layer=layer, dirty_rect=rect)
 
     def _apply_patch(
             self,
@@ -416,7 +445,7 @@ class CanvasEditTransactionCoordinator:
             if clipped != rect or destination[y0:y1, x0:x1].shape != patch.shape:
                 raise RuntimeError("selection geometry changed since canvas edit")
             destination[y0:y1, x0:x1] = coerce_mask_data(patch)
-            self._notify_changed()
+            self._notify_changed(DocumentChangeKind.METADATA)
             return
 
         layer = (
@@ -434,7 +463,8 @@ class CanvasEditTransactionCoordinator:
             if layer.mask.data[y0:y1, x0:x1].shape != patch.shape:
                 raise RuntimeError("layer mask geometry changed since canvas edit")
             layer.mask.data[y0:y1, x0:x1] = coerce_mask_data(patch)
-            self._notify_changed()
+            self._notify_changed(
+                DocumentChangeKind.METADATA, layer=layer)
             return
         if layer.image[y0:y1, x0:x1].shape != patch.shape:
             raise RuntimeError("layer image geometry changed since canvas edit")
@@ -443,7 +473,8 @@ class CanvasEditTransactionCoordinator:
             layer,
             rect=layer.local_rect_to_canvas(rect),
         )
-        self._notify_changed()
+        self._notify_changed(
+            DocumentChangeKind.PIXELS, layer=layer, dirty_rect=rect)
 
     def _restore(self, context: _EditContext) -> None:
         if context.target == "selection":
@@ -452,7 +483,7 @@ class CanvasEditTransactionCoordinator:
                     before is not None
                     and before.shape == self._layer_stack.selection.data.shape):
                 self._layer_stack.selection.data[:] = before
-                self._notify_changed()
+                self._notify_changed(DocumentChangeKind.METADATA)
             return
 
         layer = self._current_layer(context)
@@ -464,6 +495,7 @@ class CanvasEditTransactionCoordinator:
             before = context.before_offset
             if before is not None:
                 if self._current_layer(context) is layer:
+                    old_bounds = layer.bounds
                     self._layer_stack.set_layer_offset(
                         layer,
                         before[0],
@@ -471,7 +503,12 @@ class CanvasEditTransactionCoordinator:
                         old_bounds=layer.bounds,
                         notify=False,
                     )
-                    self._notify_changed()
+                    self._notify_changed(
+                        DocumentChangeKind.TRANSFORM,
+                        layer=layer,
+                        dirty_rect=self._layer_stack._union_rect(
+                            old_bounds, layer.bounds),
+                    )
                 else:
                     # The orphan is no longer part of the aggregate, but its
                     # in-flight tool mutation must still be rolled back.
@@ -482,7 +519,8 @@ class CanvasEditTransactionCoordinator:
             return
         if context.target == "mask" and before.shape == layer.mask.data.shape:
             layer.mask.data[:] = before
-            self._notify_changed()
+            self._notify_changed(
+                DocumentChangeKind.METADATA, layer=layer)
         elif (
                 context.target == "mask_image"
                 and context.before_image is not None
@@ -491,28 +529,40 @@ class CanvasEditTransactionCoordinator:
             layer.mask.data[:] = before
             layer.image[:] = context.before_image
             self._layer_stack.mark_layer_dirty(layer, rect=layer.bounds)
-            self._notify_changed()
+            self._notify_changed(
+                DocumentChangeKind.PIXELS,
+                layer=layer,
+                dirty_rect=(0, 0, layer.width, layer.height),
+            )
         elif context.target == "image" and before.shape == layer.image.shape:
             layer.image[:] = before
             self._layer_stack.mark_layer_dirty(
                 layer,
                 rect=layer.bounds,
             )
-            self._notify_changed()
+            self._notify_changed(
+                DocumentChangeKind.PIXELS,
+                layer=layer,
+                dirty_rect=(0, 0, layer.width, layer.height),
+            )
 
     def _current_layer(self, context: _EditContext) -> Layer | None:
         if context.layer_id is None:
             return None
         return self._layer_stack.find_layer_by_id(context.layer_id)
 
-    def _notify_changed(self) -> None:
-        if self._layer_stack.on_changed is None:
-            return
-        try:
-            self._layer_stack.on_changed()
-        except Exception:
-            logger.exception(
-                "Canvas observer failed after a completed document mutation")
+    def _notify_changed(
+            self,
+            kind: DocumentChangeKind,
+            *,
+            layer: Layer | None = None,
+            dirty_rect: Rect | None = None) -> None:
+        self._layer_stack.publish_change(
+            kind,
+            layers=(layer,) if layer is not None else (),
+            dirty_rect=dirty_rect,
+            operation="canvas edit",
+        )
 
     def _notify_history_changed(self) -> None:
         try:

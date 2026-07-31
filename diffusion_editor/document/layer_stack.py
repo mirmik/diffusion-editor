@@ -5,11 +5,19 @@ import os
 from pathlib import Path
 import re
 import tempfile
+from threading import RLock
+from typing import Callable
 import zipfile
 
 import numpy as np
 
 from .archive_serialization import load_array_from_zip, save_array_to_zip
+from .change_event import (
+    DocumentChangeCallback,
+    DocumentChangeEvent,
+    DocumentChangeKind,
+    DocumentChangeSubscription,
+)
 from .layer import Layer, _layer_from_dict
 from .layer_renderer import LayerRenderer, premultiplied_to_straight_rgba
 from .mask import Selection
@@ -32,9 +40,106 @@ class LayerStack:
         self._width = 0
         self._height = 0
         self._tile_size = tile_size
-        self.on_changed: callable = None
+        self._change_revision = 0
+        self._change_lock = RLock()
+        self._change_subscribers: dict[int, DocumentChangeCallback] = {}
+        self._next_change_token = 1
+        # Temporary source-compatibility bridge for third-party callers.  The
+        # editor itself uses independent subscription handles.
+        self._legacy_on_changed: Callable[[], None] | None = None
         self._renderer = LayerRenderer(self)
         self.selection = Selection()
+
+    @property
+    def revision(self) -> int:
+        with self._change_lock:
+            return self._change_revision
+
+    @property
+    def on_changed(self) -> Callable[[], None] | None:
+        """Deprecated compatibility callback; prefer ``subscribe``."""
+        return self._legacy_on_changed
+
+    @on_changed.setter
+    def on_changed(self, callback: Callable[[], None] | None) -> None:
+        self._legacy_on_changed = callback
+
+    def subscribe(
+            self,
+            callback: DocumentChangeCallback) -> DocumentChangeSubscription:
+        if not callable(callback):
+            raise TypeError("document change subscriber must be callable")
+        with self._change_lock:
+            token = self._next_change_token
+            self._next_change_token += 1
+            self._change_subscribers[token] = callback
+        return DocumentChangeSubscription(self, token)
+
+    def _unsubscribe_change(self, token: int) -> None:
+        with self._change_lock:
+            self._change_subscribers.pop(token, None)
+
+    def publish_change(
+            self,
+            kind: DocumentChangeKind,
+            *,
+            layers: tuple[Layer, ...] = (),
+            layer_ids: tuple[str, ...] = (),
+            dirty_rect: tuple[int, int, int, int] | None = None,
+            operation: str | None = None) -> DocumentChangeEvent:
+        """Publish one committed mutation and advance its semantic revision."""
+        if layers and layer_ids:
+            raise ValueError("pass layers or layer_ids, not both")
+        ids = layer_ids or tuple(layer.id for layer in layers)
+        if kind == DocumentChangeKind.PIXELS and dirty_rect is not None:
+            if len(layers) != 1:
+                raise ValueError("a pixel dirty rect requires exactly one layer")
+            dirty_rect = self._clip_rect(
+                dirty_rect, layers[0].width, layers[0].height)
+        elif kind == DocumentChangeKind.TRANSFORM and dirty_rect is not None:
+            dirty_rect = self._clip_rect(
+                dirty_rect, self._width, self._height)
+        with self._change_lock:
+            self._change_revision += 1
+            event = DocumentChangeEvent(
+                kind=kind,
+                revision=self._change_revision,
+                layer_ids=ids,
+                dirty_rect=dirty_rect,
+            )
+            subscribers = tuple(self._change_subscribers.values())
+            legacy = self._legacy_on_changed
+        for callback in subscribers:
+            try:
+                callback(event)
+            except Exception:
+                logger.exception(
+                    "LayerStack subscriber failed after successful %s",
+                    operation or kind.value,
+                )
+        if legacy is not None:
+            try:
+                legacy()
+            except Exception:
+                logger.exception(
+                    "LayerStack legacy observer failed after successful %s",
+                    operation or kind.value,
+                )
+        return event
+
+    @staticmethod
+    def _clip_rect(
+            rect: tuple[int, int, int, int],
+            width: int,
+            height: int) -> tuple[int, int, int, int] | None:
+        x0, y0, x1, y1 = rect
+        x0 = max(0, min(int(x0), width))
+        y0 = max(0, min(int(y0), height))
+        x1 = max(0, min(int(x1), width))
+        y1 = max(0, min(int(y1), height))
+        if x1 <= x0 or y1 <= y0:
+            return None
+        return x0, y0, x1, y1
 
     # --- Tree traversal ---
 
@@ -123,8 +228,10 @@ class LayerStack:
             self._require_member(layer)
         if layer is not self._active_layer:
             self._active_layer = layer
-            if self.on_changed:
-                self.on_changed()
+            self.publish_change(
+                DocumentChangeKind.ACTIVE,
+                layers=(layer,) if layer is not None else (),
+            )
 
     def init_from_image(self, image: np.ndarray):
         if not isinstance(image, np.ndarray) or image.ndim < 2:
@@ -143,7 +250,11 @@ class LayerStack:
         self._layers.append(layer)
         self._active_layer = layer
         self._rebuild_caches()
-        self._notify_changed_after_commit("initialize document")
+        self.publish_change(
+            DocumentChangeKind.STRUCTURE,
+            layers=(layer,),
+            operation="initialize document",
+        )
 
     def _insert_near_active(self, layer: Layer):
         """Insert layer as a sibling above the active layer."""
@@ -178,8 +289,7 @@ class LayerStack:
                           tile_size=self._tile_size)
         self._insert_near_active(layer)
         self._rebuild_caches()
-        if self.on_changed:
-            self.on_changed()
+        self.publish_change(DocumentChangeKind.STRUCTURE, layers=(layer,))
 
     def insert_image_layer(self, name: str, image: np.ndarray,
                            x: int = 0, y: int = 0):
@@ -189,16 +299,14 @@ class LayerStack:
         layer = Layer(name, w, h, image, tile_size=self._tile_size, x=x, y=y)
         self._insert_near_active(layer)
         self._rebuild_caches()
-        if self.on_changed:
-            self.on_changed()
+        self.publish_change(DocumentChangeKind.STRUCTURE, layers=(layer,))
 
     def insert_layer(self, layer: Layer):
         if self._width == 0 or self._height == 0:
             return
         self._insert_near_active(layer)
         self._rebuild_caches()
-        if self.on_changed:
-            self.on_changed()
+        self.publish_change(DocumentChangeKind.STRUCTURE, layers=(layer,))
 
     def remove_layer(self, layer: Layer):
         """Remove layer and its entire subtree."""
@@ -230,8 +338,10 @@ class LayerStack:
         if self.solo_layer_id in removed_ids:
             self.solo_layer_id = None
         self._rebuild_caches()
-        if self.on_changed:
-            self.on_changed()
+        self.publish_change(
+            DocumentChangeKind.STRUCTURE,
+            layer_ids=tuple(sorted(removed_ids)),
+        )
 
     def move_layer(self, layer: Layer, new_parent: Layer | None, index: int):
         """Move layer to new_parent at index (or root if new_parent is None)."""
@@ -266,29 +376,31 @@ class LayerStack:
             self._layers.insert(index, layer)
         self._active_layer = layer
         self._rebuild_caches()
-        if self.on_changed:
-            self.on_changed()
+        self.publish_change(DocumentChangeKind.STRUCTURE, layers=(layer,))
 
     def set_visibility(self, layer: Layer, visible: bool):
         self._require_member(layer)
+        if layer.visible == visible:
+            return
         layer.visible = visible
         self.mark_layer_dirty(layer, pixels_changed=False)
-        if self.on_changed:
-            self.on_changed()
+        self.publish_change(DocumentChangeKind.VISIBILITY, layers=(layer,))
 
     def set_opacity(self, layer: Layer, opacity: float):
         """Set layer opacity with prefix invalidation."""
         self._require_member(layer)
+        if layer.opacity == opacity:
+            return
         layer.opacity = opacity
         self.mark_layer_dirty(layer, pixels_changed=False)
-        if self.on_changed:
-            self.on_changed()
+        self.publish_change(DocumentChangeKind.OPACITY, layers=(layer,))
 
     def set_layer_name(self, layer: Layer, name: str):
         self._require_member(layer)
+        if layer.name == name:
+            return
         layer.name = name
-        if self.on_changed:
-            self.on_changed()
+        self.publish_change(DocumentChangeKind.METADATA, layers=(layer,))
 
     def find_layer_by_id(self, layer_id: str) -> Layer | None:
         if not layer_id:
@@ -314,8 +426,10 @@ class LayerStack:
             return
         self.solo_layer_id = next_id
         self._rebuild_caches()
-        if self.on_changed:
-            self.on_changed()
+        self.publish_change(
+            DocumentChangeKind.VISIBILITY,
+            layers=(layer,) if layer is not None else (),
+        )
 
     def toggle_solo_layer(self, layer: Layer) -> None:
         if self.solo_layer_id == layer.id:
@@ -350,13 +464,19 @@ class LayerStack:
         self._require_member(layer)
         if old_bounds is None:
             old_bounds = layer.bounds
+        if (layer.x, layer.y) == (int(x), int(y)):
+            return
         layer.x = int(x)
         layer.y = int(y)
         new_bounds = layer.bounds
         dirty = self._union_rect(old_bounds, new_bounds)
         self.mark_layer_dirty(layer, dirty, pixels_changed=False)
-        if notify and self.on_changed:
-            self.on_changed()
+        if notify:
+            self.publish_change(
+                DocumentChangeKind.TRANSFORM,
+                layers=(layer,),
+                dirty_rect=dirty,
+            )
 
     def flatten(self):
         if not self._layers:
@@ -371,8 +491,7 @@ class LayerStack:
         self._active_layer = layer
         self.solo_layer_id = None
         self._rebuild_caches()
-        if self.on_changed:
-            self.on_changed()
+        self.publish_change(DocumentChangeKind.STRUCTURE, layers=(layer,))
 
     # --- Prefix cache management ---
 
@@ -588,7 +707,11 @@ class LayerStack:
         self._height = candidate._height
         self.selection = candidate.selection
         self._rebuild_caches()
-        self._notify_changed_after_commit("load project")
+        self.publish_change(
+            DocumentChangeKind.SNAPSHOT_RESTORE,
+            layers=tuple(self._all_layers_flat()),
+            operation="load project",
+        )
 
     def _load_from_zip_in_place(
             self,
@@ -794,16 +917,6 @@ class LayerStack:
                 return False
             current = children
         return True
-
-    def _notify_changed_after_commit(self, operation: str) -> None:
-        """Keep observer failures from redefining an already-completed commit."""
-        if self.on_changed is None:
-            return
-        try:
-            self.on_changed()
-        except Exception:
-            logger.exception(
-                "LayerStack observer failed after successful %s", operation)
 
     def _validate_loaded_state(self) -> None:
         self._validate_serializable_state()

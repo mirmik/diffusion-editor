@@ -349,6 +349,7 @@ def test_new_and_open_rotate_session_even_when_stable_layer_ids_repeat(tmp_path)
     layer = _insert_diffusion_layer(application)
     project_path = tmp_path / "same.deproj"
     application.layer_stack.save_project(str(project_path))
+    application.mark_document_saved(str(project_path))
     coordinator = ApplicationDialogCoordinator(application, _Canvas())
 
     first = _start(application, engine, layer)

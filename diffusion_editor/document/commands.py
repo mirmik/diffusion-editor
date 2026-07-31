@@ -10,6 +10,7 @@ import numpy as np
 from PIL import Image, ImageFilter
 
 from .layer import Layer
+from .change_event import DocumentChangeKind
 from .tool import DiffusionTool, InstructTool, Tool
 from .layer_stack import LayerStack
 from .result_paste import paste_result
@@ -28,6 +29,108 @@ class SnapshotCommand(Protocol):
 
 
 @dataclass(frozen=True)
+class CommandDelta:
+    undo_fn: Callable[[], None]
+    redo_fn: Callable[[], None]
+    size_bytes: int = 0
+    coalesce_key: object | None = None
+
+
+def _location(layer_stack: LayerStack, layer: Layer) -> tuple[Layer | None, int]:
+    parent = layer.parent
+    siblings = parent.children if parent is not None else layer_stack.layers
+    return parent, siblings.index(layer)
+
+
+def _restore_active(layer_stack: LayerStack, layer_id: str | None) -> None:
+    layer_stack.active_layer = layer_stack.find_layer_by_id(layer_id or "")
+
+
+def _set_tool(layer_stack: LayerStack, layer: Layer, tool: Tool | None) -> None:
+    layer.tool = tool
+    layer_stack.publish_change(DocumentChangeKind.METADATA, layers=(layer,))
+
+
+def _attribute_delta(
+        layer_stack: LayerStack,
+        layer: Layer,
+        target: object,
+        values: dict[str, object],
+        *,
+        coalesce_key: object | None = None) -> CommandDelta | None:
+    old = {name: getattr(target, name) for name in values}
+    if old == values:
+        return None
+
+    def assign(next_values: dict[str, object]) -> None:
+        for name, value in next_values.items():
+            setattr(target, name, value)
+        layer_stack.publish_change(
+            DocumentChangeKind.METADATA, layers=(layer,))
+
+    assign(values)
+    size = sum(
+        len(repr(value).encode("utf-8"))
+        for value in (*old.values(), *values.values())
+    )
+    return CommandDelta(
+        lambda: assign(old),
+        lambda: assign(values),
+        size,
+        coalesce_key,
+    )
+
+
+def _changed_rect(
+        before: np.ndarray,
+        after: np.ndarray) -> tuple[int, int, int, int] | None:
+    changed = before != after
+    if changed.ndim > 2:
+        changed = np.any(changed, axis=tuple(range(2, changed.ndim)))
+    ys, xs = np.nonzero(changed)
+    if xs.size == 0:
+        return None
+    return int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
+
+
+def _array_delta_after_apply(
+        layer_stack: LayerStack,
+        target: np.ndarray,
+        before: np.ndarray,
+        *,
+        layer: Layer | None = None,
+        pixels: bool = False) -> CommandDelta | None:
+    rect = _changed_rect(before, target)
+    if rect is None:
+        return None
+    x0, y0, x1, y1 = rect
+    before_patch = before[y0:y1, x0:x1].copy()
+    after_patch = target[y0:y1, x0:x1].copy()
+
+    def assign(patch: np.ndarray) -> None:
+        target[y0:y1, x0:x1] = patch
+        if pixels and layer is not None:
+            layer_stack.mark_layer_dirty(
+                layer, layer.local_rect_to_canvas(rect))
+            layer_stack.publish_change(
+                DocumentChangeKind.PIXELS,
+                layers=(layer,),
+                dirty_rect=rect,
+            )
+        else:
+            layer_stack.publish_change(
+                DocumentChangeKind.METADATA,
+                layers=(layer,) if layer is not None else (),
+            )
+
+    return CommandDelta(
+        lambda: assign(before_patch),
+        lambda: assign(after_patch),
+        before_patch.nbytes + after_patch.nbytes,
+    )
+
+
+@dataclass(frozen=True)
 class AddLayerCommand:
     name: str
     image: np.ndarray | None = None
@@ -41,6 +144,28 @@ class AddLayerCommand:
         else:
             layer_stack.insert_image_layer(self.name, self.image, self.x, self.y)
 
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
+        if layer_stack.width == 0 or layer_stack.height == 0:
+            return None
+        old_active_id = (
+            layer_stack.active_layer.id
+            if layer_stack.active_layer is not None else None)
+        self.apply(layer_stack)
+        layer = layer_stack.active_layer
+        if layer is None:
+            return None
+        parent, index = _location(layer_stack, layer)
+
+        def undo() -> None:
+            layer_stack.remove_layer(layer)
+            _restore_active(layer_stack, old_active_id)
+
+        def redo() -> None:
+            layer_stack.insert_layer(layer)
+            layer_stack.move_layer(layer, parent, index)
+
+        return CommandDelta(undo, redo, 128)
+
 
 @dataclass(frozen=True)
 class InsertLayerCommand:
@@ -50,6 +175,25 @@ class InsertLayerCommand:
     def apply(self, layer_stack: LayerStack) -> None:
         layer_stack.insert_layer(self.layer)
 
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
+        if layer_stack.width == 0 or layer_stack.height == 0:
+            return None
+        old_active_id = (
+            layer_stack.active_layer.id
+            if layer_stack.active_layer is not None else None)
+        self.apply(layer_stack)
+        parent, index = _location(layer_stack, self.layer)
+
+        def undo() -> None:
+            layer_stack.remove_layer(self.layer)
+            _restore_active(layer_stack, old_active_id)
+
+        def redo() -> None:
+            layer_stack.insert_layer(self.layer)
+            layer_stack.move_layer(self.layer, parent, index)
+
+        return CommandDelta(undo, redo, 128)
+
 
 @dataclass(frozen=True)
 class RemoveLayerCommand:
@@ -58,6 +202,24 @@ class RemoveLayerCommand:
 
     def apply(self, layer_stack: LayerStack) -> None:
         layer_stack.remove_layer(self.layer)
+
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta:
+        parent, index = _location(layer_stack, self.layer)
+        old_active_id = (
+            layer_stack.active_layer.id
+            if layer_stack.active_layer is not None else None)
+        self.apply(layer_stack)
+
+        def undo() -> None:
+            layer_stack.insert_layer(self.layer)
+            layer_stack.move_layer(self.layer, parent, index)
+            _restore_active(layer_stack, old_active_id)
+
+        return CommandDelta(
+            undo,
+            lambda: layer_stack.remove_layer(self.layer),
+            128,
+        )
 
 
 @dataclass(frozen=True)
@@ -70,6 +232,25 @@ class MoveLayerCommand:
     def apply(self, layer_stack: LayerStack) -> None:
         layer_stack.move_layer(self.layer, self.new_parent, self.index)
 
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta:
+        old_parent, old_index = _location(layer_stack, self.layer)
+        old_active_id = (
+            layer_stack.active_layer.id
+            if layer_stack.active_layer is not None else None)
+        self.apply(layer_stack)
+        new_parent, new_index = _location(layer_stack, self.layer)
+
+        def undo() -> None:
+            layer_stack.move_layer(self.layer, old_parent, old_index)
+            _restore_active(layer_stack, old_active_id)
+
+        return CommandDelta(
+            undo,
+            lambda: layer_stack.move_layer(
+                self.layer, new_parent, new_index),
+            96,
+        )
+
 
 @dataclass(frozen=True)
 class SetLayerVisibilityCommand:
@@ -80,6 +261,17 @@ class SetLayerVisibilityCommand:
     def apply(self, layer_stack: LayerStack) -> None:
         layer_stack.set_visibility(self.layer, self.visible)
 
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
+        old = self.layer.visible
+        if old == self.visible:
+            return None
+        self.apply(layer_stack)
+        return CommandDelta(
+            lambda: layer_stack.set_visibility(self.layer, old),
+            lambda: layer_stack.set_visibility(self.layer, self.visible),
+            16,
+        )
+
 
 @dataclass(frozen=True)
 class SetLayerSoloCommand:
@@ -88,6 +280,17 @@ class SetLayerSoloCommand:
 
     def apply(self, layer_stack: LayerStack) -> None:
         layer_stack.set_solo_layer(self.layer)
+
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
+        old = layer_stack.solo_layer()
+        if old is self.layer:
+            return None
+        self.apply(layer_stack)
+        return CommandDelta(
+            lambda: layer_stack.set_solo_layer(old),
+            lambda: layer_stack.set_solo_layer(self.layer),
+            16,
+        )
 
 
 @dataclass(frozen=True)
@@ -99,6 +302,18 @@ class SetLayerOpacityCommand:
     def apply(self, layer_stack: LayerStack) -> None:
         layer_stack.set_opacity(self.layer, self.opacity)
 
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
+        old = self.layer.opacity
+        if old == self.opacity:
+            return None
+        self.apply(layer_stack)
+        return CommandDelta(
+            lambda: layer_stack.set_opacity(self.layer, old),
+            lambda: layer_stack.set_opacity(self.layer, self.opacity),
+            16,
+            ("opacity", self.layer.id),
+        )
+
 
 @dataclass(frozen=True)
 class SetLayerNameCommand:
@@ -109,6 +324,18 @@ class SetLayerNameCommand:
     def apply(self, layer_stack: LayerStack) -> None:
         layer_stack.set_layer_name(self.layer, self.name)
 
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
+        old = self.layer.name
+        if old == self.name:
+            return None
+        self.apply(layer_stack)
+        size = len(old.encode("utf-8")) + len(self.name.encode("utf-8"))
+        return CommandDelta(
+            lambda: layer_stack.set_layer_name(self.layer, old),
+            lambda: layer_stack.set_layer_name(self.layer, self.name),
+            size,
+        )
+
 
 @dataclass(frozen=True)
 class AttachLayerToolCommand:
@@ -118,8 +345,17 @@ class AttachLayerToolCommand:
 
     def apply(self, layer_stack: LayerStack) -> None:
         self.layer.tool = self.tool
-        if layer_stack.on_changed:
-            layer_stack.on_changed()
+        layer_stack.publish_change(
+            DocumentChangeKind.METADATA, layers=(self.layer,))
+
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta:
+        old = self.layer.tool
+        self.apply(layer_stack)
+        return CommandDelta(
+            lambda: _set_tool(layer_stack, self.layer, old),
+            lambda: _set_tool(layer_stack, self.layer, self.tool),
+            256,
+        )
 
 
 @dataclass(frozen=True)
@@ -129,8 +365,17 @@ class DetachLayerToolCommand:
 
     def apply(self, layer_stack: LayerStack) -> None:
         self.layer.tool = None
-        if layer_stack.on_changed:
-            layer_stack.on_changed()
+        layer_stack.publish_change(
+            DocumentChangeKind.METADATA, layers=(self.layer,))
+
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta:
+        old = self.layer.tool
+        self.apply(layer_stack)
+        return CommandDelta(
+            lambda: _set_tool(layer_stack, self.layer, old),
+            lambda: _set_tool(layer_stack, self.layer, None),
+            256,
+        )
 
 
 @dataclass(frozen=True)
@@ -191,8 +436,18 @@ class DrawRectCommand:
 
         layer_stack.mark_layer_dirty(
             self.layer, self.layer.local_rect_to_canvas((x0, y0, x1, y1)))
-        if layer_stack.on_changed:
-            layer_stack.on_changed()
+        layer_stack.publish_change(
+            DocumentChangeKind.PIXELS,
+            layers=(self.layer,),
+            dirty_rect=(x0, y0, x1, y1),
+        )
+
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
+        before = self.layer.image.copy()
+        self.apply(layer_stack)
+        return _array_delta_after_apply(
+            layer_stack, self.layer.image, before,
+            layer=self.layer, pixels=True)
 
 
 @dataclass(frozen=True)
@@ -239,8 +494,15 @@ class DrawGridCommand:
                 image[y0:y1, 0:w] = color
 
         layer_stack.mark_layer_dirty(self.layer)
-        if layer_stack.on_changed:
-            layer_stack.on_changed()
+        layer_stack.publish_change(
+            DocumentChangeKind.PIXELS, layers=(self.layer,))
+
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
+        before = self.layer.image.copy()
+        self.apply(layer_stack)
+        return _array_delta_after_apply(
+            layer_stack, self.layer.image, before,
+            layer=self.layer, pixels=True)
 
 
 @dataclass(frozen=True)
@@ -299,8 +561,18 @@ class FillMaskCommand:
         dirty = (dst_x0, dst_y0, dst_x0 + m.shape[1], dst_y0 + m.shape[0])
         layer_stack.mark_layer_dirty(
             self.layer, self.layer.local_rect_to_canvas(dirty))
-        if layer_stack.on_changed:
-            layer_stack.on_changed()
+        layer_stack.publish_change(
+            DocumentChangeKind.PIXELS,
+            layers=(self.layer,),
+            dirty_rect=dirty,
+        )
+
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
+        before = self.layer.image.copy()
+        self.apply(layer_stack)
+        return _array_delta_after_apply(
+            layer_stack, self.layer.image, before,
+            layer=self.layer, pixels=True)
 
 
 @dataclass(frozen=True)
@@ -310,8 +582,14 @@ class ClearLayerMaskCommand:
 
     def apply(self, layer_stack: LayerStack) -> None:
         self.layer.clear_mask()
-        if layer_stack.on_changed:
-            layer_stack.on_changed()
+        layer_stack.publish_change(
+            DocumentChangeKind.METADATA, layers=(self.layer,))
+
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
+        before = self.layer.mask.data.copy()
+        self.apply(layer_stack)
+        return _array_delta_after_apply(
+            layer_stack, self.layer.mask.data, before, layer=self.layer)
 
 
 @dataclass(frozen=True)
@@ -326,8 +604,22 @@ class SetIpAdapterReferenceLayerCommand:
         if isinstance(tool, DiffusionTool):
             tool.ip_adapter_layer_id = self.reference_layer_id
             tool.ip_adapter_layer_name_hint = self.reference_layer_name_hint
-        if layer_stack.on_changed:
-            layer_stack.on_changed()
+        layer_stack.publish_change(
+            DocumentChangeKind.METADATA, layers=(self.layer,))
+
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
+        tool = self.layer.tool
+        if not isinstance(tool, DiffusionTool):
+            return None
+        return _attribute_delta(
+            layer_stack,
+            self.layer,
+            tool,
+            {
+                "ip_adapter_layer_id": self.reference_layer_id,
+                "ip_adapter_layer_name_hint": self.reference_layer_name_hint,
+            },
+        )
 
 
 @dataclass(frozen=True)
@@ -340,8 +632,19 @@ class ClearIpAdapterReferenceLayerCommand:
         if isinstance(tool, DiffusionTool):
             tool.ip_adapter_layer_id = None
             tool.ip_adapter_layer_name_hint = ""
-        if layer_stack.on_changed:
-            layer_stack.on_changed()
+        layer_stack.publish_change(
+            DocumentChangeKind.METADATA, layers=(self.layer,))
+
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
+        tool = self.layer.tool
+        if not isinstance(tool, DiffusionTool):
+            return None
+        return _attribute_delta(
+            layer_stack,
+            self.layer,
+            tool,
+            {"ip_adapter_layer_id": None, "ip_adapter_layer_name_hint": ""},
+        )
 
 
 @dataclass(frozen=True)
@@ -377,8 +680,33 @@ class UpdateDiffusionToolCommand:
         tool.resize_to_model_resolution = self.resize_to_model_resolution
         tool.model_path = self.model_path
         tool.prediction_type = self.prediction_type
-        if layer_stack.on_changed:
-            layer_stack.on_changed()
+        layer_stack.publish_change(
+            DocumentChangeKind.METADATA, layers=(self.layer,))
+
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
+        tool = self.layer.tool
+        if not isinstance(tool, DiffusionTool):
+            return None
+        return _attribute_delta(
+            layer_stack,
+            self.layer,
+            tool,
+            {
+                "prompt": self.prompt,
+                "negative_prompt": self.negative_prompt,
+                "strength": self.strength,
+                "guidance_scale": self.guidance_scale,
+                "steps": self.steps,
+                "seed": self.seed,
+                "mode": self.mode,
+                "masked_content": self.masked_content,
+                "ip_adapter_scale": self.ip_adapter_scale,
+                "resize_to_model_resolution": self.resize_to_model_resolution,
+                "model_path": self.model_path,
+                "prediction_type": self.prediction_type,
+            },
+            coalesce_key=("diffusion-tool", self.layer.id),
+        )
 
 
 @dataclass(frozen=True)
@@ -400,8 +728,26 @@ class UpdateInstructToolCommand:
         tool.guidance_scale = self.guidance_scale
         tool.steps = self.steps
         tool.seed = self.seed
-        if layer_stack.on_changed:
-            layer_stack.on_changed()
+        layer_stack.publish_change(
+            DocumentChangeKind.METADATA, layers=(self.layer,))
+
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
+        tool = self.layer.tool
+        if not isinstance(tool, InstructTool):
+            return None
+        return _attribute_delta(
+            layer_stack,
+            self.layer,
+            tool,
+            {
+                "instruction": self.instruction,
+                "image_guidance_scale": self.image_guidance_scale,
+                "guidance_scale": self.guidance_scale,
+                "steps": self.steps,
+                "seed": self.seed,
+            },
+            coalesce_key=("instruct-tool", self.layer.id),
+        )
 
 
 @dataclass(frozen=True)
@@ -412,8 +758,14 @@ class SetLayerPatchRectCommand:
 
     def apply(self, layer_stack: LayerStack) -> None:
         self.layer.patch_rect = self.rect
-        if layer_stack.on_changed:
-            layer_stack.on_changed()
+        layer_stack.publish_change(
+            DocumentChangeKind.METADATA, layers=(self.layer,))
+
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
+        return _attribute_delta(
+            layer_stack, self.layer, self.layer,
+            {"patch_rect": self.rect},
+        )
 
 
 @dataclass(frozen=True)
@@ -423,8 +775,14 @@ class ClearLayerPatchRectCommand:
 
     def apply(self, layer_stack: LayerStack) -> None:
         self.layer.patch_rect = None
-        if layer_stack.on_changed:
-            layer_stack.on_changed()
+        layer_stack.publish_change(
+            DocumentChangeKind.METADATA, layers=(self.layer,))
+
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
+        return _attribute_delta(
+            layer_stack, self.layer, self.layer,
+            {"patch_rect": None},
+        )
 
 
 SetManualPatchRectCommand = SetLayerPatchRectCommand
@@ -457,8 +815,14 @@ class ReplaceLayerMaskCommand:
             raise ValueError(
                 f"mask shape {data.shape} does not match layer mask "
                 f"shape {self.layer.mask.data.shape}")
-        if layer_stack.on_changed:
-            layer_stack.on_changed()
+        layer_stack.publish_change(
+            DocumentChangeKind.METADATA, layers=(self.layer,))
+
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
+        before = self.layer.mask.data.copy()
+        self.apply(layer_stack)
+        return _array_delta_after_apply(
+            layer_stack, self.layer.mask.data, before, layer=self.layer)
 
 
 @dataclass(frozen=True)
@@ -479,8 +843,13 @@ class SetLayerSelectionCommand:
             layer_stack.selection = Selection(height=layer_stack.height,
                                               width=layer_stack.width)
         layer_stack.selection.data[:] = data
-        if layer_stack.on_changed:
-            layer_stack.on_changed()
+        layer_stack.publish_change(DocumentChangeKind.METADATA)
+
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
+        before = layer_stack.selection.data.copy()
+        self.apply(layer_stack)
+        return _array_delta_after_apply(
+            layer_stack, layer_stack.selection.data, before)
 
 
 @dataclass(frozen=True)
@@ -491,8 +860,13 @@ class ClearSelectionCommand:
 
     def apply(self, layer_stack: LayerStack) -> None:
         layer_stack.selection.clear()
-        if layer_stack.on_changed:
-            layer_stack.on_changed()
+        layer_stack.publish_change(DocumentChangeKind.METADATA)
+
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
+        before = layer_stack.selection.data.copy()
+        self.apply(layer_stack)
+        return _array_delta_after_apply(
+            layer_stack, layer_stack.selection.data, before)
 
 
 @dataclass(frozen=True)
@@ -503,8 +877,13 @@ class InvertSelectionCommand:
 
     def apply(self, layer_stack: LayerStack) -> None:
         layer_stack.selection.data[:] = 1.0 - layer_stack.selection.data
-        if layer_stack.on_changed:
-            layer_stack.on_changed()
+        layer_stack.publish_change(DocumentChangeKind.METADATA)
+
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
+        before = layer_stack.selection.data.copy()
+        self.apply(layer_stack)
+        return _array_delta_after_apply(
+            layer_stack, layer_stack.selection.data, before)
 
 
 @dataclass(frozen=True)
@@ -520,8 +899,13 @@ class SelectAllCommand:
         if layer_stack.selection.data.shape != (h, w):
             layer_stack.selection = Selection(height=h, width=w)
         layer_stack.selection.data[:] = 1.0
-        if layer_stack.on_changed:
-            layer_stack.on_changed()
+        layer_stack.publish_change(DocumentChangeKind.METADATA)
+
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
+        before = layer_stack.selection.data.copy()
+        self.apply(layer_stack)
+        return _array_delta_after_apply(
+            layer_stack, layer_stack.selection.data, before)
 
 
 @dataclass(frozen=True)
@@ -558,5 +942,12 @@ class ApplyGeneratedResultCommand:
             return
         layer.image[:] = replacement
         layer_stack.mark_layer_dirty(layer)
-        if layer_stack.on_changed:
-            layer_stack.on_changed()
+        layer_stack.publish_change(
+            DocumentChangeKind.PIXELS, layers=(layer,))
+
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
+        before = self.layer.image.copy()
+        self.apply(layer_stack)
+        return _array_delta_after_apply(
+            layer_stack, self.layer.image, before,
+            layer=self.layer, pixels=True)

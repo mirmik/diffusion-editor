@@ -69,6 +69,7 @@ def test_paint_gesture_is_one_undoable_transaction_with_edge_clipping():
 
     assert np.any(painted[:, :, 3] > 0)
     assert application.history.can_undo
+    assert application.document.memory_bytes() < painted.nbytes
     assert application.document.undo() == "Paint Stroke"
     assert not np.any(application.layer_stack.active_layer.image)
     assert application.document.redo() == "Paint Stroke"

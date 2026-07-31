@@ -20,6 +20,7 @@ from termin.gui_native import (
 from tgfx import Tgfx2Context
 
 from ..document.layer import Layer
+from ..document.change_event import DocumentChangeEvent
 from ..document.layer_stack import LayerStack
 from .editor_canvas_controller import CanvasAnnotation, EditorCanvasController
 
@@ -80,9 +81,7 @@ class NativeEditorCanvas:
             set_cursor=self._set_cursor,
         )
         self._layer_stack = layer_stack
-        self._previous_stack_changed = layer_stack.on_changed
-        self._stack_changed_callback = self._on_stack_changed
-        layer_stack.on_changed = self._stack_changed_callback
+        self._stack_subscription = layer_stack.subscribe(self._on_stack_changed)
 
         self._pointer_connection = self.canvas.connect_pointer_input(
             self._on_pointer_input)
@@ -170,13 +169,9 @@ class NativeEditorCanvas:
             except BaseException as exc:
                 errors.append((exc, exc.__traceback__))
 
-        layer_stack = getattr(self, "_layer_stack", None)
-        stack_callback = getattr(self, "_stack_changed_callback", None)
-        if (
-                layer_stack is not None
-                and layer_stack.on_changed is stack_callback):
-            layer_stack.on_changed = getattr(
-                self, "_previous_stack_changed", None)
+        subscription = getattr(self, "_stack_subscription", None)
+        if subscription is not None:
+            cleanup(subscription.unsubscribe)
         cleanup(self.cancel_pointer_interaction)
         document = getattr(self, "_document", None)
         relay = getattr(self, "_capture_relay", None)
@@ -204,12 +199,10 @@ class NativeEditorCanvas:
             error, traceback = errors[0]
             raise error.with_traceback(traceback)
 
-    def _on_stack_changed(self) -> None:
-        if self._previous_stack_changed is not None:
-            self._previous_stack_changed()
+    def _on_stack_changed(self, event: DocumentChangeEvent) -> None:
         if self._closed:
             return
-        self.controller.refresh()
+        self.controller.handle_document_change(event)
         self._sync_gpu_image()
 
     def _set_image(self, image: np.ndarray | None) -> None:
