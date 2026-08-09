@@ -7,8 +7,10 @@ tcbase
 termin-dispatch
 termin-display
 termin-gui-native
+termin-mcp
 tgfx
 numpy==2.5.1
 Pillow==12.3.0
 PySDL2==0.9.17
 PyYAML==6.0.3
+watchdog==6.0.0

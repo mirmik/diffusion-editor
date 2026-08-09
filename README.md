@@ -118,6 +118,10 @@ be passed directly:
 The production host uses real settings and inference engines; it is distinct
 from the deterministic fake-engine harness in `scripts/smoke_native_root.py`.
 
+For live development automation, start with `TERMIN_EDITOR_MCP=1`. Termin's
+existing MCP/CLI helper can then execute Python on the running editor thread;
+see [Live editor MCP automation](docs/editor-mcp.md).
+
 Dirty documents have crash-recovery snapshots under
 `~/.cache/diffusion-editor/recovery`. The first snapshot is written one minute
 after a change; further snapshots are written only for a newer document

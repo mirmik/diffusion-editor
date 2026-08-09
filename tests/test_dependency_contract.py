@@ -37,6 +37,7 @@ def test_main_process_lock_excludes_unavailable_native_ml_stack():
     assert "Pillow==12.3.0" in runtime
     assert "PyYAML==6.0.3" in runtime
     assert "PySDL2==0.9.17" in runtime
+    assert "watchdog==6.0.0" in runtime
     forbidden = (
         "diffusers",
         "transformers",
@@ -56,6 +57,7 @@ def test_main_process_lock_excludes_unavailable_native_ml_stack():
         "termin-dispatch",
         "termin-display",
         "termin-gui-native",
+        "termin-mcp",
         "tgfx",
         *runtime,
     )

@@ -43,6 +43,7 @@ from ..canvas.edit_transactions import CanvasEditTransactionCoordinator
 from ..canvas.native_editor_canvas import NativeEditorCanvas
 from ..engines.reconstruction_engine import ReconstructionEngine
 from ..generation.reconstruction_controller import ReconstructionController
+from ..automation import start_editor_automation
 from .native_reconstruction_viewport import NativeReconstructionViewport
 
 
@@ -276,6 +277,7 @@ class NativeEditorRoot:
         self.reconstruction_engine = None
         self.reconstruction_controller = None
         self.reconstruction_viewport = None
+        self.automation = None
 
         try:
             self.view = view_factory(
@@ -529,8 +531,17 @@ class NativeEditorRoot:
                 self.canvas = None
             composition.set_unhandled_key_handler(self.view.dispatch_shortcut)
             application.bind_view(self.view.ports())
+            self.automation = start_editor_automation(self)
+            if self.automation is not None:
+                application.register_shutdown_resource(
+                    ShutdownPhase.VIEW_WORKERS,
+                    "diffusion-editor-mcp",
+                    self.automation.close,
+                )
             composition.request_repaint()
         except Exception:
+            if self.automation is not None:
+                self.automation.close()
             if self.canvas_edit_coordinator is not None:
                 self.canvas_edit_coordinator.close()
             if self.dialog_coordinator is not None:
@@ -688,6 +699,8 @@ class NativeEditorRoot:
             raise RuntimeError("native editor root is closed")
 
         events = int(self.composition.pump_events())
+        if self.automation is not None:
+            self.automation.process_pending()
         stats: DispatchStats = self.dispatcher.run_pending(self.dispatch_limit)
         if stats.busy or stats.internal_error:
             raise RuntimeError("native dispatcher failed to drain cleanly")

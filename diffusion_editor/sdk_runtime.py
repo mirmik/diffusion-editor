@@ -34,6 +34,7 @@ DIRECT_TERMIN_DISTRIBUTIONS = (
     "termin-gui-native",
     "tgfx",
     "termin-display",
+    "termin-mcp",
 )
 
 
@@ -650,6 +651,7 @@ def verify_imports(contract: SdkContract) -> None:
     import termin.display.window
     import termin.gui_native
     import termin.gui_native.window
+    import termin.mcp
     from termin.dispatch import Dispatcher
     from termin.display.window import WindowedGraphicsSession
     from termin.gui_native import OffscreenGuiComposition
@@ -685,6 +687,7 @@ def verify_imports(contract: SdkContract) -> None:
         termin.display.window,
         termin.gui_native,
         termin.gui_native.window,
+        termin.mcp,
     ):
         _require_module_from_runtime_environment(module)
 

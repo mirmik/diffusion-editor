@@ -21,6 +21,7 @@ IMPORTS = (
     ("yaml", "PyYAML"),
     ("termin.dispatch", "termin-dispatch"),
     ("termin.gui_native", "termin-gui-native"),
+    ("termin.mcp", "termin-mcp"),
     ("diffusion_editor.app.main", "diffusion-editor"),
 )
 

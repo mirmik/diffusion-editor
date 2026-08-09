@@ -78,6 +78,7 @@ def _make_sdk(tmp_path: Path, *, stale_tgfx: bool = False) -> Path:
         "termin-dispatch": NATIVE_VERSION,
         "termin-display": NATIVE_VERSION,
         "termin-gui-native": NATIVE_VERSION,
+        "termin-mcp": "0.1.0",
         "termin-nanobind": "0.1.0",
         "termin-scene": NATIVE_VERSION,
     }
@@ -116,6 +117,7 @@ def _make_sdk(tmp_path: Path, *, stale_tgfx: bool = False) -> Path:
         "tgfx",
     )
     _write_wheel(sdk, "termin-nanobind", "0.1.0")
+    _write_wheel(sdk, "termin-mcp", "0.1.0", "tcbase")
     _write_wheel(
         sdk,
         "tgfx",
@@ -139,6 +141,7 @@ def test_requirement_closure_is_exact_and_includes_sdk_transitives(tmp_path: Pat
         f"termin-dispatch=={NATIVE_VERSION}",
         f"termin-display=={NATIVE_VERSION}",
         f"termin-gui-native=={NATIVE_VERSION}",
+        "termin-mcp==0.1.0",
         "termin-nanobind==0.1.0",
         f"termin-scene=={NATIVE_VERSION}",
         f"tgfx=={NATIVE_VERSION}",
