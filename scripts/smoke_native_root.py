@@ -44,7 +44,14 @@ from diffusion_editor.generation.types import (
 
 
 class _MemorySettings:
-    def get(self, _key, default=None):
+    def __init__(self):
+        self._recovery_dir = tempfile.TemporaryDirectory(
+            prefix="diffusion-editor-native-smoke-recovery-"
+        )
+
+    def get(self, key, default=None):
+        if key == "recovery_dir":
+            return self._recovery_dir.name
         return default
 
     def set(self, _key, _value):

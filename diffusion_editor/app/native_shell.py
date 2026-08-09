@@ -10,6 +10,8 @@ from termin.gui_native import (
     CommandKind,
     CommandModel,
     MenuBarEntry,
+    SrgbColor,
+    StyleField,
     TcDocument,
 )
 
@@ -17,6 +19,18 @@ from .presentation import ViewPorts
 
 
 CommandHandler = Callable[[], None]
+
+_CHROME_BACKGROUND = SrgbColor(0.075, 0.080, 0.095, 1.0)
+_WORKSPACE_EDGE = SrgbColor(0.32, 0.35, 0.40, 1.0)
+
+
+def _set_widget_background(widget, color: SrgbColor) -> None:
+    style_override = widget.style_override
+    style = style_override.value
+    style.background = color
+    style_override.value = style
+    style_override.fields = StyleField.Background.value
+    widget.style_override = style_override
 
 
 @dataclass(frozen=True)
@@ -192,9 +206,16 @@ class NativeEditorView:
         self.toolbar.widget.stable_id = "diffusion-editor.toolbar"
         self.toolbar.item_height = 26.0
         self.toolbar.padding = 4.0
+        _set_widget_background(self.toolbar.widget, _CHROME_BACKGROUND)
         self._connections.append(
             self.toolbar.connect_activated(self._on_toolbar_activated)
         )
+        self.toolbar_workspace_edge = document.create_separator(True)
+        self.toolbar_workspace_edge.stable_id = (
+            "diffusion-editor.toolbar-workspace-edge"
+        )
+        self.toolbar_workspace_edge.set_color(_WORKSPACE_EDGE)
+        self.toolbar_workspace_edge.set_thickness(2.0)
 
         self.left_panel = document.create_vstack("DiffusionEditorLeftPanel")
         self.left_panel.stable_id = "diffusion-editor.left-panel.content"
@@ -283,11 +304,20 @@ class NativeEditorView:
 
         self.status_bar = document.create_status_bar("Ready")
         self.status_bar.widget.stable_id = "diffusion-editor.status"
+        _set_widget_background(self.status_bar.widget, _CHROME_BACKGROUND)
+        self.status_workspace_edge = document.create_separator(True)
+        self.status_workspace_edge.stable_id = (
+            "diffusion-editor.status-workspace-edge"
+        )
+        self.status_workspace_edge.set_color(_WORKSPACE_EDGE)
+        self.status_workspace_edge.set_thickness(2.0)
 
         self.root.add_fixed_child(self.menu_bar.widget, 28.0)
-        self.root.add_fixed_child(self.toolbar.widget, 36.0)
+        self.root.add_fixed_child(self.toolbar.widget, 34.0)
+        self.root.add_fixed_child(self.toolbar_workspace_edge, 2.0)
         self.root.add_flex_child(self.main_splitter.widget, 1.0)
-        self.root.add_fixed_child(self.status_bar.widget, 24.0)
+        self.root.add_fixed_child(self.status_workspace_edge, 2.0)
+        self.root.add_fixed_child(self.status_bar.widget, 22.0)
         if not document.add_root(self.root.handle):
             raise RuntimeError("failed to add the Diffusion Editor native root")
         self._command_handlers["view.agent_panel"] = (

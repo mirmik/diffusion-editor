@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 
 import numpy as np
@@ -27,7 +28,14 @@ from diffusion_editor.canvas.brush import BrushToolMode
 
 
 class _MemorySettings:
-    def get(self, _key, default=None):
+    def __init__(self):
+        self._recovery_dir = tempfile.TemporaryDirectory(
+            prefix="diffusion-editor-native-root-test-"
+        )
+
+    def get(self, key, default=None):
+        if key == "recovery_dir":
+            return self._recovery_dir.name
         return default
 
     def set(self, _key, _value):

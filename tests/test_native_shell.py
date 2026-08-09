@@ -68,6 +68,7 @@ def test_native_shell_snapshot_has_stable_layout_and_command_inventory():
             "diffusion-editor.root",
             "diffusion-editor.menu-bar",
             "diffusion-editor.toolbar",
+            "diffusion-editor.toolbar-workspace-edge",
             "diffusion-editor.main-splitter",
             "diffusion-editor.left-panel",
             "diffusion-editor.workspace-splitter",
@@ -77,12 +78,17 @@ def test_native_shell_snapshot_has_stable_layout_and_command_inventory():
             "diffusion-editor.layer-panel",
             "diffusion-editor.agent-panel",
             "diffusion-editor.status",
+            "diffusion-editor.status-workspace-edge",
         } <= snapshot.keys()
 
         root = snapshot["diffusion-editor.root"]["bounds"]
         menu = snapshot["diffusion-editor.menu-bar"]["bounds"]
         toolbar = snapshot["diffusion-editor.toolbar"]["bounds"]
+        toolbar_edge = snapshot[
+            "diffusion-editor.toolbar-workspace-edge"]["bounds"]
         main = snapshot["diffusion-editor.main-splitter"]["bounds"]
+        status_edge = snapshot[
+            "diffusion-editor.status-workspace-edge"]["bounds"]
         status = snapshot["diffusion-editor.status"]["bounds"]
         left = snapshot["diffusion-editor.left-panel"]["bounds"]
         canvas = snapshot["diffusion-editor.canvas-host"]["bounds"]
@@ -91,9 +97,35 @@ def test_native_shell_snapshot_has_stable_layout_and_command_inventory():
         right_host = snapshot["diffusion-editor.right-host"]["bounds"]
         assert (root.width, root.height) == (1000.0, 700.0)
         assert (menu.y, menu.height) == (0.0, 28.0)
-        assert (toolbar.y, toolbar.height) == (28.0, 36.0)
+        assert (toolbar.y, toolbar.height) == (28.0, 34.0)
+        assert (toolbar_edge.y, toolbar_edge.height) == (62.0, 2.0)
         assert (main.y, main.height) == (64.0, 612.0)
-        assert (status.y, status.height) == (676.0, 24.0)
+        assert (status_edge.y, status_edge.height) == (676.0, 2.0)
+        assert (status.y, status.height) == (678.0, 22.0)
+        toolbar_background = view.toolbar.widget.resolve_style().background
+        status_background = view.status_bar.widget.resolve_style().background
+        toolbar_edge_color = view.toolbar_workspace_edge.resolve_style().background
+        status_edge_color = view.status_workspace_edge.resolve_style().background
+        assert (
+            toolbar_background.r,
+            toolbar_background.g,
+            toolbar_background.b,
+        ) == pytest.approx((0.075, 0.080, 0.095))
+        assert (
+            status_background.r,
+            status_background.g,
+            status_background.b,
+        ) == pytest.approx((0.075, 0.080, 0.095))
+        assert (
+            toolbar_edge_color.r,
+            toolbar_edge_color.g,
+            toolbar_edge_color.b,
+        ) == pytest.approx((0.32, 0.35, 0.40))
+        assert (
+            status_edge_color.r,
+            status_edge_color.g,
+            status_edge_color.b,
+        ) == pytest.approx((0.32, 0.35, 0.40))
         assert left.x + left.width <= canvas.x
         assert canvas.x + canvas.width <= layers.x
         assert (
