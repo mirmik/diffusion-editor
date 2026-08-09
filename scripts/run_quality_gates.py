@@ -130,11 +130,13 @@ def main() -> int:
             environment["TERMIN_BACKEND"] = backend
             environment["TERMIN_SDK_SHADER_CACHE_ROOT"] = shader_cache
             _run(
-                f"Termin {backend} render smoke",
+                f"native editor {backend} render smoke",
                 _python_script(
-                    "scripts/smoke_termin_runtime.py",
+                    "scripts/smoke_native_root.py",
                     "--frames",
                     str(args.frames),
+                    "--backend",
+                    backend,
                 ),
                 env=environment,
                 timeout=args.timeout,

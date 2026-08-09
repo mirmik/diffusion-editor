@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "diffusion-editor"
 version = "0.1.0"
-description = "Diffusion image editor built on Termin tcgui/tgfx."
+description = "Diffusion image editor built on termin-gui-native and tgfx."
 requires-python = ">=3.14,<3.15"
 dynamic = ["dependencies", "optional-dependencies"]
 

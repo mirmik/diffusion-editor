@@ -66,6 +66,7 @@ echo "=== Installing diffusion-editor Python requirements ==="
 
 echo ""
 echo "=== Installing exact Termin packages from SDK wheelhouse ==="
+"$PY" -m pip uninstall --yes tcgui
 "$PY" -m pip install --force-reinstall --no-index --no-deps --find-links "$WHEELHOUSE" \
     "${TERMIN_REQUIREMENTS[@]}"
 

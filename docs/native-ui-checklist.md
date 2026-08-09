@@ -1,11 +1,9 @@
 # Native UI desktop checklist
 
-Use this checklist on a real desktop before the native cutover in #608. For
-normal side-by-side work, launch the production application in either mode:
+Use this checklist on a real desktop to verify the production native UI:
 
 ```sh
-./run.sh --ui legacy [project.deproj-or-image]
-./run.sh --ui native [project.deproj-or-image]
+./run.sh [project.deproj-or-image]
 ```
 
 For deterministic generation without model weights, use the native manual

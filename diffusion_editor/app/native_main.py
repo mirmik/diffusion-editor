@@ -1,4 +1,4 @@
-"""Production-settings host for the termin-gui-native comparison mode."""
+"""Production host for the termin-gui-native editor."""
 
 from __future__ import annotations
 

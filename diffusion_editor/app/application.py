@@ -97,7 +97,7 @@ class _ShutdownResource:
 class EditorApplication:
     """Owns domain state, controllers and deterministic application shutdown.
 
-    This module deliberately has no dependency on tcgui or termin-gui-native.
+    This module deliberately has no dependency on a UI toolkit.
     A concrete toolkit binds explicit :class:`ViewPorts` after construction.
     """
 

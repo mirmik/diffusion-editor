@@ -74,7 +74,6 @@ def _make_sdk(tmp_path: Path, *, stale_tgfx: bool = False) -> Path:
     (sdk / "lib/python3.14t/site-packages").mkdir(parents=True)
     versions = {
         "tcbase": NATIVE_VERSION,
-        "tcgui": "0.1.0",
         "tgfx": NATIVE_VERSION,
         "termin-dispatch": NATIVE_VERSION,
         "termin-display": NATIVE_VERSION,
@@ -100,7 +99,6 @@ def _make_sdk(tmp_path: Path, *, stale_tgfx: bool = False) -> Path:
         json.dumps(payload), encoding="utf-8"
     )
     _write_wheel(sdk, "tcbase", NATIVE_VERSION)
-    _write_wheel(sdk, "tcgui", "0.1.0", "tcbase", "tgfx")
     _write_wheel(
         sdk,
         "termin-dispatch",
@@ -138,7 +136,6 @@ def test_requirement_closure_is_exact_and_includes_sdk_transitives(tmp_path: Pat
 
     assert termin_requirement_closure(contract) == (
         f"tcbase=={NATIVE_VERSION}",
-        "tcgui==0.1.0",
         f"termin-dispatch=={NATIVE_VERSION}",
         f"termin-display=={NATIVE_VERSION}",
         f"termin-gui-native=={NATIVE_VERSION}",
@@ -159,7 +156,6 @@ def test_installed_native_build_must_match_manifest(tmp_path: Path):
     contract = _load(_make_sdk(tmp_path))
     installed = {
         "tcbase": NATIVE_VERSION,
-        "tcgui": "0.1.0",
         "tgfx": "0.1.0+sdk-other",
         "termin-dispatch": NATIVE_VERSION,
         "termin-display": NATIVE_VERSION,
@@ -365,27 +361,27 @@ def test_retagged_wheel_is_accepted_only_when_native_payload_matches(tmp_path: P
 
 def test_installed_payload_must_match_selected_sdk_wheel(tmp_path: Path):
     sdk = _make_sdk(tmp_path)
-    tcgui_wheel = next((sdk / "wheels").glob("tcgui-*.whl"))
-    tcgui_wheel.unlink()
+    dispatch_wheel = next((sdk / "wheels").glob("termin_dispatch-*.whl"))
+    dispatch_wheel.unlink()
     _write_wheel(
         sdk,
-        "tcgui",
-        "0.1.0",
+        "termin-dispatch",
+        NATIVE_VERSION,
+        "termin-nanobind",
         "tcbase",
-        "tgfx",
-        payload_members={"tcgui/widgets/renderer.py": b"current-sdk-renderer\n"},
+        payload_members={"termin/dispatch.py": b"current-sdk-dispatch\n"},
     )
     installed = tmp_path / "installed"
-    (installed / "tcgui/widgets").mkdir(parents=True)
-    (installed / "tcgui/widgets/renderer.py").write_bytes(b"stale-venv-renderer\n")
+    (installed / "termin").mkdir(parents=True)
+    (installed / "termin/dispatch.py").write_bytes(b"stale-venv-dispatch\n")
 
     with pytest.raises(SdkContractError, match="installed file differs from SDK"):
         verify_installed_payloads(
             _load(sdk),
-            {"tcgui": installed},
+            {"termin-dispatch": installed},
         )
 
-    (installed / "tcgui/widgets/renderer.py").write_bytes(
-        b"current-sdk-renderer\n"
+    (installed / "termin/dispatch.py").write_bytes(
+        b"current-sdk-dispatch\n"
     )
-    verify_installed_payloads(_load(sdk), {"tcgui": installed})
+    verify_installed_payloads(_load(sdk), {"termin-dispatch": installed})

@@ -1,4 +1,4 @@
-"""Brush-like canvas tools used by EditorCanvas."""
+"""Brush-like tools used by the canvas controller."""
 
 from __future__ import annotations
 

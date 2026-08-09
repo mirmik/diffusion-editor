@@ -29,7 +29,6 @@ FAILURE_MARKERS = (
 
 
 def production_run_command(
-    ui: str,
     *,
     platform_name: str = os.name,
     find_executable=shutil.which,
@@ -49,20 +48,12 @@ def production_run_command(
             "-NoProfile",
             "-File",
             str(PROJECT_ROOT / "run.ps1"),
-            "--ui",
-            ui,
         ]
-    return [str(PROJECT_ROOT / "run.sh"), "--ui", ui]
+    return [str(PROJECT_ROOT / "run.sh")]
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--ui",
-        choices=("legacy", "native"),
-        default="legacy",
-    )
-    args = parser.parse_args()
+    argparse.ArgumentParser().parse_args()
     environment = os.environ.copy()
     environment["DIFFUSION_EDITOR_SMOKE_FRAMES"] = "3"
     with tempfile.TemporaryDirectory(
@@ -71,7 +62,7 @@ def main() -> int:
         environment["TERMIN_SDK_SHADER_CACHE_ROOT"] = cache_root
         try:
             result = subprocess.run(
-                production_run_command(args.ui),
+                production_run_command(),
                 cwd=PROJECT_ROOT,
                 env=environment,
                 capture_output=True,
@@ -103,8 +94,7 @@ def main() -> int:
     if "[main] window created" not in combined:
         raise RuntimeError("Production editor did not create a window")
 
-    print(
-        f"Production editor {args.ui} startup/render smoke OK: 3 frames")
+    print("Production native editor startup/render smoke OK: 3 frames")
     return 0
 
 

@@ -32,7 +32,7 @@ TERMIN_BACKEND=opengl SDL_VIDEODRIVER=offscreen \
 TERMIN_SDK_SHADER_CACHE_ROOT=/tmp/diffusion-editor-native-window-cache \
   ./venv/bin/python scripts/smoke_native_root.py --windowed --frames 3
 
-# Canonical routine OpenGL gate (legacy runtime/startup + native windowed root):
+# Canonical routine OpenGL gate (native headless/startup/windowed root):
 xvfb-run -a ./run-quality-gates.sh --skip-resolver \
   --render-backend opengl --frames 16
 
@@ -70,10 +70,10 @@ visual verification, including the deterministic fake-generation path.
 | Windows main UI CPython 3.14t | `install-deps.ps1`, import/ABI/payload gate, `pip check`, full tests | CI definition ready; requires a published Windows SDK asset |
 | Native headless root | `OffscreenGuiComposition`, snapshots, import/paint/mask, framebuffer readback, owned leases, resize/shutdown, bounded Vulkan render | automated, passing |
 | Native windowed root | public `WindowManager` + borrowed `GuiWindowAdapter`, borrowed GPU Canvas texture, import/paint/mask/shutdown, offscreen SDL/OpenGL smoke | routine CI gate |
-| OpenGL | 16-frame Xvfb render, GPU compositor + tcgui | passing with llvmpipe |
+| OpenGL | 16-frame Xvfb native render and GPU compositor | passing with llvmpipe |
 | Vulkan device | `vulkaninfo --summary` | passing with llvmpipe 1.4 |
 | Vulkan presentation | 16-frame render command above | manual gate; current Xvfb has no DRI3/present queue |
-| Windows OpenGL presentation | production legacy startup smoke through `run.ps1` | Windows CI/manual gate |
+| Windows OpenGL presentation | production native startup smoke through `run.ps1` | Windows CI/manual gate |
 | Windows Vulkan presentation | production startup smoke on a Vulkan-capable Windows host | manual; backend support is separate from Python ABI support |
 | LaMa CPU | identity lifecycle gate plus real LaMa smoke | passing |
 | rembg CPU | threshold lifecycle gate plus real U2Net smoke | passing |

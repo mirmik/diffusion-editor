@@ -142,6 +142,9 @@ $TerminInstallArguments = @(
     "-m", "pip", "install", "--force-reinstall", "--no-index",
     "--no-deps", "--find-links", $Wheelhouse
 ) + $TerminRequirements
+Invoke-Checked -FilePath $VenvPython -ArgumentList @(
+    "-m", "pip", "uninstall", "--yes", "tcgui"
+)
 Invoke-Checked -FilePath $VenvPython -ArgumentList $TerminInstallArguments
 Invoke-Checked -FilePath $VenvPython -ArgumentList @(
     "-m", "pip", "install", "--no-build-isolation", "--no-deps",

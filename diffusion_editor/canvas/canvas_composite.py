@@ -1,4 +1,4 @@
-"""CPU/GPU composition bridge for EditorCanvas."""
+"""CPU/GPU composition bridge for the canvas controller."""
 
 from __future__ import annotations
 

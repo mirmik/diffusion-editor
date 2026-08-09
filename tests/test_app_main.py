@@ -10,7 +10,7 @@ from diffusion_editor.app import main as app_main
 from diffusion_editor.app.native_main import _open_path
 
 
-def test_cli_defaults_to_legacy_and_dispatches_optional_path(monkeypatch):
+def test_cli_dispatches_optional_path_to_native_host(monkeypatch):
     calls = []
     verified = []
     monkeypatch.setattr(
@@ -20,29 +20,24 @@ def test_cli_defaults_to_legacy_and_dispatches_optional_path(monkeypatch):
     )
     monkeypatch.setattr(
         app_main,
-        "_run_legacy",
-        lambda path: calls.append(("legacy", path)) or 11,
-    )
-    monkeypatch.setattr(
-        app_main,
         "_run_native",
         lambda path: calls.append(("native", path)) or 12,
     )
 
-    assert app_main.main([]) == 11
-    assert app_main.main(["image.png"]) == 11
-    assert app_main.main(["--ui", "native", "project.deproj"]) == 12
+    assert app_main.main([]) == 12
+    assert app_main.main(["image.png"]) == 12
+    assert app_main.main(["project.deproj"]) == 12
     assert calls == [
-        ("legacy", None),
-        ("legacy", "image.png"),
+        ("native", None),
+        ("native", "image.png"),
         ("native", "project.deproj"),
     ]
     assert verified == ["runtime", "runtime", "runtime"]
 
 
-def test_cli_rejects_unknown_ui():
+def test_cli_rejects_removed_ui_selector():
     with pytest.raises(SystemExit) as exc_info:
-        app_main.main(["--ui", "unknown"])
+        app_main.main(["--ui", "legacy"])
 
     assert exc_info.value.code == 2
 
@@ -60,17 +55,15 @@ def test_cli_verifies_runtime_before_loading_selected_host(monkeypatch):
         lambda _path: calls.append("native") or 0,
     )
 
-    assert app_main.main(["--ui", "native"]) == 0
+    assert app_main.main([]) == 0
     assert calls == ["runtime", "native"]
 
 
-def test_cli_and_native_host_import_without_legacy_ui():
+def test_cli_and_native_host_import_without_tcgui():
     code = """
 import sys
 import diffusion_editor.app.main
 import diffusion_editor.app.native_main
-assert 'diffusion_editor.app.legacy_main' not in sys.modules
-assert 'diffusion_editor.app.editor_window' not in sys.modules
 assert not any(name == 'tcgui' or name.startswith('tcgui.') for name in sys.modules)
 """
     result = subprocess.run(

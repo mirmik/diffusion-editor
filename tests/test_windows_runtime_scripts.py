@@ -14,7 +14,6 @@ def _text(relative_path: str) -> str:
 
 def test_windows_startup_smoke_routes_through_powershell_run_contract():
     command = production_run_command(
-        "native",
         platform_name="nt",
         find_executable=lambda name: (
             r"C:\Program Files\PowerShell\7\pwsh.exe"
@@ -28,14 +27,12 @@ def test_windows_startup_smoke_routes_through_powershell_run_contract():
         "-NoProfile",
         "-File",
     ]
-    assert command[-2:] == ["--ui", "native"]
     assert Path(command[3]).name == "run.ps1"
 
 
 def test_windows_startup_smoke_requires_powershell():
     with pytest.raises(RuntimeError, match="PowerShell is required"):
         production_run_command(
-            "legacy",
             platform_name="nt",
             find_executable=lambda _name: None,
         )
@@ -51,6 +48,7 @@ def test_windows_installer_enforces_canonical_cp314t_binary_contract():
     )
     assert "--only-binary=:all:" in installer
     assert '"--force-reinstall", "--no-index"' in installer
+    assert '"pip", "uninstall", "--yes", "tcgui"' in installer
     assert "diffusion_editor.sdk_runtime requirements" in installer
     assert "verify-installed" in installer
     assert "probe_main_process_dependencies.py" in installer

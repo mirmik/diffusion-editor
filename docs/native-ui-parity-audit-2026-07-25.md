@@ -1,4 +1,8 @@
-# Legacy/native UI parity audit — 2026-07-25
+# Legacy/native UI parity audit — 2026-07-25 (historical)
+
+> This pre-cutover record preserves the comparison evidence used to approve
+> task #608. The old host and the `--ui` selector have since been removed;
+> current launch instructions are in `README.md`.
 
 This audit compares the retained `tcgui` UI (`--ui legacy`) with the
 `termin-gui-native` UI (`--ui native`) before the native cutover. It records

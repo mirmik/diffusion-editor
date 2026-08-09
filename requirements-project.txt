@@ -4,7 +4,6 @@
 # come from python-runtime-manifest.json. install-deps.sh does not resolve this
 # file with PyPI; it installs the SDK closure separately.
 tcbase
-tcgui
 termin-dispatch
 termin-display
 termin-gui-native

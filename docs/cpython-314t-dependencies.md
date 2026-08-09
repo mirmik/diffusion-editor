@@ -10,7 +10,7 @@ not compiled implicitly and is not admitted to the main process.
 ## Main-process lock
 
 `requirements-runtime.txt` is the installer's exact third-party lock.
-`requirements-project.txt` adds the four direct Termin distributions and is
+`requirements-project.txt` adds the five direct Termin distributions and is
 the source of package metadata. A contract test requires its third-party tail
 to exactly equal the runtime lock. Termin package versions are resolved
 separately from the selected SDK manifest because their local `+sdk...` build
@@ -26,7 +26,7 @@ Verified Linux x86_64 CPython 3.14t wheels:
 | --- | ---: | --- |
 | NumPy | 2.5.1 | `cp314t`; imported with the GIL disabled |
 | Pillow | 12.3.0 | `cp314t` |
-| PyYAML | 6.0.3 | `cp314t`; imported through `tcgui` with the GIL disabled |
+| PyYAML | 6.0.3 | `cp314t`; imported with the GIL disabled |
 | PySDL2 | 0.9.17 | pure Python |
 
 The same exact pins are required on Windows x86-64. `install-deps.ps1`

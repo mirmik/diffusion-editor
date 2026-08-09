@@ -30,7 +30,6 @@ DEFAULT_STATE_FILE = PROJECT_ROOT / ".termin-sdk"
 RUNTIME_MANIFEST = "python-runtime-manifest.json"
 DIRECT_TERMIN_DISTRIBUTIONS = (
     "tcbase",
-    "tcgui",
     "termin-dispatch",
     "termin-gui-native",
     "tgfx",
@@ -645,7 +644,6 @@ def _require_module_from_runtime_environment(module) -> None:
 
 def verify_imports(contract: SdkContract) -> None:
     import tcbase  # noqa: F401
-    import tcgui
     import tgfx
     import termin.dispatch
     import termin.display
@@ -659,7 +657,6 @@ def verify_imports(contract: SdkContract) -> None:
     from tgfx import Tgfx2Context, configure_default_shader_runtime
 
     required = (
-        tcgui,
         Dispatcher,
         GuiWindowAdapter,
         dynamic_texture_lease,
@@ -682,7 +679,6 @@ def verify_imports(contract: SdkContract) -> None:
             )
     for module in (
         tcbase,
-        tcgui,
         tgfx,
         termin.dispatch,
         termin.display,
@@ -694,7 +690,7 @@ def verify_imports(contract: SdkContract) -> None:
 
 
 def verify_application_environment() -> Path:
-    """Reject ABI/SDK/payload drift before either production UI host imports."""
+    """Reject ABI/SDK/payload drift before the production UI host imports."""
 
     root = resolve_sdk()
     os.environ["TERMIN_SDK"] = str(root)

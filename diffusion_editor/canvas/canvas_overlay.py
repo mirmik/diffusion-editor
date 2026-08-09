@@ -1,4 +1,4 @@
-"""Selection and layer-mask overlay composition for EditorCanvas."""
+"""Selection and layer-mask overlay composition for the canvas controller."""
 
 from __future__ import annotations
 

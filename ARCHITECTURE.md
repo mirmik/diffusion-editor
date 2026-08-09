@@ -86,19 +86,17 @@ F   ← начало
 
 ## Слои приложения
 
-**Точка входа / root** владеет главным циклом и объектами интеграции с Termin. Сейчас production entrypoint всё ещё использует legacy SDL host. Параллельный `NativeEditorRoot` уже собирает hostless native-путь из публичных пакетов: приложение владеет `Dispatcher`, а графическая композиция — `WindowManager` + `GuiWindowAdapter` для окна либо `OffscreenGuiComposition` для headless-тестов.
+**Точка входа / root** владеет главным циклом и объектами интеграции с Termin. Production entrypoint использует `NativeEditorRoot`, собранный из публичных пакетов: приложение владеет `Dispatcher`, а графическая композиция — `WindowManager` + `GuiWindowAdapter` для окна либо `OffscreenGuiComposition` для headless-тестов.
 
-**EditorApplication** — toolkit-neutral владелец настроек, `LayerStack`, `DocumentService`, истории, ML-движков и контроллеров. Он принимает явные presentation ports, опрашивает контроллеры и преобразует их события в состояние документа, статус и panel updates. Модуль не импортирует `tcgui` или внутренности Termin-приложений.
+**EditorApplication** — toolkit-neutral владелец настроек, `LayerStack`, `DocumentService`, истории, ML-движков и контроллеров. Он принимает явные presentation ports, опрашивает контроллеры и преобразует их события в состояние документа, статус и panel updates. Модуль не импортирует UI toolkit или внутренности Termin-приложений.
 
-**EditorWindow** — временный tcgui-адаптер. Он собирает legacy UI и связывает его с тем же `EditorApplication`, который будет использовать native shell. Compatibility aliases внутри `EditorWindow` существуют только для поэтапной миграции и не являются новым публичным API.
-
-**NativeEditorView** — параллельный native shell с app-owned command inventory/handlers и Termin `CommandModel`-проекциями. Root layout, menu bar, toolbar, splitters, native Canvas, brush/selection controls, generation/layer panels, Agent Chat и status bar имеют стабильные IDs и создаются только публичными `TcDocument` factories.
+**NativeEditorView** — production native shell с app-owned command inventory/handlers и Termin `CommandModel`-проекциями. Root layout, menu bar, toolbar, splitters, native Canvas, brush/selection controls, generation/layer panels, Agent Chat и status bar имеют стабильные IDs и создаются только публичными `TcDocument` factories.
 
 **Presentation ports** — узкие интерфейсы для статуса, заголовка окна, состояния команд и панелей, диалогов и Canvas-взаимодействий. `EditorApplication` хранит presentation state и повторяет его при привязке новой view; headless и native-проекции используют одни контракты.
 
 Глобальные accelerators проходят через публичный `set_unhandled_key_handler`: сначала событие получает сфокусированный виджет и modal/overlay routing, затем оставшийся необработанным key-down передаётся app-owned `NativeEditorView.dispatch_shortcut()` и Termin `MenuBar`/`CommandModel`. Один контракт используется оконной и offscreen-композициями; при shutdown handler снимается до уничтожения view.
 
-**Панели** (`BrushPanel`, `DiffusionPanel`, `LayerPanel` и т.д.) — UI-компоненты без прямого доступа к документу. Общаются с оркестратором через колбеки.
+**Native-панели** — тонкие UI-проекции без прямого доступа к документу. Они общаются с toolkit-neutral coordinator-слоем через typed intents и snapshots.
 
 **EditorCanvasController** — toolkit-neutral логика инструментов холста: кисть, ластик, smudge, маски, выделение, прямоугольники и пипетка. Контроллер оперирует image-space координатами и публикует полные либо региональные обновления изображения и overlay.
 
@@ -115,8 +113,6 @@ F   ← начало
 **GenerationPanelsCoordinator / NativeGenerationPanels** — immutable snapshots и typed intents для Diffusion, LaMa и InstructPix2Pix поверх существующих toolkit-neutral controllers. Черновики параметров привязаны к stable layer ID, tool updates проходят typed `DocumentService` commands, а model/inference worker events проецируются главным циклом через `EditorApplication.poll`. Native view использует только публичные `GroupBox`, `ScrollArea`, `TextArea`, `TextInput`, `ComboBox`, `SliderEdit` и `Checkbox`.
 
 **NativeEditorCanvas** — адаптер над публичным Termin `Canvas`. Сам виджет Termin владеет fit/zoom/pan и преобразованиями координат; приложение владеет двумя `DynamicTextureLease`. CPU-композит и overlay используют owned RGBA8 textures с региональными обновлениями, оконный GPU-композит передаётся как borrowed texture. В offscreen-композиции, где нельзя получить общий application `Tgfx2Context`, используется owned CPU-путь. Рамки активного слоя, выделения и patch рисуются через публичный `PaintContext`.
-
-**EditorCanvas** — временный legacy tcgui-адаптер и production fallback до финального переключения entrypoint.
 
 **DocumentService** — единая точка применения команд к документу. Всё, что меняет состояние, идёт через него.
 

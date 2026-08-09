@@ -1,4 +1,4 @@
-"""Explicit runtime API exposed by EditorCanvas to brush-like tools."""
+"""Explicit runtime API exposed by the canvas controller to brush-like tools."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ Rect = tuple[int, int, int, int]
 class CanvasToolContext:
     """Narrow host API for canvas tools.
 
-    Tools should depend on this object instead of reaching into EditorCanvas
+    Tools should depend on this object instead of reaching into canvas adapter
     internals. The context owns no state itself; it coordinates the canvas'
     runtime collaborators.
     """

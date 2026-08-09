@@ -35,7 +35,7 @@ class CanvasAnnotation:
 
 
 class EditorCanvasController:
-    """Editor behavior independent from tcgui and termin-gui widgets."""
+    """Editor behavior independent from Termin GUI widgets."""
 
     LEFT_BUTTON = 0
     RIGHT_BUTTON = 1

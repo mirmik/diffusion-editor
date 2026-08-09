@@ -1,4 +1,4 @@
-"""Live paint stroke buffer used by EditorCanvas."""
+"""Live paint stroke buffer used by the canvas controller."""
 
 from __future__ import annotations
 

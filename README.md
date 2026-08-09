@@ -1,7 +1,7 @@
 # diffusion-editor
 
-Standalone diffusion image editor built on Termin `tcgui`, `tgfx`, and
-`termin-display`.
+Standalone diffusion image editor built on Termin `termin-gui-native`, `tgfx`,
+and `termin-display`.
 
 The editor stores document pixels as straight sRGB RGBA8 and composites RGB
 in linear light with linear alpha. The boundary contract is documented in
@@ -83,9 +83,8 @@ Installation, accelerator selection, and feature-specific smoke tests are
 documented in the [model-worker guide](docs/model-workers.md).
 
 Termin wheels are force-refreshed from that SDK even when their version string
-has not changed. This matters for pure-Python packages such as `tcgui`: an SDK
-rebuild can otherwise leave old Python code in the venv beside new native
-libraries.
+has not changed. This prevents an SDK rebuild from leaving old Python payloads
+in the venv beside new native libraries.
 
 If the SDK runtime has been rebuilt without rebuilding `wheels/`, installation
 stops with the expected and available build IDs. Rebuild or download a complete
@@ -106,25 +105,17 @@ package versions and wheel payload bytes before importing native modules. If
 the venv contains stale SDK files, rerun `./install-deps.sh`. An explicit
 `TERMIN_SDK` overrides the saved path and is checked by the same gate.
 
-During the comparison period the legacy UI remains the default. Select either
-implementation explicitly with the same optional project/image argument:
+The native UI is the sole application host. An optional project or image can
+be passed directly:
 
 ```bash
-./run.sh --ui legacy [project.deproj-or-image]
-./run.sh --ui native [project.deproj-or-image]
+./run.sh [project.deproj-or-image]
 
 # Equivalent installed entrypoint:
-./venv/bin/diffusion-editor --ui native [project.deproj-or-image]
+./venv/bin/diffusion-editor [project.deproj-or-image]
 ```
 
-Windows keeps the same comparison selector:
-
-```powershell
-.\run.ps1 --ui legacy
-.\run.ps1 --ui native
-```
-
-`--ui native` uses production settings and inference engines; it is distinct
+The production host uses real settings and inference engines; it is distinct
 from the deterministic fake-engine harness in `scripts/smoke_native_root.py`.
 
 Dirty documents have crash-recovery snapshots under
@@ -142,7 +133,7 @@ no fixed project-size ceiling beyond available storage.
 
 ```powershell
 .\run-quality-gates.ps1 --skip-resolver
-.\scripts\smoke_windows_runtime.ps1 -Ui legacy -Backend opengl
+.\scripts\smoke_windows_runtime.ps1 -Backend opengl
 ```
 
 The CI runtime gates can also be run directly:
@@ -153,10 +144,9 @@ python3 -m diffusion_editor.sdk_runtime python-executable
 python3 -m diffusion_editor.sdk_runtime verify-python-executable \
   --python ./venv/bin/python
 ./venv/bin/python -m diffusion_editor.sdk_runtime verify-installed --imports
-TERMIN_BACKEND=opengl ./venv/bin/python scripts/smoke_termin_runtime.py
-# Optional real-project and long-frame regression run:
-TERMIN_BACKEND=vulkan ./venv/bin/python scripts/smoke_termin_runtime.py \
-  --frames 1200 --project /path/to/project.deproj
+./venv/bin/python scripts/smoke_native_root.py --backend vulkan --frames 8
+TERMIN_BACKEND=opengl SDL_VIDEODRIVER=offscreen \
+  ./venv/bin/python scripts/smoke_native_root.py --windowed --frames 8
 ```
 
 The complete automated/manual graphics and ML matrix is documented in

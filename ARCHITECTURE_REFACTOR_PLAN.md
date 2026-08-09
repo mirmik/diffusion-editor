@@ -1,4 +1,8 @@
-# Diffusion Editor Architecture Refactor Plan
+# Diffusion Editor Architecture Refactor Plan (historical)
+
+> Archived after the native-only cutover in task #608. References below to
+> removed UI classes describe the migration history and are not current
+> production architecture. See `ARCHITECTURE.md` for the active design.
 
 ## Goal
 

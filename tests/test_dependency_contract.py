@@ -53,7 +53,6 @@ def test_main_process_lock_excludes_unavailable_native_ml_stack():
     )
     assert project == (
         "tcbase",
-        "tcgui",
         "termin-dispatch",
         "termin-display",
         "termin-gui-native",
@@ -70,9 +69,10 @@ def test_developer_requirements_compose_the_two_authoritative_locks():
 
     installer = (PROJECT_ROOT / "install-deps.sh").read_text(encoding="utf-8")
     assert "--only-binary=:all:" in installer
+    assert "pip uninstall --yes tcgui" in installer
 
 
-def test_legacy_host_does_not_use_the_removed_tcgui_dispatch_queue():
+def test_native_entrypoint_does_not_use_a_private_dispatch_queue():
     main_source = (
         PROJECT_ROOT / "diffusion_editor" / "app" / "main.py"
     ).read_text(encoding="utf-8")

@@ -169,4 +169,4 @@ jobs:
 
       - name: Run Windows production startup smoke
         shell: pwsh
-        run: .\scripts\smoke_windows_runtime.ps1 -Ui legacy -Backend opengl -Frames 3
+        run: .\scripts\smoke_windows_runtime.ps1 -Backend opengl -Frames 3
