@@ -9,6 +9,7 @@ from tcbase import log
 from termin.geombase import LinearColor
 from tgfx import TextureEncoding
 
+from ..color import linear_rgba_to_srgb8
 from ..document.layer_stack import LayerStack
 from ..document.layer import Layer
 
@@ -26,10 +27,7 @@ from tgfx._tgfx_native import (
 
 Rect = tuple[int, int, int, int]
 _TRANSPARENT_LINEAR = LinearColor(0.0, 0.0, 0.0, 0.0)
-# LayerStack's CPU contract composites uint8 channels in authored sRGB value
-# space. Keep GPU layer sampling numerically identical, then perform the one
-# required sRGB-to-linear conversion in the final display pass.
-_LAYER_TEXTURE_ENCODING = TextureEncoding.LINEAR
+_LAYER_TEXTURE_ENCODING = TextureEncoding.SRGB
 
 # ---------------------------------------------------------------------------
 # Scoped Slang sources
@@ -109,26 +107,12 @@ struct FragmentOutput {
     float4 color : SV_Target0;
 };
 
-float srgb_channel_to_linear(float value) {
-    return value <= 0.04045
-        ? value / 12.92
-        : pow((value + 0.055) / 1.055, 2.4);
-}
-
-float3 srgb_to_linear(float3 value) {
-    return float3(
-        srgb_channel_to_linear(value.r),
-        srgb_channel_to_linear(value.g),
-        srgb_channel_to_linear(value.b));
-}
-
 [shader("fragment")]
 FragmentOutput fs_main(FragmentInput input) {
     float4 premultiplied = u_texture.Sample(input.uv);
     FragmentOutput output;
     if (premultiplied.a > 0.001) {
-        float3 straight_srgb = premultiplied.rgb / premultiplied.a;
-        output.color = float4(srgb_to_linear(straight_srgb),
+        output.color = float4(premultiplied.rgb / premultiplied.a,
                               premultiplied.a);
     } else {
         output.color = float4(0.0);
@@ -175,28 +159,14 @@ def _canvas_quad_verts(x0: int, y0: int, x1: int, y1: int,
     ], dtype=np.float32)
 
 
-def _linear_rgba_to_srgb8(linear_rgba: np.ndarray) -> np.ndarray:
-    """Encode linear float RGBA pixels for the editor's uint8 CPU contract."""
-    values = np.clip(linear_rgba, 0.0, 1.0)
-    rgb = values[..., :3]
-    encoded_rgb = np.where(
-        rgb <= 0.0031308,
-        rgb * 12.92,
-        1.055 * np.power(rgb, 1.0 / 2.4) - 0.055,
-    )
-    encoded = np.empty_like(values)
-    encoded[..., :3] = encoded_rgb
-    encoded[..., 3] = values[..., 3]
-    return np.rint(encoded * 255.0).astype(np.uint8)
-
-
 class GPUCompositor:
     """Composites a LayerStack on the GPU using tgfx2 native textures.
 
-    Layers upload as ``Tgfx2TextureHandle`` RGBA8 textures. The first
-    pass composites them with premultiplied alpha into ``_main_tex``;
-    a second pass un-premultiplies into ``_display_tex`` whose handle
-    is handed to the Canvas for display.
+    Layers upload as sRGB ``Tgfx2TextureHandle`` RGBA8 textures so sampling
+    decodes RGB to linear light while leaving alpha linear. The first pass
+    composites into a premultiplied linear RGBA16F target; a second pass
+    un-premultiplies into a straight linear RGBA16F display texture whose
+    handle is handed to the native Canvas.
     """
 
     def __init__(self, layer_stack: LayerStack,
@@ -420,7 +390,12 @@ class GPUCompositor:
             texture = self._layer_textures.get(id(layer))
             if texture is not None:
                 source = self._readback_texture(
-                    texture, layer.width, layer.height, "source upload")
+                    texture,
+                    layer.width,
+                    layer.height,
+                    "source upload",
+                    encode_srgb=True,
+                )
         return {
             "source upload": source,
             "premultiplied compositor": self._readback_texture(
@@ -529,7 +504,7 @@ class GPUCompositor:
             return None
         float_data = buf.reshape((height, width, 4))
         if encode_srgb:
-            result = _linear_rgba_to_srgb8(float_data)
+            result = linear_rgba_to_srgb8(float_data)
         else:
             result = np.rint(
                 np.clip(float_data, 0.0, 1.0) * 255.0
@@ -553,10 +528,10 @@ class GPUCompositor:
         self._temp_texs.clear()
         self._temp_texs_in_use = 0
 
-        self._main_tex = self._graphics.create_color_attachment(w, h)
-        # The display pass converts authored sRGB values to linear light.
-        # Keep that result in float16: an 8-bit linear attachment loses too
-        # much precision in dark tones before native Canvas presents to sRGB.
+        # All compositor targets hold linear-light premultiplied or straight
+        # data. Float16 avoids repeated quantization and preserves dark tones.
+        self._main_tex = self._graphics.create_color_attachment(
+            w, h, Tgfx2PixelFormat.RGBA16F)
         self._display_tex = self._graphics.create_color_attachment(
             w, h, Tgfx2PixelFormat.RGBA16F)
         self._fbo_w = w
@@ -763,7 +738,8 @@ class GPUCompositor:
         if self._temp_texs_in_use < len(self._temp_texs):
             tex = self._temp_texs[self._temp_texs_in_use]
         else:
-            tex = self._graphics.create_color_attachment(self._fbo_w, self._fbo_h)
+            tex = self._graphics.create_color_attachment(
+                self._fbo_w, self._fbo_h, Tgfx2PixelFormat.RGBA16F)
             self._temp_texs.append(tex)
         self._temp_texs_in_use += 1
         return tex

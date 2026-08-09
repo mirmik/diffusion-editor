@@ -38,6 +38,7 @@ def _render_frames(frame_count: int, project_path: Path | None = None) -> int:
     from tcgui.widgets.ui import UI
     from tcgui.widgets.units import pct
     from termin.display.window import WindowedGraphicsSession
+    from termin.geombase import SrgbColor
     from tgfx import Tgfx2Context, configure_default_shader_runtime
 
     from diffusion_editor.canvas.gpu_compositor import GPUCompositor
@@ -84,7 +85,9 @@ def _render_frames(frame_count: int, project_path: Path | None = None) -> int:
         texture = None
         for _ in range(frame_count):
             texture = ui.render_compose(
-                width, height, background_color=(0.12, 0.12, 0.14, 1.0)
+                width,
+                height,
+                background_color=SrgbColor(0.12, 0.12, 0.14, 1.0),
             )
             if texture is None:
                 raise RuntimeError("tcgui produced no texture for a non-empty UI")

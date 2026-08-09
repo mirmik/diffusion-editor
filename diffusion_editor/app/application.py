@@ -47,6 +47,9 @@ _BYTES_PER_GIB = 1024 * 1024 * 1024
 DEFAULT_HISTORY_MEMORY_LIMIT_BYTES = 5 * _BYTES_PER_GIB
 MIN_HISTORY_MEMORY_LIMIT_GIB = 0.25
 MAX_HISTORY_MEMORY_LIMIT_GIB = 256.0
+DEFAULT_RECOVERY_INITIAL_DELAY_SECONDS = 60.0
+DEFAULT_RECOVERY_INTERVAL_SECONDS = 5.0 * 60.0
+MIN_RECOVERY_DELAY_SECONDS = 60.0
 DEFAULT_MODELS_DIR = os.path.expanduser(
     "~/soft/stable-diffusion-webui-forge/models/Stable-diffusion/"
 )
@@ -124,9 +127,23 @@ class EditorApplication:
             os.path.expanduser("~/.cache/diffusion-editor/recovery"),
         ))
         self.recovery_store = RecoveryStore(recovery_root)
-        self.recovery_interval_seconds = max(5.0, float(
-            self.settings.get("recovery_interval_seconds", 30.0)))
-        self._next_recovery_at = time.monotonic() + self.recovery_interval_seconds
+        self.recovery_initial_delay_seconds = max(
+            MIN_RECOVERY_DELAY_SECONDS,
+            float(self.settings.get(
+                "recovery_initial_delay_seconds",
+                DEFAULT_RECOVERY_INITIAL_DELAY_SECONDS,
+            )),
+        )
+        self.recovery_interval_seconds = max(
+            MIN_RECOVERY_DELAY_SECONDS,
+            float(self.settings.get(
+                "recovery_interval_seconds",
+                DEFAULT_RECOVERY_INTERVAL_SECONDS,
+            )),
+        )
+        self._recovery_due_at: float | None = None
+        self._last_recovery_at: float | None = None
+        self._last_recovery_revision: int | None = None
         self._session_subscription = self.layer_stack.subscribe(
             self._on_document_change)
         self.history = HistoryManager(
@@ -295,7 +312,9 @@ class EditorApplication:
         mutating document state, before its eventual history command is
         committed.
         """
-        return self.session.mark_external_mutation()
+        revision = self.session.mark_external_mutation()
+        self._schedule_recovery()
+        return revision
 
     def reset_document_session(
             self,
@@ -304,7 +323,8 @@ class EditorApplication:
             clean: bool = True) -> None:
         """Invalidate document-bound jobs after New/Open/Import."""
         old_session_id = self.session.session_id
-        snapshot = self.layer_stack.serialize_state()
+        snapshot = (
+            self.layer_stack.serialize_state() if clean else b"")
         self.session.reset(
             revision=self.layer_stack.revision,
             path=project_path,
@@ -312,6 +332,11 @@ class EditorApplication:
             clean=clean,
         )
         self.recovery_store.discard(old_session_id)
+        self._recovery_due_at = None
+        self._last_recovery_at = None
+        self._last_recovery_revision = None
+        if not clean:
+            self._schedule_recovery()
         try:
             self.invalidate_generation_jobs("document was replaced")
         except Exception as exc:
@@ -323,6 +348,9 @@ class EditorApplication:
         old_session_id = self.session.session_id
         self.session.mark_saved(path, snapshot)
         self.recovery_store.discard(old_session_id)
+        self._recovery_due_at = None
+        self._last_recovery_at = None
+        self._last_recovery_revision = None
 
     def reconcile_document_session(self) -> None:
         self.session.reconcile(self.layer_stack.serialize_state())
@@ -332,9 +360,8 @@ class EditorApplication:
         return self.recovery_store.latest()
 
     def restore_recovery(self, record: RecoveryRecord) -> None:
-        snapshot = self.recovery_store.load(record)
         self.document.prepare_mutation()
-        self.layer_stack.load_state(snapshot)
+        self.layer_stack.load_project(str(record.snapshot_path))
         self.clear_history()
         self.reset_document_session(None, clean=False)
         self.recovery_store.discard(record.session_id)
@@ -346,6 +373,7 @@ class EditorApplication:
     def discard_unsaved_changes(self) -> None:
         self.recovery_store.discard(self.session.session_id)
         self.session.mark_discarded()
+        self._recovery_due_at = None
 
     def invalidate_generation_jobs(self, reason: str) -> bool:
         invalidated = False
@@ -430,19 +458,39 @@ class EditorApplication:
 
     def _on_document_change(self, event: DocumentChangeEvent) -> None:
         self.session.record_change(event)
+        self._schedule_recovery()
+
+    def _schedule_recovery(self) -> None:
+        if self._recovery_due_at is not None:
+            return
+        now = time.monotonic()
+        due_at = now + self.recovery_initial_delay_seconds
+        if self._last_recovery_at is not None:
+            due_at = max(
+                due_at,
+                self._last_recovery_at + self.recovery_interval_seconds,
+            )
+        self._recovery_due_at = due_at
 
     def _maybe_write_recovery(self) -> None:
         now = time.monotonic()
-        if now < self._next_recovery_at:
+        if self._recovery_due_at is None or now < self._recovery_due_at:
             return
-        self._next_recovery_at = now + self.recovery_interval_seconds
         if not self.session.dirty or not self.layer_stack.layers:
+            self._recovery_due_at = None
+            return
+        if self._last_recovery_revision == self.session.revision:
+            self._recovery_due_at = None
             return
         try:
-            self.recovery_store.write(
-                self.session, self.layer_stack.serialize_state())
+            self.recovery_store.write_project(
+                self.session, self.layer_stack.save_project)
+            self._last_recovery_at = now
+            self._last_recovery_revision = self.session.revision
+            self._recovery_due_at = None
         except Exception:
             log.exception("Failed to write document recovery snapshot")
+            self._recovery_due_at = now + self.recovery_initial_delay_seconds
 
     def _generation_controllers(self) -> tuple[object, ...]:
         return (

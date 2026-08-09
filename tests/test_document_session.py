@@ -18,7 +18,8 @@ class _Settings:
     def __init__(self, tmp_path):
         self.values = {
             "recovery_dir": str(tmp_path / "recovery"),
-            "recovery_interval_seconds": 5,
+            "recovery_initial_delay_seconds": 60,
+            "recovery_interval_seconds": 300,
         }
 
     def get(self, key, default=None):
@@ -143,19 +144,41 @@ def test_unsaved_cancel_discard_and_save_failure_are_non_destructive(tmp_path):
     application.close()
 
 
-def test_periodic_recovery_is_complete_bounded_and_restored_as_unsaved(tmp_path):
+def test_recovery_is_compressed_complete_and_restored_as_unsaved(tmp_path):
     application = _application(tmp_path)
     application.document.execute(AddLayerCommand(name="Recovered"))
     dirty_session = application.document_session_id
-    application._next_recovery_at = 0
+    undo_snapshot_bytes = len(application.layer_stack.serialize_state())
+    original_serializer = application.layer_stack.serialize_state
+    application.layer_stack.serialize_state = lambda: (_ for _ in ()).throw(
+        AssertionError("recovery must not allocate an undo snapshot"))
+    application._recovery_due_at = 0
     application.poll()
+    application.layer_stack.serialize_state = original_serializer
     record = application.available_recovery
     assert record is not None
     assert record.session_id == dirty_session
+    assert record.snapshot_bytes < undo_snapshot_bytes
+
+    application._recovery_due_at = 0
+    original_writer = application.layer_stack.save_project
+    application.layer_stack.save_project = lambda _path: (_ for _ in ()).throw(
+        AssertionError("unchanged revision was saved again"))
+    application.poll()
+    application.layer_stack.save_project = original_writer
+
+    application.document.execute(SetLayerNameCommand(
+        application.layer_stack.active_layer, "Changed after recovery"))
+    assert application._recovery_due_at >= (
+        application._last_recovery_at + application.recovery_interval_seconds)
 
     restored = _application(tmp_path)
     discovered = restored.available_recovery
     assert discovered is not None
+    restored.recovery_store.load = lambda _record: (_ for _ in ()).throw(
+        AssertionError("recovery must load the project directly from disk"))
+    restored.layer_stack.serialize_state = lambda: (_ for _ in ()).throw(
+        AssertionError("dirty recovery reset must not allocate an undo snapshot"))
     restored.restore_recovery(discovered)
     assert [layer.name for layer in restored.layer_stack.layers][0] == "Recovered"
     assert restored.project_path is None
@@ -180,3 +203,16 @@ def test_recovery_store_rejects_oversized_and_prunes_old_records(tmp_path):
         assert "size limit" in str(exc)
     else:
         raise AssertionError("oversized recovery snapshot was accepted")
+
+
+def test_recovery_store_has_no_arbitrary_default_project_size_limit(tmp_path):
+    store = RecoveryStore(tmp_path)
+    session = DocumentSession()
+
+    def write_project(path):
+        with open(path, "wb") as output:
+            output.write(b"project payload")
+
+    record = store.write_project(session, write_project)
+    assert store.max_snapshot_bytes is None
+    assert store.load(record) == b"project payload"

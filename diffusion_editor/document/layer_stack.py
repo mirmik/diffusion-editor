@@ -596,10 +596,10 @@ class LayerStack:
     # --- Compositing ---
 
     def composite(self, exclude_layer: Layer | None = None) -> np.ndarray:
-        """Composite visible layers and return straight RGBA8.
+        """Composite in linear light and return straight sRGB RGBA8.
 
         If exclude_layer is set, returns prefix of that layer (everything below it).
-        Premultiplied renderer caches never escape this public boundary.
+        Premultiplied linear renderer caches never escape this public boundary.
         """
         if not self._layers or self._width == 0:
             return np.zeros((1, 1, 4), dtype=np.uint8)
@@ -615,7 +615,7 @@ class LayerStack:
             y0: int,
             x1: int,
             y1: int) -> np.ndarray:
-        """Composite a clipped canvas rect and return straight RGBA8."""
+        """Composite a clipped rect and return straight sRGB RGBA8."""
         premultiplied = self._renderer.composite_rect_premultiplied(
             x0, y0, x1, y1)
         return premultiplied_to_straight_rgba(premultiplied)
@@ -626,7 +626,7 @@ class LayerStack:
 
     def get_prefix_below_rect(self, layer: Layer, x0: int, y0: int,
                               x1: int, y1: int) -> np.ndarray:
-        """Return prefix buffer for a rect (uint8 RGBA)."""
+        """Return a straight sRGB RGBA8 prefix buffer for a rect."""
         self._require_member(layer)
         if self._width == 0 or self._height == 0:
             return np.zeros((1, 1, 4), dtype=np.uint8)

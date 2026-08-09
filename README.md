@@ -3,6 +3,10 @@
 Standalone diffusion image editor built on Termin `tcgui`, `tgfx`, and
 `termin-display`.
 
+The editor stores document pixels as straight sRGB RGBA8 and composites RGB
+in linear light with linear alpha. The boundary contract is documented in
+[Color management](docs/color-management.md).
+
 ## Prerequisites
 
 Install or build the Termin SDK first. The default lookup path is:
@@ -122,6 +126,13 @@ Windows keeps the same comparison selector:
 
 `--ui native` uses production settings and inference engines; it is distinct
 from the deterministic fake-engine harness in `scripts/smoke_native_root.py`.
+
+Dirty documents have crash-recovery snapshots under
+`~/.cache/diffusion-editor/recovery`. The first snapshot is written one minute
+after a change; further snapshots are written only for a newer document
+revision and no more often than once every five minutes. Recovery uses the
+same compressed, atomic `.deproj` writer as an explicit project save and has
+no fixed project-size ceiling beyond available storage.
 
 ## Tests
 

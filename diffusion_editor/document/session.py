@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import tempfile
 import time
+from typing import Callable
 import uuid
 
 from .change_event import DocumentChangeEvent
@@ -93,33 +94,62 @@ class DocumentSession:
 
 
 class RecoveryStore:
-    """Atomic, size-bounded snapshots left behind only by dirty sessions."""
+    """Atomic recovery projects left behind only by dirty sessions."""
 
     def __init__(
             self,
             root: str | os.PathLike[str],
             *,
-            max_snapshot_bytes: int = 512 * 1024 * 1024,
+            max_snapshot_bytes: int | None = None,
             max_records: int = 3) -> None:
-        if max_snapshot_bytes <= 0 or max_records <= 0:
+        if (
+                (max_snapshot_bytes is not None and max_snapshot_bytes <= 0)
+                or max_records <= 0):
             raise ValueError("recovery limits must be positive")
         self.root = Path(root)
-        self.max_snapshot_bytes = int(max_snapshot_bytes)
+        self.max_snapshot_bytes = (
+            int(max_snapshot_bytes) if max_snapshot_bytes is not None else None)
         self.max_records = int(max_records)
 
     def write(self, session: DocumentSession, snapshot: bytes) -> RecoveryRecord:
-        if len(snapshot) > self.max_snapshot_bytes:
-            raise ValueError("recovery snapshot exceeds configured size limit")
+        self._validate_snapshot_size(len(snapshot))
         self.root.mkdir(parents=True, exist_ok=True)
         snapshot_path = self.root / f"{session.session_id}.deproj"
+        self._atomic_write(snapshot_path, snapshot)
+        return self._commit_record(session, snapshot_path)
+
+    def write_project(
+            self,
+            session: DocumentSession,
+            writer: Callable[[str], None]) -> RecoveryRecord:
+        """Write a compressed project directly to disk without a RAM snapshot."""
+        self.root.mkdir(parents=True, exist_ok=True)
+        snapshot_path = self.root / f"{session.session_id}.deproj"
+        staged_path = self.root / f".{session.session_id}.pending.deproj"
+        try:
+            writer(str(staged_path))
+            self._validate_snapshot_size(staged_path.stat().st_size)
+            os.replace(staged_path, snapshot_path)
+        except BaseException:
+            try:
+                staged_path.unlink()
+            except FileNotFoundError:
+                pass
+            raise
+        return self._commit_record(session, snapshot_path)
+
+    def _commit_record(
+            self,
+            session: DocumentSession,
+            snapshot_path: Path) -> RecoveryRecord:
+        snapshot_bytes = snapshot_path.stat().st_size
         metadata_path = self.root / f"{session.session_id}.json"
         created_at = time.time()
-        self._atomic_write(snapshot_path, snapshot)
         metadata = json.dumps({
             "session_id": session.session_id,
             "created_at": created_at,
             "project_path": session.path,
-            "snapshot_bytes": len(snapshot),
+            "snapshot_bytes": snapshot_bytes,
         }, sort_keys=True).encode("utf-8")
         self._atomic_write(metadata_path, metadata)
         self._prune()
@@ -128,7 +158,7 @@ class RecoveryStore:
             created_at=created_at,
             project_path=session.path,
             snapshot_path=snapshot_path,
-            snapshot_bytes=len(snapshot),
+            snapshot_bytes=snapshot_bytes,
         )
 
     def records(self) -> tuple[RecoveryRecord, ...]:
@@ -144,7 +174,9 @@ class RecoveryStore:
                 if (
                         not snapshot_path.is_file()
                         or snapshot_bytes != snapshot_path.stat().st_size
-                        or snapshot_bytes > self.max_snapshot_bytes):
+                        or (
+                            self.max_snapshot_bytes is not None
+                            and snapshot_bytes > self.max_snapshot_bytes)):
                     continue
                 records.append(RecoveryRecord(
                     session_id=session_id,
@@ -168,9 +200,17 @@ class RecoveryStore:
         snapshot = record.snapshot_path.read_bytes()
         if (
                 len(snapshot) != record.snapshot_bytes
-                or len(snapshot) > self.max_snapshot_bytes):
+                or (
+                    self.max_snapshot_bytes is not None
+                    and len(snapshot) > self.max_snapshot_bytes)):
             raise ValueError("recovery snapshot is incomplete or oversized")
         return snapshot
+
+    def _validate_snapshot_size(self, snapshot_bytes: int) -> None:
+        if (
+                self.max_snapshot_bytes is not None
+                and snapshot_bytes > self.max_snapshot_bytes):
+            raise ValueError("recovery snapshot exceeds configured size limit")
 
     def discard(self, session_id: str) -> None:
         for suffix in (".json", ".deproj"):

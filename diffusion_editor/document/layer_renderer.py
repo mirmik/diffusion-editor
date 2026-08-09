@@ -1,8 +1,9 @@
-"""Tile renderer with an explicitly premultiplied internal representation.
+"""Tile renderer with an explicitly linear-light internal representation.
 
 Layer images are stored as straight RGBA8.  Cached renderer tiles are
-premultiplied float32 in the 0..255 range so Porter-Duff ``source over`` can
-be accumulated without repeatedly quantizing translucent pixels.
+premultiplied linear-light float32 in the 0..255 range so Porter-Duff
+``source over`` can be accumulated without gamma error or repeated
+quantization of translucent pixels.
 Premultiplied buffers must not cross the public document boundary;
 :class:`LayerStack` converts them back to straight RGBA8 for display, export
 and flattening.
@@ -14,12 +15,13 @@ from collections import OrderedDict
 
 import numpy as np
 
+from ..color import linear_to_srgb, srgb_to_linear
 from .layer import Layer
 
 
 def premultiplied_to_straight_rgba(
         premultiplied: np.ndarray) -> np.ndarray:
-    """Convert a premultiplied 0..255 buffer to straight RGBA8.
+    """Convert premultiplied linear 0..255 data to straight sRGB RGBA8.
 
     Transparent RGB is normalized to zero.  Rounding to the nearest integer is
     important here: it makes a public composite safe to feed back into a layer
@@ -44,7 +46,8 @@ def premultiplied_to_straight_rgba(
     if np.any(nonzero):
         src_rgb = premultiplied[:, :, :3][nonzero].astype(np.float32)
         src_alpha = alpha[:, :, 0][nonzero][:, None]
-        rgb = np.rint(src_rgb * (255.0 / src_alpha))
+        straight_linear = np.clip(src_rgb / src_alpha, 0.0, 1.0)
+        rgb = np.rint(linear_to_srgb(straight_linear) * 255.0)
         straight[:, :, :3][nonzero] = np.clip(rgb, 0, 255).astype(np.uint8)
     return straight
 
@@ -693,16 +696,18 @@ class LayerRenderer:
 
     @staticmethod
     def _blend_image(image: np.ndarray, opacity: float, result: np.ndarray) -> None:
-        """Blend straight-alpha image onto float32 result buffer."""
+        """Decode straight sRGB RGBA8 and blend into a linear premult buffer."""
         alpha = image[:, :, 3:4].astype(np.float32) * (opacity / 255.0)
         inv_alpha = 1.0 - alpha
-        src_rgb = image[:, :, :3].astype(np.float32)
+        src_rgb = srgb_to_linear(
+            image[:, :, :3].astype(np.float32) / 255.0
+        ) * 255.0
         result[:, :, :3] = src_rgb * alpha + result[:, :, :3] * inv_alpha
         result[:, :, 3:4] = alpha * 255.0 + result[:, :, 3:4] * inv_alpha
 
     @staticmethod
     def _blend_buffer(src_buf: np.ndarray, opacity: float, result: np.ndarray) -> None:
-        """Blend a premultiplied 0..255 buffer onto a premultiplied buffer."""
+        """Blend a premultiplied linear buffer onto another linear buffer."""
         alpha = src_buf[:, :, 3:4].astype(np.float32) * (opacity / 255.0)
         inv_alpha = 1.0 - alpha
         if opacity != 1.0:

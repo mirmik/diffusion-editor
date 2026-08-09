@@ -3,6 +3,7 @@
 import numpy as np
 import pytest
 
+from diffusion_editor.color import linear_to_srgb, srgb_to_linear
 from diffusion_editor.document.layer import Layer
 from diffusion_editor.document.layer_stack import LayerStack
 from diffusion_editor.canvas.canvas_tools import MoveTool
@@ -125,7 +126,8 @@ class TestCompositeCorrectness:
 
         def _premultiplied(color):
             rgba = np.asarray(color, dtype=np.float64) / 255.0
-            return np.concatenate((rgba[:3] * rgba[3], rgba[3:4]))
+            linear_rgb = srgb_to_linear(rgba[:3])
+            return np.concatenate((linear_rgb * rgba[3], rgba[3:4]))
 
         def _over(source, destination):
             return source + destination * (1.0 - source[3])
@@ -136,7 +138,7 @@ class TestCompositeCorrectness:
         subtree = _over(own_p, child_p) * group.opacity
         expected_p = _over(subtree, bottom_p)
         expected = np.concatenate((
-            expected_p[:3] / expected_p[3],
+            linear_to_srgb(expected_p[:3] / expected_p[3]),
             expected_p[3:4],
         ))
         expected = np.rint(expected * 255.0).astype(np.uint8)
@@ -146,6 +148,15 @@ class TestCompositeCorrectness:
             expected,
             atol=1,
         )
+
+    def test_half_white_over_black_is_blended_in_linear_light(self):
+        stack = LayerStack(tile_size=8)
+        stack.init_from_image(_solid_image(1, 1, 0, 0, 0, 255))
+        stack.add_layer("white", _solid_image(1, 1, 255, 255, 255, 128))
+
+        result = stack.composite()[0, 0]
+
+        np.testing.assert_allclose(result, [188, 188, 188, 255], atol=1)
 
 
 # ---------- prefix cache behaviour ----------
