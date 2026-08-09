@@ -12,7 +12,9 @@ from ..generation.types import EnginePollEvent
 
 
 EventT = TypeVar("EventT")
-TaskType = Literal["load", "load_ip_adapter", "inference", "segmentation"]
+TaskType = Literal[
+    "load", "load_ip_adapter", "inference", "segmentation", "reconstruction"
+]
 
 
 class TaskCancelled(RuntimeError):

@@ -7,6 +7,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
+from PIL import Image
 from tcbase import log
 from termin.dispatch import Dispatcher, DispatchStats
 from termin.display.window import WindowHandle, WindowManager, WindowedGraphicsSession
@@ -40,6 +41,9 @@ from .native_layer_panel import NativeLayerPanel
 from .native_shell import CommandHandler, NativeEditorView
 from ..canvas.edit_transactions import CanvasEditTransactionCoordinator
 from ..canvas.native_editor_canvas import NativeEditorCanvas
+from ..engines.reconstruction_engine import ReconstructionEngine
+from ..generation.reconstruction_controller import ReconstructionController
+from .native_reconstruction_viewport import NativeReconstructionViewport
 
 
 DEFAULT_NATIVE_WIDTH = 1280
@@ -236,6 +240,7 @@ class NativeEditorRoot:
             dispatch_limit: int = DEFAULT_DISPATCH_LIMIT,
             command_handlers: Mapping[str, CommandHandler] | None = None,
             texture_lease_factory: Callable[[], Any] | None = None,
+            reconstruction_engine: ReconstructionEngine | None = None,
             view_factory: NativeViewFactory = NativeEditorView) -> None:
         if dispatch_limit <= 0:
             raise ValueError("dispatch_limit must be positive")
@@ -268,6 +273,9 @@ class NativeEditorRoot:
         self.agent_chat_coordinator = None
         self.dialogs = None
         self.dialog_coordinator = None
+        self.reconstruction_engine = None
+        self.reconstruction_controller = None
+        self.reconstruction_viewport = None
 
         try:
             self.view = view_factory(
@@ -276,6 +284,28 @@ class NativeEditorRoot:
                 self._set_window_title,
                 handlers,
             )
+            if hasattr(application, "layer_stack"):
+                self.reconstruction_engine = (
+                    reconstruction_engine or ReconstructionEngine()
+                )
+                self.reconstruction_controller = ReconstructionController(
+                    self.reconstruction_engine
+                )
+                register_resource = getattr(
+                    application, "register_shutdown_resource", None
+                )
+                if callable(register_resource):
+                    register_resource(
+                        ShutdownPhase.ENGINE_WORKERS,
+                        "pixal3d-reconstruction-engine",
+                        self.reconstruction_engine.shutdown,
+                    )
+                set_handler = getattr(self.view, "set_command_handler", None)
+                if callable(set_handler):
+                    set_handler("generation.3d", self._start_reconstruction)
+                    set_handler(
+                        "generation.3d_cancel", self._cancel_reconstruction
+                    )
             mount_canvas = getattr(self.view, "mount_canvas", None)
             graphics = getattr(composition, "graphics", None)
             if mount_canvas is not None and graphics is not None:
@@ -669,11 +699,14 @@ class NativeEditorRoot:
                 self.application.request_stop()
         if self.application.running:
             self.application.poll()
+        self._poll_reconstruction()
         if self.agent_chat is not None:
             self.agent_chat.poll()
         if self.canvas_status_coordinator is not None:
             self.canvas_status_coordinator.flush()
         self._refresh_commands()
+        if self.reconstruction_viewport is not None:
+            self.reconstruction_viewport.render_if_dirty()
         rendered = bool(self.composition.render_frame())
         return NativeTickResult(
             dispatched=stats.executed,
@@ -686,6 +719,88 @@ class NativeEditorRoot:
     def _refresh_commands(self) -> None:
         if self.command_coordinator is not None:
             self.command_coordinator.refresh()
+        view = getattr(self, "view", None)
+        set_state = getattr(view, "set_command_state", None)
+        controller = self.reconstruction_controller
+        stack = getattr(self.application, "layer_stack", None)
+        if callable(set_state) and controller is not None and stack is not None:
+            busy = controller.is_busy
+            has_composite = stack.width > 0 and stack.height > 0
+            set_state("generation.3d", enabled=has_composite and not busy)
+            set_state("generation.3d_cancel", enabled=busy)
+
+    def _start_reconstruction(self) -> None:
+        controller = self.reconstruction_controller
+        if controller is None or controller.is_busy:
+            return
+        stack = self.application.layer_stack
+        if stack.width <= 0 or stack.height <= 0:
+            self.application.set_status("Open or draw an image before 3D generation")
+            return
+        try:
+            self._ensure_reconstruction_viewport()
+            composite = stack.composite()
+            image = Image.fromarray(composite, mode="RGBA")
+            event = controller.start(image, seed=42)
+            if event.status:
+                self.application.set_status(event.status)
+        except Exception as exc:
+            log.exception("Failed to start 3D reconstruction")
+            self.application.set_status(f"Cannot start 3D generation: {exc}")
+
+    def _cancel_reconstruction(self) -> None:
+        controller = self.reconstruction_controller
+        if controller is not None and controller.cancel():
+            self.application.set_status("Cancelling 3D generation...")
+
+    def _poll_reconstruction(self) -> None:
+        controller = self.reconstruction_controller
+        if controller is None:
+            return
+        event = controller.poll()
+        if event is None:
+            return
+        if event.result is not None:
+            try:
+                viewport = self._ensure_reconstruction_viewport()
+                vertices, triangles, meshes = viewport.load_glb(
+                    event.result.glb_path
+                )
+                self.application.set_status(
+                    "3D model ready: "
+                    f"{vertices:,} vertices, {triangles:,} triangles, "
+                    f"{meshes} mesh(es)"
+                )
+            except Exception as exc:
+                log.exception("Failed to display generated GLB")
+                self.application.set_status(f"3D viewport error: {exc}")
+        elif event.status:
+            self.application.set_status(event.status)
+
+    def _ensure_reconstruction_viewport(self) -> NativeReconstructionViewport:
+        if self.reconstruction_viewport is not None:
+            return self.reconstruction_viewport
+        graphics = getattr(self.composition, "graphics", None)
+        mount = getattr(self.view, "mount_reconstruction_viewport", None)
+        if graphics is None or not callable(mount):
+            raise RuntimeError("native 3D viewport is unavailable in this host")
+        viewport = NativeReconstructionViewport(
+            self.composition.document,
+            graphics_owner=graphics,
+            request_repaint=self.composition.request_repaint,
+        )
+        mount(viewport)
+        self.reconstruction_viewport = viewport
+        register_resource = getattr(
+            self.application, "register_shutdown_resource", None
+        )
+        if callable(register_resource):
+            register_resource(
+                ShutdownPhase.GPU_RESOURCES,
+                "native-reconstruction-viewport",
+                viewport.close,
+            )
+        return viewport
 
     def _on_snapshot_applied(self) -> None:
         if self.canvas_edit_coordinator is not None:

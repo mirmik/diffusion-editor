@@ -77,6 +77,16 @@ COMMAND_SPECS = (
     NativeCommandSpec("layer.remove", "Remove Layer"),
     NativeCommandSpec("layer.flatten", "Flatten"),
     NativeCommandSpec("layer.detect", "Detect Objects…"),
+    NativeCommandSpec(
+        "generation.3d",
+        "Generate 3D Model",
+        tooltip="Generate a Pixal3D model from the current composite",
+    ),
+    NativeCommandSpec(
+        "generation.3d_cancel",
+        "Cancel 3D Generation",
+        enabled=False,
+    ),
     NativeCommandSpec("view.fit", "Fit"),
     NativeCommandSpec(
         "view.agent_panel",
@@ -143,6 +153,14 @@ MENU_COMMANDS = (
         ),
     ),
     (
+        "generation",
+        "3D",
+        (
+            "generation.3d",
+            "generation.3d_cancel",
+        ),
+    ),
+    (
         "view",
         "View",
         (
@@ -158,6 +176,7 @@ TOOLBAR_COMMANDS = (
     "file.save",
     None,
     "view.fit",
+    "generation.3d",
     None,
     "selection.all",
     "selection.clear",
@@ -174,6 +193,7 @@ class NativeEditorView:
             request_repaint: Callable[[], None],
             set_window_title: Callable[[str], None],
             command_handlers: Mapping[str, CommandHandler]) -> None:
+        self._document = document
         self._request_repaint = request_repaint
         self._set_platform_window_title = set_window_title
         self._command_handlers = dict(command_handlers)
@@ -239,6 +259,8 @@ class NativeEditorView:
         self.canvas_placeholder.stable_id = "diffusion-editor.canvas-host.label"
         self.canvas_host.add_preferred_child(self.canvas_placeholder)
         self.canvas_view = None
+        self.reconstruction_viewport = None
+        self.canvas_reconstruction_splitter = None
         self.layer_panel = document.create_vstack("DiffusionEditorLayerPanel")
         self.layer_panel.stable_id = "diffusion-editor.layer-panel"
         self.layer_panel.set_layout_spacing(4.0)
@@ -442,6 +464,27 @@ class NativeEditorView:
         self.left_panel.remove_child(self.left_placeholder)
         self.left_panel.add_preferred_child(controls_view.widget)
         self.canvas_controls_view = controls_view
+        self._request_repaint()
+
+    def mount_reconstruction_viewport(self, viewport_view) -> None:
+        self._require_open()
+        if self.canvas_view is None:
+            raise RuntimeError("native canvas must be mounted before the 3D viewport")
+        if self.reconstruction_viewport is not None:
+            raise RuntimeError("reconstruction viewport is already mounted")
+        self.canvas_host.remove_child(self.canvas_view.widget)
+        splitter = self._document.create_splitter(
+            True,
+            "DiffusionEditorCanvasReconstructionSplitter",
+        )
+        splitter.widget.stable_id = "diffusion-editor.reconstruction.splitter"
+        splitter.set_first(self.canvas_view.widget)
+        splitter.set_second(viewport_view.widget)
+        splitter.set_split_fraction(0.50)
+        splitter.set_min_extents(260.0, 260.0)
+        self.canvas_host.add_flex_child(splitter.widget, 1.0)
+        self.canvas_reconstruction_splitter = splitter
+        self.reconstruction_viewport = viewport_view
         self._request_repaint()
 
     def mount_generation_panels(

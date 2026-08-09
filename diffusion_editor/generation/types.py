@@ -75,7 +75,9 @@ class DiffusionRequestBuildResult:
 
 @dataclass(frozen=True)
 class EnginePollEvent:
-    task_type: Literal["load", "load_ip_adapter", "inference", "segmentation"]
+    task_type: Literal[
+        "load", "load_ip_adapter", "inference", "segmentation", "reconstruction"
+    ]
     result: object | None = None
     error: str | None = None
     meta: object | None = None
@@ -116,6 +118,18 @@ class LamaRequest:
 class LamaResult:
     image: Image.Image
     provenance: GenerationProvenance | None = None
+
+
+@dataclass(frozen=True)
+class ReconstructionRequest:
+    image: Image.Image
+    seed: int = 42
+
+
+@dataclass(frozen=True)
+class ReconstructionResult:
+    glb_path: str
+    source_path: str
 
 
 @dataclass(frozen=True)

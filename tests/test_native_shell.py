@@ -36,6 +36,8 @@ EXPECTED_COMMANDS = (
     "layer.remove",
     "layer.flatten",
     "layer.detect",
+    "generation.3d",
+    "generation.3d_cancel",
     "view.fit",
     "view.agent_panel",
 )
