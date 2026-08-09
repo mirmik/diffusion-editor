@@ -76,6 +76,7 @@ class NativeApplicationDialogs:
         self._settings_callback = on_finished
         self.settings_models_dir.text = state.models_dir
         self.settings_history.value = state.history_limit_gib
+        self.settings_mcp.checked = state.mcp_server_enabled
         self.settings_agent_url.text = state.agent_base_url
         self.settings_agent_key.text = state.agent_api_key
         self.settings_agent_model.text = state.agent_model
@@ -257,6 +258,17 @@ class NativeApplicationDialogs:
             "Older history entries are removed when the limit is exceeded.",
             "diffusion-editor.settings.history-note",
         )
+        self._caption(content, "Automation")
+        self.settings_mcp = self._checkbox(
+            content,
+            "Enable local editor MCP server on startup",
+            "settings.mcp",
+        )
+        self.settings_mcp_note = self._caption(
+            content,
+            "Applies after restart. Allows local scripts to control the editor.",
+            "diffusion-editor.settings.mcp-note",
+        )
         self._caption(content, "Agent Chat API")
         self.settings_agent_url = self._input(
             content, "Base URL", "settings.agent-url")
@@ -314,6 +326,7 @@ class NativeApplicationDialogs:
         callback(SettingsState(
             models_dir=self.settings_models_dir.text,
             history_limit_gib=self.settings_history.value,
+            mcp_server_enabled=self.settings_mcp.checked,
             agent_base_url=self.settings_agent_url.text,
             agent_api_key=self.settings_agent_key.text,
             agent_model=self.settings_agent_model.text,

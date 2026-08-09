@@ -218,10 +218,12 @@ def test_dialog_coordinator_settings_and_grounding(tmp_path):
     coordinator.show_settings()
     state, callback = view.settings[-1]
     assert state.models_dir == str(tmp_path)
+    assert state.mcp_server_enabled is False
     callback(replace(
         state,
         models_dir=str(tmp_path / "models"),
         history_limit_gib=1.5,
+        mcp_server_enabled=True,
         agent_model="local",
         agent_temperature=0.2,
         agent_stream=False,
@@ -232,6 +234,8 @@ def test_dialog_coordinator_settings_and_grounding(tmp_path):
     assert app.settings.values["agent_model"] == "local"
     assert app.settings.values["agent_temperature"] == 0.2
     assert app.settings.values["agent_stream"] is False
+    assert app.settings.values["mcp_server_enabled"] is True
+    assert "restart Diffusion Editor" in app.status_text
     assert refreshed == [True]
 
     coordinator.show_grounding()
@@ -263,6 +267,7 @@ def _settings_state(tmp_path):
     return SettingsState(
         models_dir=str(tmp_path),
         history_limit_gib=5.0,
+        mcp_server_enabled=False,
         agent_base_url="http://localhost:8080",
         agent_api_key="",
         agent_model="default",
@@ -304,9 +309,11 @@ def test_native_settings_accept_cancel_reopen_and_destroy(tmp_path):
         service.show_settings_dialog(state, results.append)
         service.settings_agent_model.text = "native-model"
         service.settings_history.value = 2.0
+        service.settings_mcp.checked = True
         assert service.settings_dialog.activate("ok")
         assert results[-1].agent_model == "native-model"
         assert results[-1].history_limit_gib == 2.0
+        assert results[-1].mcp_server_enabled is True
 
         service.show_settings_dialog(state, results.append)
         service.close()
@@ -328,6 +335,10 @@ def test_native_dialogs_preserve_legacy_labels_and_compact_settings(tmp_path):
         assert service.settings_content.preferred_size.height == 0.0
         assert service.settings_history_note.text == (
             "Older history entries are removed when the limit is exceeded.")
+        assert service.settings_mcp_label.text == (
+            "Enable local editor MCP server on startup")
+        assert service.settings_mcp_note.text == (
+            "Applies after restart. Allows local scripts to control the editor.")
         assert service.settings_temperature_caption.text == "Temperature"
         assert service.settings_max_tokens_caption.text == "Max tokens"
         assert service.settings_timeout_caption.text == "Timeout sec"

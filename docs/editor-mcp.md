@@ -4,7 +4,11 @@ Diffusion Editor can expose Termin's authenticated local MCP endpoint and run
 Python scripts on the native editor thread. The endpoint is disabled by default
 because scripts have the same permissions as the editor process.
 
-Enable it for one launch:
+Enable **Local editor MCP server** in **Edit → Settings**, then restart
+Diffusion Editor. The setting is persistent and remains disabled by default.
+
+For a one-launch override, set `TERMIN_EDITOR_MCP`. It takes precedence over
+the saved setting, so `0` explicitly disables the endpoint and `1` enables it:
 
 ```bash
 TERMIN_EDITOR_MCP=1 ./run.sh [project.deproj-or-image]

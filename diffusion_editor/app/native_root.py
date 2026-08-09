@@ -308,6 +308,10 @@ class NativeEditorRoot:
                     set_handler(
                         "generation.3d_cancel", self._cancel_reconstruction
                     )
+                    set_handler(
+                        "view.3d_light_from_camera",
+                        self._set_3d_light_from_camera,
+                    )
             mount_canvas = getattr(self.view, "mount_canvas", None)
             graphics = getattr(composition, "graphics", None)
             if mount_canvas is not None and graphics is not None:
@@ -741,6 +745,13 @@ class NativeEditorRoot:
             has_composite = stack.width > 0 and stack.height > 0
             set_state("generation.3d", enabled=has_composite and not busy)
             set_state("generation.3d_cancel", enabled=busy)
+            set_state(
+                "view.3d_light_from_camera",
+                enabled=(
+                    self.reconstruction_viewport is not None
+                    and self.reconstruction_viewport.mesh_count > 0
+                ),
+            )
 
     def _start_reconstruction(self) -> None:
         controller = self.reconstruction_controller
@@ -765,6 +776,13 @@ class NativeEditorRoot:
         controller = self.reconstruction_controller
         if controller is not None and controller.cancel():
             self.application.set_status("Cancelling 3D generation...")
+
+    def _set_3d_light_from_camera(self) -> None:
+        viewport = self.reconstruction_viewport
+        if viewport is None or viewport.mesh_count == 0:
+            return
+        viewport.light_from_camera()
+        self.application.set_status("3D light set from current camera")
 
     def _poll_reconstruction(self) -> None:
         controller = self.reconstruction_controller

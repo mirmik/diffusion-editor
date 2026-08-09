@@ -54,6 +54,7 @@ class FileDialogSpec:
 class SettingsState:
     models_dir: str
     history_limit_gib: float
+    mcp_server_enabled: bool
     agent_base_url: str
     agent_api_key: str
     agent_model: str
@@ -220,6 +221,8 @@ class ApplicationDialogCoordinator:
             models_dir=self._application.models_dir,
             history_limit_gib=(
                 self._application.history_memory_limit_bytes / _BYTES_PER_GIB),
+            mcp_server_enabled=bool(settings.get(
+                "mcp_server_enabled", False)),
             agent_base_url=str(settings.get(
                 "agent_api_base_url", DEFAULT_AGENT_BASE_URL)),
             agent_api_key=str(settings.get("agent_api_key", "")),
@@ -379,6 +382,11 @@ class ApplicationDialogCoordinator:
         self._application.set_history_memory_limit_bytes(
             int(state.history_limit_gib * _BYTES_PER_GIB))
         settings = self._application.settings
+        mcp_setting_changed = (
+            bool(settings.get("mcp_server_enabled", False))
+            != state.mcp_server_enabled
+        )
+        settings.set("mcp_server_enabled", state.mcp_server_enabled)
         settings.set("agent_api_base_url", state.agent_base_url.strip())
         settings.set("agent_api_key", state.agent_api_key.strip())
         settings.set("agent_model", state.agent_model.strip())
@@ -388,8 +396,13 @@ class ApplicationDialogCoordinator:
             "agent_timeout_seconds", float(state.agent_timeout_seconds))
         settings.set("agent_stream", bool(state.agent_stream))
         self._on_models_dir_changed()
-        self._application.set_status(
-            "Saved settings: models directory, history and Agent Chat")
+        if mcp_setting_changed:
+            self._application.set_status(
+                "Saved settings; restart Diffusion Editor to apply the "
+                "Editor MCP change")
+        else:
+            self._application.set_status(
+                "Saved settings: models, history, automation and Agent Chat")
 
     def _submit_grounding(self, params: GroundingParams | None) -> None:
         if params is None or self._closed:

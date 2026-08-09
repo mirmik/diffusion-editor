@@ -38,6 +38,7 @@ EXPECTED_COMMANDS = (
     "layer.detect",
     "generation.3d",
     "generation.3d_cancel",
+    "view.3d_light_from_camera",
     "view.fit",
     "view.agent_panel",
 )

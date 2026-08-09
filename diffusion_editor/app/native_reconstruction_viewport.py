@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import math
 
 import numpy as np
 from tcbase import Action, MouseButton
@@ -24,6 +25,7 @@ _VERTEX_SHADER = """#version 450 core
 layout(push_constant) uniform PCBlock {
     mat4 u_mvp;
     vec4 u_color;
+    vec4 u_light_direction;
 } pc;
 #define U_MVP pc.u_mvp
 #else
@@ -43,17 +45,21 @@ _FRAGMENT_SHADER = """#version 450 core
 layout(push_constant) uniform PCBlock {
     mat4 u_mvp;
     vec4 u_color;
+    vec4 u_light_direction;
 } pc;
 #define U_COLOR pc.u_color
+#define U_LIGHT_DIRECTION pc.u_light_direction.xyz
 #else
 uniform vec4 u_color;
+uniform vec3 u_light_direction;
 #define U_COLOR u_color
+#define U_LIGHT_DIRECTION u_light_direction
 #endif
 layout(location=0) in vec3 v_position;
 layout(location=0) out vec4 frag_color;
 void main() {
     vec3 normal = normalize(cross(dFdy(v_position), dFdx(v_position)));
-    vec3 light_direction = normalize(vec3(-0.35, -0.45, 0.82));
+    vec3 light_direction = normalize(U_LIGHT_DIRECTION);
     float diffuse = max(dot(normal, light_direction), 0.0);
     vec3 color = U_COLOR.rgb * (0.28 + 0.72 * diffuse);
     frag_color = vec4(color, 1.0);
@@ -62,12 +68,14 @@ void main() {
 
 
 class _OrbitCamera:
+    FRONT_AZIMUTH = math.pi
+    FRONT_ELEVATION = math.radians(12.0)
+
     def __init__(self) -> None:
         self._camera = OrbitCamera()
         self._camera.target = Vec3(0.0, 0.0, 0.0)
         self._camera.distance = 3.0
-        self._camera.azimuth = 0.65
-        self._camera.elevation = 0.35
+        self._reset_orientation()
         self._camera.fov_y = 0.78
         self._camera.near = 0.01
         self._camera.far = 100.0
@@ -88,11 +96,38 @@ class _OrbitCamera:
         self._camera.distance = radius * 2.7
         self._camera.near = max(radius * 0.001, 0.001)
         self._camera.far = max(radius * 20.0, 10.0)
+        self._reset_orientation()
+
+    def direction_from_target(self) -> np.ndarray:
+        eye = np.asarray(tuple(self._camera.eye), dtype=np.float32)
+        target = np.asarray(tuple(self._camera.target), dtype=np.float32)
+        direction = eye - target
+        length = float(np.linalg.norm(direction))
+        if length <= 1e-8:
+            return np.asarray((0.0, 1.0, 0.0), dtype=np.float32)
+        return direction / length
 
     def mvp(self, width: int, height: int) -> np.ndarray:
         aspect = max(float(width) / max(float(height), 1.0), 0.001)
         flat = np.asarray(self._camera.mvp(aspect), dtype=np.float32)
         return flat.reshape((4, 4), order="F")
+
+    def _reset_orientation(self) -> None:
+        # Pixal3D/glTF's front (-Z) becomes +Y after conversion to Z-up.
+        self._camera.azimuth = self.FRONT_AZIMUTH
+        self._camera.elevation = self.FRONT_ELEVATION
+
+
+def _draw_constants(mvp: np.ndarray, color, light_direction) -> np.ndarray:
+    gpu_mvp = np.ascontiguousarray(mvp.T, dtype=np.float32)
+    color_array = np.asarray(color, dtype=np.float32)
+    light_array = np.asarray(
+        (*light_direction, 0.0), dtype=np.float32
+    )
+    constants = np.concatenate(
+        (gpu_mvp.reshape(-1), color_array, light_array)
+    )
+    return np.ascontiguousarray(constants.view(np.uint8), dtype=np.uint8)
 
 
 class _ViewportSurface:
@@ -215,6 +250,7 @@ class NativeReconstructionViewport:
         self._graphics = Tgfx2Context.from_runtime(graphics_owner)
         self._request_repaint = request_repaint
         self._camera = _OrbitCamera()
+        self._light_direction = self._camera.direction_from_target()
         self._dirty = True
         self._closed = False
         self._meshes: list[object] = []
@@ -238,6 +274,15 @@ class NativeReconstructionViewport:
     @property
     def mesh_count(self) -> int:
         return len(self._meshes)
+
+    @property
+    def light_direction(self) -> tuple[float, float, float]:
+        return tuple(map(float, self._light_direction))
+
+    def light_from_camera(self) -> None:
+        self._require_open()
+        self._light_direction = self._camera.direction_from_target()
+        self.invalidate()
 
     def load_glb(self, path: str) -> tuple[int, int, int]:
         self._require_open()
@@ -275,6 +320,7 @@ class NativeReconstructionViewport:
         self._meshes = meshes
         if bounds_min is not None and bounds_max is not None:
             self._camera.fit(bounds_min, bounds_max)
+            self._light_direction = self._camera.direction_from_target()
         self.invalidate()
         return vertices, indices // 3, len(meshes)
 
@@ -306,7 +352,11 @@ class NativeReconstructionViewport:
         ctx.set_blend(False)
         ctx.set_cull(CULL_NONE)
         ctx.bind_shader(self._vertex_shader, self._fragment_shader)
-        self._set_draw_state(self._camera.mvp(width, height), (0.34, 0.72, 0.95, 1.0))
+        self._set_draw_state(
+            self._camera.mvp(width, height),
+            (0.34, 0.72, 0.95, 1.0),
+            self._light_direction,
+        )
         for mesh in self._meshes:
             draw_tc_mesh(ctx, mesh)
         ctx.end_pass()
@@ -349,12 +399,9 @@ class NativeReconstructionViewport:
         )
         self._texture_size = size
 
-    def _set_draw_state(self, mvp: np.ndarray, color) -> None:
-        gpu_mvp = np.ascontiguousarray(mvp.T, dtype=np.float32)
-        color_array = np.asarray(color, dtype=np.float32)
-        constants = np.concatenate((gpu_mvp.reshape(-1), color_array)).view(np.uint8)
+    def _set_draw_state(self, mvp: np.ndarray, color, light_direction) -> None:
         self._graphics.context.set_push_constants(
-            np.ascontiguousarray(constants, dtype=np.uint8)
+            _draw_constants(mvp, color, light_direction)
         )
 
     def _require_open(self) -> None:

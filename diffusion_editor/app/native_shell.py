@@ -87,6 +87,12 @@ COMMAND_SPECS = (
         "Cancel 3D Generation",
         enabled=False,
     ),
+    NativeCommandSpec(
+        "view.3d_light_from_camera",
+        "Light from Camera",
+        tooltip="Set the 3D light direction from the current camera",
+        enabled=False,
+    ),
     NativeCommandSpec("view.fit", "Fit"),
     NativeCommandSpec(
         "view.agent_panel",
@@ -158,6 +164,7 @@ MENU_COMMANDS = (
         (
             "generation.3d",
             "generation.3d_cancel",
+            "view.3d_light_from_camera",
         ),
     ),
     (
@@ -177,6 +184,7 @@ TOOLBAR_COMMANDS = (
     None,
     "view.fit",
     "generation.3d",
+    "view.3d_light_from_camera",
     None,
     "selection.all",
     "selection.clear",
