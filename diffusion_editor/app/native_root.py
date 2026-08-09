@@ -315,6 +315,8 @@ class NativeEditorRoot:
                         history_replaying=(
                             lambda: application.history_replaying),
                         on_history_changed=self._on_canvas_history_changed,
+                        on_edit_cancelled=(
+                            application.reconcile_document_session),
                         on_mutation_begin=application.mark_external_mutation,
                         cancel_interaction=(
                             self.canvas.cancel_pointer_interaction),
@@ -644,7 +646,6 @@ class NativeEditorRoot:
             setter(title)
 
     def _on_canvas_history_changed(self) -> None:
-        self.application.reconcile_document_session()
         self._refresh_commands()
 
     def defer(self, callback: Callable[[], None]):

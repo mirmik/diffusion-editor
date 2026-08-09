@@ -51,12 +51,14 @@ class CanvasEditTransactionCoordinator:
             *,
             history_replaying: Callable[[], bool] | None = None,
             on_history_changed: Callable[[], None] | None = None,
+            on_edit_cancelled: Callable[[], None] | None = None,
             on_mutation_begin: Callable[[], object] | None = None,
             cancel_interaction: Callable[[], None] | None = None) -> None:
         self._layer_stack = layer_stack
         self._document = document
         self._history_replaying = history_replaying or (lambda: False)
         self._on_history_changed = on_history_changed or (lambda: None)
+        self._on_edit_cancelled = on_edit_cancelled or (lambda: None)
         self._on_mutation_begin = on_mutation_begin or (lambda: None)
         self._cancel_interaction = cancel_interaction
         self._context: _EditContext | None = None
@@ -212,7 +214,7 @@ class CanvasEditTransactionCoordinator:
         if context is None:
             return
         self._restore(context)
-        self._notify_history_changed()
+        self._notify_edit_cancelled()
 
     def discard(self) -> None:
         """Forget a gesture after the whole document was externally replaced."""
@@ -570,6 +572,13 @@ class CanvasEditTransactionCoordinator:
         except Exception:
             logger.exception(
                 "Canvas history observer failed after a completed mutation")
+
+    def _notify_edit_cancelled(self) -> None:
+        try:
+            self._on_edit_cancelled()
+        except Exception:
+            logger.exception(
+                "Canvas observer failed after a cancelled mutation")
 
     @staticmethod
     def _clip_rect(

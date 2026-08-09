@@ -53,6 +53,23 @@ def test_controller_paints_through_partial_texture_updates():
     assert any(x <= 8 < x + data.shape[1] for x, _y, data in regions)
 
 
+def test_completed_paint_stroke_rebuilds_overlay_once():
+    image = np.zeros((32, 32, 4), dtype=np.uint8)
+    _stack, controller, *_rest = _controller(image)
+    rebuilds = []
+    original_rebuild = controller._overlay_bridge.rebuild
+
+    def rebuild():
+        rebuilds.append(True)
+        original_rebuild()
+
+    controller._overlay_bridge.rebuild = rebuild
+    controller.pointer_down(8, 8, controller.LEFT_BUTTON)
+    controller.pointer_up(8, 8)
+
+    assert rebuilds == [True]
+
+
 def test_controller_mask_overlay_uses_partial_updates():
     image = np.zeros((24, 24, 4), dtype=np.uint8)
     stack, controller, _images, overlays, _regions, overlay_regions = (

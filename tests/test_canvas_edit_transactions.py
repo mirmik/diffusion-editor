@@ -30,7 +30,7 @@ class _Engine:
         pass
 
 
-def _editor():
+def _editor(*, on_history_changed=None, on_edit_cancelled=None):
     engine = _Engine()
     application = EditorApplication(
         settings=_Settings(),
@@ -50,6 +50,8 @@ def _editor():
         application.layer_stack,
         application.document,
         history_replaying=lambda: application.history_replaying,
+        on_history_changed=on_history_changed,
+        on_edit_cancelled=on_edit_cancelled,
         on_mutation_begin=application.mark_external_mutation,
     )
     transactions.bind(controller)
@@ -57,6 +59,43 @@ def _editor():
     controller.brush.set_hardness(1.0)
     controller.brush.set_color(255, 0, 0, 255)
     return application, controller, transactions
+
+
+def test_completed_stroke_does_not_run_cancel_reconciliation():
+    completed = []
+    cancelled = []
+    application, controller, transactions = _editor(
+        on_history_changed=lambda: completed.append(True),
+        on_edit_cancelled=lambda: cancelled.append(True),
+    )
+    application.layer_stack.serialize_state = lambda: (_ for _ in ()).throw(
+        AssertionError("completed stroke serialized the whole document"))
+
+    controller.pointer_down(6, 6, controller.LEFT_BUTTON)
+    controller.pointer_up(6, 6)
+
+    assert completed == [True]
+    assert cancelled == []
+    assert application.document_dirty
+    transactions.close()
+    application.close()
+
+
+def test_cancelled_stroke_uses_separate_reconciliation_callback():
+    completed = []
+    cancelled = []
+    application, controller, transactions = _editor(
+        on_history_changed=lambda: completed.append(True),
+        on_edit_cancelled=lambda: cancelled.append(True),
+    )
+
+    controller.pointer_down(6, 6, controller.LEFT_BUTTON)
+    controller.pointer_cancel()
+
+    assert completed == []
+    assert cancelled == [True]
+    transactions.close()
+    application.close()
 
 
 def test_paint_gesture_is_one_undoable_transaction_with_edge_clipping():

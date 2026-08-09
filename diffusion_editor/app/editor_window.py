@@ -177,7 +177,7 @@ class EditorWindow:
             self._layer_stack,
             self._document,
             history_replaying=lambda: self.application.history_replaying,
-            on_history_changed=self.application.reconcile_document_session,
+            on_edit_cancelled=self.application.reconcile_document_session,
             on_mutation_begin=self.application.mark_external_mutation,
             cancel_interaction=self._canvas.cancel_pointer_interaction,
         )

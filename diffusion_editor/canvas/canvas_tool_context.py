@@ -131,8 +131,6 @@ class CanvasToolContext:
                 pixels_changed=False,
             )
         self._paint_stroke.clear()
-        self._overlay_bridge.clear()
-        self._overlay_bridge.rebuild()
 
     def begin_smudge(self, layer: Layer, x: int, y: int) -> None:
         self._smudge_stroke.begin(layer.image, self.brush, x, y)
