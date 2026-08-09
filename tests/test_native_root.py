@@ -25,6 +25,7 @@ from diffusion_editor.app.native_root import NativeEditorRoot, WindowedNativeCom
 from diffusion_editor.app.native_shell import COMMAND_SPECS
 from diffusion_editor.app.presentation import ViewPorts
 from diffusion_editor.canvas.brush import BrushToolMode
+from diffusion_editor.document.reconstruction import ReconstructionLayer
 
 
 class _MemorySettings:
@@ -609,3 +610,43 @@ def test_offscreen_routes_unhandled_shortcut_after_focused_widget(
 
         assert result.events == 1
         assert activated == ["redo"]
+
+
+def test_offscreen_root_creates_selected_reconstruction_object(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv(
+        "TERMIN_SDK_SHADER_CACHE_ROOT", str(tmp_path / "shader-cache")
+    )
+    application = _application()
+    image = np.zeros((16, 20, 4), dtype=np.uint8)
+    image[:, :, 3] = 255
+    application.layer_stack.init_from_image(image)
+
+    with NativeEditorRoot.create_headless(application) as root:
+        class ViewportStub:
+            mesh_count = 0
+
+            def clear_model(self):
+                pass
+
+            def render_if_dirty(self):
+                return False
+
+        viewport = ViewportStub()
+        root._ensure_reconstruction_viewport = lambda: viewport
+        root.tick()
+        before = application.layer_stack.composite()
+
+        assert root.view.activate_command("layer.new_3d_reconstruction")
+        root.tick()
+
+        node = application.layer_stack.active_layer
+        assert isinstance(node, ReconstructionLayer)
+        assert root._presented_reconstruction_id == node.id
+        assert root.layer_tree_coordinator.state.active_id == node.id
+        assert root.layer_tree_coordinator.state.roots[0].node_type == (
+            "reconstruction"
+        )
+        assert np.array_equal(application.layer_stack.composite(), before)
+        assert application.status_text == f"Created: {node.name}"

@@ -334,7 +334,11 @@ class EditorCanvasController:
     def annotations(self) -> tuple[CanvasAnnotation, ...]:
         result: list[CanvasAnnotation] = []
         layer = self._layer_stack.active_layer
-        if layer is not None and layer.width > 0 and layer.height > 0:
+        if (
+                layer is not None
+                and layer.accepts_pixel_edits
+                and layer.width > 0
+                and layer.height > 0):
             result.append(CanvasAnnotation("active-layer", layer.bounds))
         selection = self._rect_drags.selection_preview_rect()
         if selection is not None:
@@ -353,6 +357,7 @@ class EditorCanvasController:
     def _can_edit_layer(self, layer: Layer | None) -> bool:
         return (
             layer is not None
+            and layer.accepts_pixel_edits
             and self._layer_stack.is_layer_visible_for_composition(layer)
         )
 

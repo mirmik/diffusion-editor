@@ -74,6 +74,11 @@ COMMAND_SPECS = (
     NativeCommandSpec("selection.clear", "Clear Selection", "Ctrl+D"),
     NativeCommandSpec("selection.invert", "Invert Selection", "Ctrl+Shift+I"),
     NativeCommandSpec("layer.new", "New Layer", "Ctrl+Shift+N"),
+    NativeCommandSpec(
+        "layer.new_3d_reconstruction",
+        "New 3D Reconstruction",
+        tooltip="Create a 3D reconstruction object from the current composite",
+    ),
     NativeCommandSpec("layer.remove", "Remove Layer"),
     NativeCommandSpec("layer.flatten", "Flatten"),
     NativeCommandSpec("layer.detect", "Detect Objects…"),
@@ -151,6 +156,7 @@ MENU_COMMANDS = (
         "Layer",
         (
             "layer.new",
+            "layer.new_3d_reconstruction",
             "layer.remove",
             None,
             "layer.flatten",
@@ -183,6 +189,7 @@ TOOLBAR_COMMANDS = (
     "file.save",
     None,
     "view.fit",
+    "layer.new_3d_reconstruction",
     "generation.3d",
     "view.3d_light_from_camera",
     None,

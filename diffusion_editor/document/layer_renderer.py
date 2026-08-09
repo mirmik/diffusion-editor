@@ -327,7 +327,7 @@ class LayerRenderer:
             if own_visible and layer.opacity <= 0:
                 continue
             if layer.opacity >= 1.0 and not layer.children:
-                if own_visible:
+                if own_visible and layer.contributes_to_composite:
                     self._blend_image(layer.image, 1.0, result)
             else:
                 subtree = np.zeros((h, w, 4), dtype=np.float32)
@@ -335,7 +335,7 @@ class LayerRenderer:
                     child_comp = self._composite_siblings_direct(
                         layer.children, h, w)
                     subtree[:] = child_comp
-                if own_visible:
+                if own_visible and layer.contributes_to_composite:
                     self._blend_image(layer.image, 1.0, subtree)
                     self._blend_buffer(subtree, layer.opacity, result)
                 else:
@@ -636,6 +636,8 @@ class LayerRenderer:
         are canvas-global. The returned tile always has the canvas tile shape,
         with transparent pixels outside the layer bounds.
         """
+        if not layer.contributes_to_composite:
+            return None
         bx0, by0, bx1, by1 = self._stack.tile_bounds(tx, ty)
         lx0, ly0, lx1, ly1 = layer.bounds
         ox0 = max(bx0, lx0)

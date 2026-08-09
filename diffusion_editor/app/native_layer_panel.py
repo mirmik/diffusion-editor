@@ -147,7 +147,9 @@ class NativeLayerPanel:
             active = self._find_state_node(state.roots, state.active_id)
             self.opacity.value = state.opacity
             has_active = active is not None
-            self.opacity.widget.enabled = has_active
+            self.opacity.widget.enabled = (
+                has_active and active.node_type == "raster"
+            )
             self.add_button.widget.enabled = state.can_add
             self.remove_button.widget.enabled = state.can_remove
             self.flatten_button.widget.enabled = state.can_flatten
@@ -197,18 +199,23 @@ class NativeLayerPanel:
 
     @staticmethod
     def _item(node: LayerTreeNodeState) -> CollectionItem:
-        subtitle = (
-            f"{node.tool_type.capitalize()} tool"
-            if node.tool_type else ""
-        )
+        is_reconstruction = node.node_type == "reconstruction"
+        if is_reconstruction:
+            subtitle = f"3D Reconstruction · {node.status}"
+        else:
+            subtitle = (
+                f"{node.tool_type.capitalize()} tool"
+                if node.tool_type else ""
+            )
         return CollectionItem(
             node.stable_id,
             node.name,
             subtitle,
-            primary_toggle=True,
+            icon="cube" if is_reconstruction else "",
+            primary_toggle=not is_reconstruction,
             primary_checked=node.visible,
             primary_toggle_label="Visible",
-            secondary_toggle=True,
+            secondary_toggle=not is_reconstruction,
             secondary_checked=node.solo,
             secondary_toggle_label="Solo",
         )
@@ -256,23 +263,24 @@ class NativeLayerPanel:
         self._context_layer_id = stable_id
         node = self._find_state_node(self._state.roots, stable_id)
         has_tool = node is not None and node.tool_type is not None
+        accepts_tool = node is not None and node.node_type == "raster"
         commands = [
             CommandData("rename", "Rename", enabled=node is not None),
             CommandData("separator.0", kind=CommandKind.Separator),
             CommandData(
                 "attach.diffusion",
                 "Attach Diffusion Tool",
-                enabled=node is not None and not has_tool,
+                enabled=accepts_tool and not has_tool,
             ),
             CommandData(
                 "attach.lama",
                 "Attach LaMa Tool",
-                enabled=node is not None and not has_tool,
+                enabled=accepts_tool and not has_tool,
             ),
             CommandData(
                 "attach.instruct",
                 "Attach Instruct Tool",
-                enabled=node is not None and not has_tool,
+                enabled=accepts_tool and not has_tool,
             ),
             CommandData(
                 "detach",

@@ -63,6 +63,8 @@ class LayerTreeNodeState:
     solo: bool
     tool_type: str | None
     children: tuple["LayerTreeNodeState", ...]
+    node_type: str = "raster"
+    status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -138,12 +140,17 @@ class LayerTreeCoordinator:
             else:
                 self.refresh()
         elif action == LayerTreeAction.FLATTEN:
-            if len(self._layer_stack.all_layers()) > 1:
+            layers = self._layer_stack.all_layers()
+            if (
+                    len(layers) > 1
+                    and all(
+                        layer.contributes_to_composite for layer in layers
+                    )):
                 self._document.execute(FlattenLayersCommand())
             else:
                 self.refresh()
         elif action == LayerTreeAction.VISIBILITY:
-            if layer is not None:
+            if layer is not None and layer.contributes_to_composite:
                 self._document.execute(SetLayerVisibilityCommand(
                     layer=layer,
                     visible=bool(intent.value),
@@ -151,7 +158,7 @@ class LayerTreeCoordinator:
             else:
                 self.refresh()
         elif action == LayerTreeAction.SOLO:
-            if layer is not None:
+            if layer is not None and layer.contributes_to_composite:
                 next_layer = (
                     None
                     if self._layer_stack.solo_layer_id == layer.id
@@ -166,7 +173,7 @@ class LayerTreeCoordinator:
             else:
                 self.refresh()
         elif action == LayerTreeAction.OPACITY:
-            if layer is not None:
+            if layer is not None and layer.contributes_to_composite:
                 opacity = max(0.0, min(float(intent.value), 1.0))
                 self._document.execute(SetLayerOpacityCommand(
                     layer=layer,
@@ -222,9 +229,16 @@ class LayerTreeCoordinator:
                 and self._layer_stack.height > 0
             ),
             can_remove=self._can_remove(active),
-            can_flatten=len(all_layers) > 1,
+            can_flatten=(
+                len(all_layers) > 1
+                and all(layer.contributes_to_composite for layer in all_layers)
+            ),
             can_rename=active is not None,
-            can_attach_tool=active is not None and active.tool is None,
+            can_attach_tool=(
+                active is not None
+                and active.accepts_pixel_edits
+                and active.tool is None
+            ),
             can_detach_tool=active is not None and active.tool is not None,
         )
 
@@ -238,6 +252,12 @@ class LayerTreeCoordinator:
             name=layer.name,
             visible=layer.visible,
             solo=layer.id == self._layer_stack.solo_layer_id,
+            node_type=layer.node_type,
+            status=(
+                layer.reconstruction_status.value
+                if layer.node_type == "reconstruction"
+                else None
+            ),
             tool_type=tool_type,
             children=tuple(self._node(child) for child in layer.children),
         )
@@ -295,6 +315,14 @@ class LayerTreeCoordinator:
         else:
             self.refresh()
             return
+        if (
+                (layer.node_type == "reconstruction" and parent is not None)
+                or (
+                    parent is not None
+                    and parent.node_type == "reconstruction"
+                )):
+            self.refresh()
+            return
         self._document.execute(MoveLayerCommand(
             layer=layer,
             new_parent=parent,
@@ -304,6 +332,7 @@ class LayerTreeCoordinator:
     def _attach_tool(self, layer: Layer | None, tool_type: str) -> None:
         if (
                 layer is None
+                or not layer.accepts_pixel_edits
                 or layer.tool is not None
                 or self._tool_factory is None):
             self.refresh()

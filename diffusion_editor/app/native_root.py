@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import partial
+import os
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
@@ -23,6 +24,12 @@ from tgfx import configure_default_shader_runtime
 
 from ..sdk_runtime import resolve_sdk
 from ..document.layer import Layer
+from ..document.change_event import DocumentChangeKind
+from ..document.commands import (
+    AddReconstructionLayerCommand,
+    PublishReconstructionResultCommand,
+)
+from ..document.reconstruction import ReconstructionLayer, ReconstructionStatus
 from ..document.tool import DiffusionTool, InstructTool, LamaTool
 from ..generation.patch_resolver import source_patch_at_center
 from .application import EditorApplication, ShutdownPhase
@@ -277,6 +284,8 @@ class NativeEditorRoot:
         self.reconstruction_engine = None
         self.reconstruction_controller = None
         self.reconstruction_viewport = None
+        self._reconstruction_job_node_id: str | None = None
+        self._presented_reconstruction_id: str | None = None
         self.automation = None
 
         try:
@@ -304,6 +313,10 @@ class NativeEditorRoot:
                     )
                 set_handler = getattr(self.view, "set_command_handler", None)
                 if callable(set_handler):
+                    set_handler(
+                        "layer.new_3d_reconstruction",
+                        self._create_reconstruction_node,
+                    )
                     set_handler("generation.3d", self._start_reconstruction)
                     set_handler(
                         "generation.3d_cancel", self._cancel_reconstruction
@@ -579,7 +592,7 @@ class NativeEditorRoot:
 
     def _create_default_layer_tool(
             self, layer: Layer, tool_type: str):
-        if self.canvas is None:
+        if self.canvas is None or not layer.accepts_pixel_edits:
             return None
         composite = self.canvas.get_composite_below(layer)
         if composite is None:
@@ -626,7 +639,17 @@ class NativeEditorRoot:
             controller.clear_pending_layer(layer)
 
     def _before_remove_layer(self, layer: Layer) -> None:
-        for removed in (layer, *layer.all_descendants()):
+        removed_layers = (layer, *layer.all_descendants())
+        removed_ids = {removed.id for removed in removed_layers}
+        if self._reconstruction_job_node_id in removed_ids:
+            controller = self.reconstruction_controller
+            if controller is not None:
+                controller.cancel()
+        if self._presented_reconstruction_id in removed_ids:
+            if self.reconstruction_viewport is not None:
+                self.reconstruction_viewport.clear_model()
+            self._presented_reconstruction_id = None
+        for removed in removed_layers:
             self.application.invalidate_generation_jobs_for_layer(
                 removed.id,
                 "target layer was deleted",
@@ -743,23 +766,59 @@ class NativeEditorRoot:
         if callable(set_state) and controller is not None and stack is not None:
             busy = controller.is_busy
             has_composite = stack.width > 0 and stack.height > 0
-            set_state("generation.3d", enabled=has_composite and not busy)
+            active = stack.active_layer
+            active_reconstruction = (
+                active if isinstance(active, ReconstructionLayer) else None
+            )
+            set_state(
+                "layer.new_3d_reconstruction",
+                enabled=has_composite and not busy,
+            )
+            set_state(
+                "generation.3d",
+                enabled=(
+                    active_reconstruction is not None
+                    and has_composite
+                    and not busy
+                ),
+            )
             set_state("generation.3d_cancel", enabled=busy)
             set_state(
                 "view.3d_light_from_camera",
                 enabled=(
-                    self.reconstruction_viewport is not None
+                    active_reconstruction is not None
+                    and self.reconstruction_viewport is not None
                     and self.reconstruction_viewport.mesh_count > 0
+                    and self._presented_reconstruction_id
+                    == active_reconstruction.id
                 ),
             )
+            self._sync_reconstruction_selection(active_reconstruction)
+
+    def _create_reconstruction_node(self) -> None:
+        stack = self.application.layer_stack
+        if stack.width <= 0 or stack.height <= 0:
+            return
+        self.application.document.execute(AddReconstructionLayerCommand(
+            stack.next_name("3D Reconstruction")
+        ))
+        node = stack.active_layer
+        if not isinstance(node, ReconstructionLayer):
+            raise RuntimeError("failed to create a reconstruction node")
+        self._presented_reconstruction_id = None
+        self._sync_reconstruction_selection(node)
+        self.application.set_status(f"Created: {node.name}")
 
     def _start_reconstruction(self) -> None:
         controller = self.reconstruction_controller
         if controller is None or controller.is_busy:
             return
         stack = self.application.layer_stack
-        if stack.width <= 0 or stack.height <= 0:
-            self.application.set_status("Open or draw an image before 3D generation")
+        node = stack.active_layer
+        if not isinstance(node, ReconstructionLayer):
+            self.application.set_status(
+                "Select a 3D Reconstruction object before generation"
+            )
             return
         try:
             self._ensure_reconstruction_viewport()
@@ -767,6 +826,10 @@ class NativeEditorRoot:
             image = Image.fromarray(composite, mode="RGBA")
             event = controller.start(image, seed=42)
             if event.status:
+                self._reconstruction_job_node_id = node.id
+                self._set_reconstruction_status(
+                    node, ReconstructionStatus.GENERATING
+                )
                 self.application.set_status(event.status)
         except Exception as exc:
             log.exception("Failed to start 3D reconstruction")
@@ -779,7 +842,12 @@ class NativeEditorRoot:
 
     def _set_3d_light_from_camera(self) -> None:
         viewport = self.reconstruction_viewport
-        if viewport is None or viewport.mesh_count == 0:
+        active = self.application.layer_stack.active_layer
+        if (
+                viewport is None
+                or viewport.mesh_count == 0
+                or not isinstance(active, ReconstructionLayer)
+                or self._presented_reconstruction_id != active.id):
             return
         viewport.light_from_camera()
         self.application.set_status("3D light set from current camera")
@@ -791,22 +859,70 @@ class NativeEditorRoot:
         event = controller.poll()
         if event is None:
             return
+        node_id, self._reconstruction_job_node_id = (
+            self._reconstruction_job_node_id, None
+        )
+        node = self.application.layer_stack.find_layer_by_id(node_id or "")
+        if not isinstance(node, ReconstructionLayer):
+            self.application.set_status("Ignored 3D result for a deleted object")
+            return
         if event.result is not None:
             try:
                 viewport = self._ensure_reconstruction_viewport()
                 vertices, triangles, meshes = viewport.load_glb(
                     event.result.glb_path
                 )
+                self.application.document.execute(
+                    PublishReconstructionResultCommand(
+                        node,
+                        event.result.glb_path,
+                        vertices,
+                        triangles,
+                        meshes,
+                    )
+                )
+                self._presented_reconstruction_id = node.id
                 self.application.set_status(
                     "3D model ready: "
                     f"{vertices:,} vertices, {triangles:,} triangles, "
                     f"{meshes} mesh(es)"
                 )
             except Exception as exc:
+                self._set_reconstruction_status(
+                    node, ReconstructionStatus.FAILED
+                )
                 log.exception("Failed to display generated GLB")
                 self.application.set_status(f"3D viewport error: {exc}")
         elif event.status:
+            if event.error:
+                self._set_reconstruction_status(
+                    node, ReconstructionStatus.FAILED
+                )
             self.application.set_status(event.status)
+
+    def _sync_reconstruction_selection(
+            self, node: ReconstructionLayer | None) -> None:
+        if node is None or self._presented_reconstruction_id == node.id:
+            return
+        viewport = self._ensure_reconstruction_viewport()
+        if node.glb_path and os.path.isfile(node.glb_path):
+            viewport.load_glb(node.glb_path)
+        else:
+            viewport.clear_model()
+        self._presented_reconstruction_id = node.id
+
+    def _set_reconstruction_status(
+            self,
+            node: ReconstructionLayer,
+            status: ReconstructionStatus) -> None:
+        if node.reconstruction_status == status:
+            return
+        node.reconstruction_status = status
+        self.application.layer_stack.publish_change(
+            DocumentChangeKind.METADATA,
+            layers=(node,),
+            operation="update 3D reconstruction status",
+        )
 
     def _ensure_reconstruction_viewport(self) -> NativeReconstructionViewport:
         if self.reconstruction_viewport is not None:

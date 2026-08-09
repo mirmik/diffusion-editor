@@ -22,6 +22,10 @@ def new_layer_id() -> str:
 
 
 class Layer:
+    node_type = "raster"
+    contributes_to_composite = True
+    accepts_pixel_edits = True
+
     def __init__(self, name: str, width: int, height: int,
                  image: np.ndarray = None, tile_size: int = 256,
                  x: int = 0, y: int = 0, layer_id: str | None = None):
@@ -254,6 +258,11 @@ def _layer_from_dict(d: dict, zf: zipfile.ZipFile, tile_size: int = 256) -> Laye
     and the legacy format (type=diffusion/lama/instruct with tool data inline).
     """
     layer_type = d.get("type", "layer")
+
+    if layer_type == "reconstruction":
+        from .reconstruction import ReconstructionLayer
+
+        return ReconstructionLayer.from_dict(d, zf, tile_size=tile_size)
 
     if layer_type in ("diffusion", "lama", "instruct"):
         # Legacy format: tool data is inline in the layer dict.

@@ -284,6 +284,12 @@ class NativeReconstructionViewport:
         self._light_direction = self._camera.direction_from_target()
         self.invalidate()
 
+    def clear_model(self) -> None:
+        self._require_open()
+        self._meshes.clear()
+        self._glb_document = None
+        self.invalidate()
+
     def load_glb(self, path: str) -> tuple[int, int, int]:
         self._require_open()
         from ..native_glb import NativeGLBDocument

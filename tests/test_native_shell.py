@@ -33,6 +33,7 @@ EXPECTED_COMMANDS = (
     "selection.clear",
     "selection.invert",
     "layer.new",
+    "layer.new_3d_reconstruction",
     "layer.remove",
     "layer.flatten",
     "layer.detect",

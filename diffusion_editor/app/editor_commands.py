@@ -53,6 +53,9 @@ class EditorCommandCoordinator:
     def refresh(self) -> None:
         canvas_ready = self._stack.width > 0 and self._stack.height > 0
         active = self._stack.active_layer
+        active_raster = (
+            active is not None and active.accepts_pixel_edits
+        )
         selection_bbox = self._stack.selection.bbox() if canvas_ready else None
         layers = self._stack.all_layers()
         can_remove = False
@@ -62,7 +65,7 @@ class EditorCommandCoordinator:
         states = {
             "edit.undo": self._application.history.can_undo,
             "edit.redo": self._application.history.can_redo,
-            "edit.copy": active is not None and selection_bbox is not None,
+            "edit.copy": active_raster and selection_bbox is not None,
             "edit.copy_visible": canvas_ready and selection_bbox is not None,
             "edit.paste": (
                 canvas_ready and self._application.clipboard is not None
@@ -74,7 +77,10 @@ class EditorCommandCoordinator:
             "selection.invert": canvas_ready,
             "layer.new": canvas_ready,
             "layer.remove": can_remove,
-            "layer.flatten": len(layers) > 1,
+            "layer.flatten": (
+                len(layers) > 1
+                and all(layer.contributes_to_composite for layer in layers)
+            ),
             "view.fit": canvas_ready and self._fit_in_view is not None,
         }
         for command_id, enabled in states.items():
@@ -142,7 +148,7 @@ class EditorCommandCoordinator:
         self._before_mutation()
         layer = self._stack.active_layer
         bbox = self._stack.selection.bbox()
-        if layer is None or bbox is None:
+        if layer is None or not layer.accepts_pixel_edits or bbox is None:
             self._application.set_status("Copy: nothing selected")
             self.refresh()
             return

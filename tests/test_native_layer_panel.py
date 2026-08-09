@@ -31,9 +31,35 @@ def _node(
         children=(),
         visible=True,
         solo=False,
-        tool_type=None):
+        tool_type=None,
+        node_type="raster",
+        status=None):
     return LayerTreeNodeState(
-        stable_id, name, visible, solo, tool_type, tuple(children))
+        stable_id,
+        name,
+        visible,
+        solo,
+        tool_type,
+        tuple(children),
+        node_type,
+        status,
+    )
+
+
+def test_native_layer_panel_projects_reconstruction_identity():
+    node = _node(
+        "reconstruction",
+        "Character reconstruction",
+        node_type="reconstruction",
+        status="ready",
+    )
+
+    item = NativeLayerPanel._item(node)
+
+    assert item.icon == "cube"
+    assert item.subtitle == "3D Reconstruction · ready"
+    assert item.primary_toggle is False
+    assert item.secondary_toggle is False
 
 
 def _state(*roots, active_id="child", opacity=0.6):

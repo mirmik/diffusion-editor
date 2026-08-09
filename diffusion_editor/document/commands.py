@@ -10,6 +10,7 @@ import numpy as np
 from PIL import Image, ImageFilter
 
 from .layer import Layer
+from .reconstruction import ReconstructionLayer, ReconstructionStatus
 from .change_event import DocumentChangeKind
 from .tool import DiffusionTool, InstructTool, Tool
 from .layer_stack import LayerStack
@@ -165,6 +166,62 @@ class AddLayerCommand:
             layer_stack.move_layer(layer, parent, index)
 
         return CommandDelta(undo, redo, 128)
+
+
+@dataclass(frozen=True)
+class AddReconstructionLayerCommand:
+    name: str
+    label: str = "New 3D Reconstruction"
+
+    def apply(self, layer_stack: LayerStack) -> None:
+        layer_stack.insert_layer(ReconstructionLayer(self.name))
+
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
+        if layer_stack.width == 0 or layer_stack.height == 0:
+            return None
+        old_active_id = (
+            layer_stack.active_layer.id
+            if layer_stack.active_layer is not None else None
+        )
+        layer = ReconstructionLayer(self.name)
+        layer_stack.insert_layer(layer)
+        parent, index = _location(layer_stack, layer)
+
+        def undo() -> None:
+            layer_stack.remove_layer(layer)
+            _restore_active(layer_stack, old_active_id)
+
+        def redo() -> None:
+            layer_stack.insert_layer(layer)
+            layer_stack.move_layer(layer, parent, index)
+
+        return CommandDelta(undo, redo, 256)
+
+
+@dataclass(frozen=True)
+class PublishReconstructionResultCommand:
+    layer: ReconstructionLayer
+    glb_path: str
+    vertex_count: int
+    triangle_count: int
+    mesh_count: int
+    label: str = "Publish 3D Reconstruction"
+
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
+        if layer_stack.find_layer_by_id(self.layer.id) is not self.layer:
+            raise ValueError("reconstruction node does not belong to the layer stack")
+        return _attribute_delta(
+            layer_stack,
+            self.layer,
+            self.layer,
+            {
+                "reconstruction_status": ReconstructionStatus.READY,
+                "glb_path": str(self.glb_path),
+                "vertex_count": int(self.vertex_count),
+                "triangle_count": int(self.triangle_count),
+                "mesh_count": int(self.mesh_count),
+            },
+        )
 
 
 @dataclass(frozen=True)

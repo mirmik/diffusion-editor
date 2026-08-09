@@ -118,6 +118,13 @@ be passed directly:
 The production host uses real settings and inference engines; it is distinct
 from the deterministic fake-engine harness in `scripts/smoke_native_root.py`.
 
+The image-to-3D prototype represents each result as a non-raster
+**3D Reconstruction** object in the layer tree. Create one with the toolbar
+button or **Layer → New 3D Reconstruction**, then select it and use
+**Generate 3D Model**. The current vertical slice captures the full visible
+composite; project-owned GLB persistence and the below-object source boundary
+remain follow-up work.
+
 For live development automation, enable the local Editor MCP server in
 **Edit → Settings** and restart the editor. Termin's existing MCP/CLI helper
 can then execute Python on the running editor thread. `TERMIN_EDITOR_MCP` is

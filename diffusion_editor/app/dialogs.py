@@ -408,7 +408,7 @@ class ApplicationDialogCoordinator:
         if params is None or self._closed:
             return
         layer = self._application.layer_stack.active_layer
-        if layer is None:
+        if layer is None or not layer.accepts_pixel_edits:
             self._application.set_status("Grounding: no active layer")
             return
         event = self._application.grounding_controller.start_detection(
