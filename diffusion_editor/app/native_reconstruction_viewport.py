@@ -113,7 +113,8 @@ class _OrbitCamera:
         return flat.reshape((4, 4), order="F")
 
     def _reset_orientation(self) -> None:
-        # Pixal3D/glTF's front (-Z) becomes +Y after conversion to Z-up.
+        # Verified against generated Pixal3D subjects: after the Z-up export
+        # conversion their visible front is viewed from +Y.
         self._camera.azimuth = self.FRONT_AZIMUTH
         self._camera.elevation = self.FRONT_ELEVATION
 

@@ -11,6 +11,12 @@ from termin.gui_native import (
 )
 
 from diffusion_editor.app.native_shell import NativeEditorView
+from diffusion_editor.generation.types import (
+    RECONSTRUCTION_STAGES,
+    ReconstructionParameters,
+    ReconstructionStage,
+    ReconstructionStageStatus,
+)
 
 
 EXPECTED_COMMANDS = (
@@ -225,6 +231,191 @@ def test_native_left_panel_scrolls_preferred_sections_without_overlap():
         assert controls_bounds.y + controls_bounds.height <= generation_bounds.y
         assert view.left_scroll.content_size.height >= 1004.0
         assert snapshot["diffusion-editor.left-panel"]["bounds"].height == 712.0
+    finally:
+        view.close()
+        tc_ui_document_destroy(document)
+
+
+def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar():
+    document = tc_ui_document_create()
+    activated = []
+    view = NativeEditorView(
+        document,
+        lambda: None,
+        lambda _title: None,
+        {
+            "generation.3d": lambda: activated.append("generate"),
+        },
+    )
+
+    class MountedView:
+        def __init__(self, widget):
+            self.widget = widget
+
+    canvas = document.create_vstack("TestCanvas")
+    canvas.stable_id = "test.canvas"
+    viewport = document.create_vstack("TestReconstructionViewport")
+    viewport.stable_id = "test.reconstruction-viewport"
+    try:
+        view.mount_canvas(MountedView(canvas))
+        view.mount_reconstruction_viewport(MountedView(viewport))
+        global_ids = {
+            command.data.stable_id
+            for command in view.toolbar_model.commands
+        }
+        context_ids = {
+            command.data.stable_id
+            for command in view.reconstruction_toolbar_model.commands
+        }
+        assert "generation.3d" not in global_ids
+        assert "view.3d_light_from_camera" not in global_ids
+        assert {
+            "generation.3d",
+            "generation.3d_cancel",
+            "view.3d_light_from_camera",
+        } <= context_ids
+        selected_stages = []
+        view.set_reconstruction_stage_handler(selected_stages.append)
+        view._activate_reconstruction_stage(ReconstructionStage.HR_COORDINATES)
+        assert selected_stages == [ReconstructionStage.HR_COORDINATES]
+        changed_parameters = []
+        view.set_reconstruction_parameter_handler(
+            lambda key, value: changed_parameters.append((key, value))
+        )
+        view._change_reconstruction_parameter("steps", 18.0)
+        assert changed_parameters == [("steps", 18)]
+        parameters = ReconstructionParameters(
+            seed=123,
+            steps=18,
+            resolution=1280,
+            manual_fov_degrees=45.0,
+            decimation_target=350_000,
+            texture_size=4096,
+            low_vram=False,
+        )
+        view.update_reconstruction_parameters(parameters, busy=True)
+        assert view.reconstruction_parameter_controls["seed"].value == 123.0
+        assert view.reconstruction_parameter_controls[
+            "resolution"
+        ].selected_index == 1
+        assert all(
+            not control.widget.enabled
+            for control in view.reconstruction_parameter_controls.values()
+        )
+        statuses = {
+            stage: ReconstructionStageStatus.PENDING
+            for stage in RECONSTRUCTION_STAGES
+        }
+        statuses[ReconstructionStage.SPARSE_OCCUPANCY] = (
+            ReconstructionStageStatus.READY
+        )
+        view.update_reconstruction_stages(
+            statuses,
+            {ReconstructionStage.SPARSE_OCCUPANCY: (12, 12)},
+            ReconstructionStage.HR_COORDINATES,
+            ReconstructionStage.SPARSE_OCCUPANCY,
+        )
+        assert view.reconstruction_stage_checks[
+            ReconstructionStage.SPARSE_OCCUPANCY
+        ].checked is True
+        document.layout_roots(Rect(0.0, 0.0, 1000.0, 700.0))
+        snapshot = _snapshot_by_id(document)
+        host = snapshot["diffusion-editor.canvas-host"]["bounds"]
+        left_panel = snapshot["diffusion-editor.left-panel"]["bounds"]
+        canvas_bounds = snapshot["test.canvas"]["bounds"]
+        assert (canvas_bounds.x, canvas_bounds.width) == (host.x, host.width)
+        assert snapshot[
+            "diffusion-editor.reconstruction.panel"
+        ]["parent"] is None
+        assert view.reconstruction_mode is False
+
+        view.set_reconstruction_context(True, "generating")
+        document.layout_roots(Rect(0.0, 0.0, 1000.0, 700.0))
+        snapshot = _snapshot_by_id(document)
+        canvas_bounds = snapshot["test.canvas"]["bounds"]
+        viewport_bounds = snapshot["test.reconstruction-viewport"]["bounds"]
+        toolbar = snapshot[
+            "diffusion-editor.reconstruction.toolbar"
+        ]["bounds"]
+        reconstruction_panel = snapshot[
+            "diffusion-editor.reconstruction.panel"
+        ]["bounds"]
+        assert snapshot[
+            "diffusion-editor.reconstruction.panel"
+        ]["parent"] is not None
+        assert snapshot["diffusion-editor.left-panel"]["parent"] is None
+        assert canvas_bounds.width < host.width
+        assert viewport_bounds.width == pytest.approx(canvas_bounds.width)
+        assert (canvas_bounds.y, canvas_bounds.height) == (
+            host.y,
+            host.height,
+        )
+        assert (
+            reconstruction_panel.x,
+            reconstruction_panel.y,
+            reconstruction_panel.width,
+            reconstruction_panel.height,
+        ) == (
+            left_panel.x,
+            left_panel.y,
+            left_panel.width,
+            left_panel.height,
+        )
+        assert toolbar.height >= 3 * 20.0
+        for command_id in (
+                "generation-3d",
+                "generation-3d_cancel",
+                "view-3d_light_from_camera"):
+            button = snapshot[
+                f"diffusion-editor.reconstruction.{command_id}"
+            ]["bounds"]
+            assert button.x >= reconstruction_panel.x
+            assert button.x + button.width <= (
+                reconstruction_panel.x + reconstruction_panel.width
+            )
+        assert len(view.reconstruction_stage_buttons) == len(
+            RECONSTRUCTION_STAGES
+        )
+        assert len(view.reconstruction_stage_checks) == len(
+            RECONSTRUCTION_STAGES
+        )
+        for stage in RECONSTRUCTION_STAGES:
+            assert snapshot[
+                f"diffusion-editor.reconstruction.stage.{stage.value}"
+            ]["parent"] is not None
+        for key in (
+            "seed",
+            "steps",
+            "resolution",
+            "manual_fov_degrees",
+            "decimation_target",
+            "texture_size",
+            "low_vram",
+        ):
+            assert snapshot[
+                f"diffusion-editor.reconstruction.parameter.{key}"
+            ]["parent"] is not None
+            assert snapshot[
+                f"diffusion-editor.reconstruction.stage-check.{stage.value}"
+            ]["parent"] is not None
+        assert view.reconstruction_stage_buttons[
+            ReconstructionStage.LR_SHAPE_FLOW
+        ].widget.enabled is False
+        assert view.reconstruction_status.text == "Generating"
+        assert view.activate_command("generation.3d")
+        assert activated == ["generate"]
+
+        view.set_reconstruction_context(False)
+        document.layout_roots(Rect(0.0, 0.0, 1000.0, 700.0))
+        snapshot = _snapshot_by_id(document)
+        canvas_bounds = snapshot["test.canvas"]["bounds"]
+        host = snapshot["diffusion-editor.canvas-host"]["bounds"]
+        assert (canvas_bounds.x, canvas_bounds.width) == (host.x, host.width)
+        assert snapshot["diffusion-editor.left-panel"]["parent"] is not None
+        assert snapshot[
+            "diffusion-editor.reconstruction.panel"
+        ]["parent"] is None
+        assert view.reconstruction_mode is False
     finally:
         view.close()
         tc_ui_document_destroy(document)

@@ -18,7 +18,14 @@ from diffusion_editor.document.reconstruction import (
 from diffusion_editor.generation.reconstruction_controller import (
     ReconstructionControllerEvent,
 )
-from diffusion_editor.generation.types import ReconstructionResult
+from diffusion_editor.generation.types import (
+    ReconstructionParameters,
+    ReconstructionResult,
+    ReconstructionStage,
+    ReconstructionStageArtifact,
+    ReconstructionStageEvent,
+    ReconstructionStageStatus,
+)
 
 
 def _document():
@@ -63,6 +70,15 @@ def test_reconstruction_result_is_bound_to_its_node_and_roundtrips(tmp_path) -> 
     document.execute(AddReconstructionLayerCommand("Character reconstruction"))
     node = stack.active_layer
     assert isinstance(node, ReconstructionLayer)
+    node.generation_parameters = ReconstructionParameters(
+        seed=99,
+        steps=20,
+        resolution=1280,
+        manual_fov_degrees=50.0,
+        decimation_target=300_000,
+        texture_size=4096,
+        low_vram=False,
+    )
     glb_path = tmp_path / "character.glb"
     glb_path.write_bytes(b"glTF")
 
@@ -85,6 +101,45 @@ def test_reconstruction_result_is_bound_to_its_node_and_roundtrips(tmp_path) -> 
     assert isinstance(restored, ReconstructionLayer)
     assert restored.reconstruction_status == ReconstructionStatus.READY
     assert restored.glb_path == str(glb_path)
+    assert restored.generation_parameters == node.generation_parameters
+    assert restored.target_stage is ReconstructionStage.FINAL_MESH
+    assert restored.selected_preview_stage is ReconstructionStage.FINAL_MESH
+    assert restored.stage_statuses[ReconstructionStage.FINAL_MESH] is (
+        ReconstructionStageStatus.READY
+    )
+    assert restored.stage_artifacts[
+        ReconstructionStage.FINAL_MESH
+    ].path == str(glb_path)
+
+
+def test_reconstruction_node_tracks_target_progress_and_preview(tmp_path) -> None:
+    node = ReconstructionLayer("Staged")
+    node.target_stage = ReconstructionStage.HR_COORDINATES
+    node.begin_staged_generation()
+
+    assert node.stage_statuses[ReconstructionStage.HR_COORDINATES] is (
+        ReconstructionStageStatus.PENDING
+    )
+    assert node.stage_statuses[ReconstructionStage.HR_SHAPE_FLOW] is (
+        ReconstructionStageStatus.SKIPPED
+    )
+
+    preview = ReconstructionStageArtifact(
+        ReconstructionStage.SPARSE_OCCUPANCY,
+        str(tmp_path / "sparse.glb"),
+        "mesh",
+    )
+    node.apply_stage_event(ReconstructionStageEvent(
+        ReconstructionStage.SPARSE_OCCUPANCY,
+        ReconstructionStageStatus.READY,
+        12,
+        12,
+        preview,
+    ))
+
+    assert node.selected_preview_stage is ReconstructionStage.SPARSE_OCCUPANCY
+    assert node.stage_progress[ReconstructionStage.SPARSE_OCCUPANCY] == (12, 12)
+    assert node.stage_artifacts[ReconstructionStage.SPARSE_OCCUPANCY] == preview
 
 
 def test_root_binds_late_worker_result_to_launching_node(tmp_path) -> None:
@@ -107,9 +162,10 @@ def test_root_binds_late_worker_result_to_launching_node(tmp_path) -> None:
         is_busy = False
         event = None
 
-        def start(self, image, *, seed):
+        def start(self, image, *, parameters, target_stage):
             assert image.size == (10, 8)
-            assert seed == 42
+            assert parameters.seed == 42
+            assert target_stage.value == "final_mesh"
             return ReconstructionControllerEvent(status="Generating")
 
         def poll(self):

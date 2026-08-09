@@ -121,9 +121,20 @@ from the deterministic fake-engine harness in `scripts/smoke_native_root.py`.
 The image-to-3D prototype represents each result as a non-raster
 **3D Reconstruction** object in the layer tree. Create one with the toolbar
 button or **Layer → New 3D Reconstruction**, then select it and use
-**Generate 3D Model**. The current vertical slice captures the full visible
-composite; project-owned GLB persistence and the below-object source boundary
-remain follow-up work.
+**Generate 3D Model** in its contextual left panel, which replaces the usual
+brush and generation controls. Selecting a raster layer restores those controls
+and the full-width Canvas; selecting a reconstruction restores its left panel
+and Canvas/3D workspace. The reconstruction panel lists the staged Pixal3D
+pipeline, reports sampling progress, and lets a ready stage be previewed or a
+pending stage be selected as the next generation target. Coordinate stages are
+published as lightweight GLB geometry previews; shape and final stages publish
+mesh previews. Per-reconstruction generation controls cover seed, sampling
+steps, HR resolution, automatic or manual camera FOV, final mesh face budget,
+texture size, and low-VRAM execution. Their values are saved with the layer and
+snapshotted when a job starts. The current vertical slice captures the full
+visible composite;
+project-owned artifact persistence, checkpoint resume, and the below-object
+source boundary remain follow-up work.
 
 For live development automation, enable the local Editor MCP server in
 **Edit → Settings** and restart the editor. Termin's existing MCP/CLI helper

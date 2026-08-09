@@ -7,6 +7,7 @@ from tcbase import log
 from ..generation.types import (
     ReconstructionRequest,
     ReconstructionResult,
+    ReconstructionStageEvent,
 )
 from ..workers.pixal3d_process import Pixal3DProcessClient
 from .threaded_lifecycle import EngineTaskQueue
@@ -29,21 +30,42 @@ class ReconstructionEngine:
         *,
         job_id: str | None = None,
     ) -> bool:
+        def emit(event: ReconstructionStageEvent) -> None:
+            from ..generation.types import EnginePollEvent
+
+            self._tasks.emit(EnginePollEvent(
+                task_type="reconstruction",
+                meta=event,
+                job_id=job_id,
+            ))
+
         return self._tasks.submit(
             "reconstruction",
-            lambda cancel: self._run(request, cancel),
+            lambda cancel: self._run(request, cancel, emit),
             job_id=job_id,
             name="pixal3d-reconstruction",
             on_error=lambda _exc: log.exception("Pixal3D reconstruction failed"),
         )
 
-    def _run(self, request: ReconstructionRequest, cancel) -> ReconstructionResult:
+    def _run(
+        self,
+        request: ReconstructionRequest,
+        cancel,
+        emit,
+    ) -> ReconstructionResult:
         glb_path, source_path = self._client.generate(
-            request.image, request.seed, cancel
+            request.image,
+            request.parameters.seed,
+            cancel,
+            parameters=request.parameters,
+            target_stage=request.target_stage,
+            on_event=emit,
         )
         return ReconstructionResult(
             glb_path=str(glb_path),
             source_path=str(source_path),
+            completed_stage=request.target_stage,
+            artifacts=tuple(self._client.artifacts),
         )
 
     def poll_event(self):

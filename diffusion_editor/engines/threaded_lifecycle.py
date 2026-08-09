@@ -185,6 +185,10 @@ class EngineTaskQueue:
     def poll_event(self) -> EnginePollEvent | None:
         return self._worker.poll_event()
 
+    def emit(self, event: EnginePollEvent) -> None:
+        """Publish a non-terminal event from the active worker operation."""
+        self._worker.emit(event)
+
     def cancel(self) -> bool:
         return self._worker.cancel()
 

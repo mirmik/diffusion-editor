@@ -3,18 +3,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import replace
 import uuid
 
 from PIL import Image
 
 from ..engines.reconstruction_engine import ReconstructionEngine
-from .types import ReconstructionRequest, ReconstructionResult
+from .types import (
+    ReconstructionRequest,
+    ReconstructionParameters,
+    ReconstructionResult,
+    ReconstructionStage,
+    ReconstructionStageEvent,
+)
 
 
 @dataclass(frozen=True)
 class ReconstructionControllerEvent:
     status: str | None = None
     result: ReconstructionResult | None = None
+    stage_event: ReconstructionStageEvent | None = None
     error: str | None = None
 
 
@@ -27,11 +35,25 @@ class ReconstructionController:
     def is_busy(self) -> bool:
         return self._active_job_id is not None or self._engine.is_busy
 
-    def start(self, image: Image.Image, *, seed: int = 42) -> ReconstructionControllerEvent:
+    def start(
+        self,
+        image: Image.Image,
+        *,
+        seed: int | None = None,
+        parameters: ReconstructionParameters | None = None,
+        target_stage: ReconstructionStage = ReconstructionStage.FINAL_MESH,
+    ) -> ReconstructionControllerEvent:
         if self.is_busy:
             return ReconstructionControllerEvent()
         job_id = f"reconstruction_{uuid.uuid4().hex}"
-        request = ReconstructionRequest(image=image.copy(), seed=int(seed))
+        snapshot = parameters or ReconstructionParameters()
+        if seed is not None:
+            snapshot = replace(snapshot, seed=int(seed))
+        request = ReconstructionRequest(
+            image=image.copy(),
+            parameters=snapshot,
+            target_stage=target_stage,
+        )
         if not self._engine.submit_request(request, job_id=job_id):
             return ReconstructionControllerEvent()
         self._active_job_id = job_id
@@ -47,6 +69,8 @@ class ReconstructionController:
         expected = self._active_job_id
         if expected is None or event.job_id != expected:
             return ReconstructionControllerEvent(status="Ignored stale 3D result")
+        if isinstance(event.meta, ReconstructionStageEvent):
+            return ReconstructionControllerEvent(stage_event=event.meta)
         self._active_job_id = None
         if event.error is not None:
             return ReconstructionControllerEvent(

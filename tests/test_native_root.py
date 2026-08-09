@@ -26,6 +26,7 @@ from diffusion_editor.app.native_shell import COMMAND_SPECS
 from diffusion_editor.app.presentation import ViewPorts
 from diffusion_editor.canvas.brush import BrushToolMode
 from diffusion_editor.document.reconstruction import ReconstructionLayer
+from diffusion_editor.generation.types import ReconstructionStage
 
 
 class _MemorySettings:
@@ -636,6 +637,7 @@ def test_offscreen_root_creates_selected_reconstruction_object(
         viewport = ViewportStub()
         root._ensure_reconstruction_viewport = lambda: viewport
         root.tick()
+        background = application.layer_stack.active_layer
         before = application.layer_stack.composite()
 
         assert root.view.activate_command("layer.new_3d_reconstruction")
@@ -643,6 +645,14 @@ def test_offscreen_root_creates_selected_reconstruction_object(
 
         node = application.layer_stack.active_layer
         assert isinstance(node, ReconstructionLayer)
+        root.view._change_reconstruction_parameter("steps", 20.0)
+        root.view._change_reconstruction_parameter("resolution", 1280)
+        assert node.generation_parameters.steps == 20
+        assert node.generation_parameters.resolution == 1280
+        root.view._activate_reconstruction_stage(
+            ReconstructionStage.HR_COORDINATES
+        )
+        assert node.target_stage is ReconstructionStage.HR_COORDINATES
         assert root._presented_reconstruction_id == node.id
         assert root.layer_tree_coordinator.state.active_id == node.id
         assert root.layer_tree_coordinator.state.roots[0].node_type == (
@@ -650,3 +660,11 @@ def test_offscreen_root_creates_selected_reconstruction_object(
         )
         assert np.array_equal(application.layer_stack.composite(), before)
         assert application.status_text == f"Created: {node.name}"
+
+        application.layer_stack.active_layer = background
+        root.tick()
+        assert root.view.reconstruction_mode is False
+
+        application.layer_stack.active_layer = node
+        root.tick()
+        assert root.view.reconstruction_mode is True

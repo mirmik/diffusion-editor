@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 import os
 from pathlib import Path
@@ -32,6 +32,10 @@ from ..document.commands import (
 from ..document.reconstruction import ReconstructionLayer, ReconstructionStatus
 from ..document.tool import DiffusionTool, InstructTool, LamaTool
 from ..generation.patch_resolver import source_patch_at_center
+from ..generation.types import (
+    ReconstructionStage,
+    ReconstructionStageStatus,
+)
 from .application import EditorApplication, ShutdownPhase
 from .canvas_controls import CanvasControlsCoordinator
 from .canvas_status import CanvasStatusCoordinator
@@ -325,6 +329,16 @@ class NativeEditorRoot:
                         "view.3d_light_from_camera",
                         self._set_3d_light_from_camera,
                     )
+                set_stage_handler = getattr(
+                    self.view, "set_reconstruction_stage_handler", None
+                )
+                if callable(set_stage_handler):
+                    set_stage_handler(self._select_reconstruction_stage)
+                set_parameter_handler = getattr(
+                    self.view, "set_reconstruction_parameter_handler", None
+                )
+                if callable(set_parameter_handler):
+                    set_parameter_handler(self._set_reconstruction_parameter)
             mount_canvas = getattr(self.view, "mount_canvas", None)
             graphics = getattr(composition, "graphics", None)
             if mount_canvas is not None and graphics is not None:
@@ -824,7 +838,13 @@ class NativeEditorRoot:
             self._ensure_reconstruction_viewport()
             composite = stack.composite()
             image = Image.fromarray(composite, mode="RGBA")
-            event = controller.start(image, seed=42)
+            node.begin_staged_generation()
+            self._refresh_reconstruction_panel(node)
+            event = controller.start(
+                image,
+                parameters=node.generation_parameters,
+                target_stage=node.target_stage,
+            )
             if event.status:
                 self._reconstruction_job_node_id = node.id
                 self._set_reconstruction_status(
@@ -859,14 +879,36 @@ class NativeEditorRoot:
         event = controller.poll()
         if event is None:
             return
-        node_id, self._reconstruction_job_node_id = (
-            self._reconstruction_job_node_id, None
-        )
+        node_id = self._reconstruction_job_node_id
         node = self.application.layer_stack.find_layer_by_id(node_id or "")
         if not isinstance(node, ReconstructionLayer):
             self.application.set_status("Ignored 3D result for a deleted object")
             return
+        if event.stage_event is not None:
+            node.apply_stage_event(event.stage_event)
+            self._refresh_reconstruction_panel(node)
+            artifact = event.stage_event.artifact
+            if (
+                artifact is not None
+                and artifact.preview_kind == "mesh"
+                and self.application.layer_stack.active_layer is node
+            ):
+                try:
+                    self._ensure_reconstruction_viewport().load_glb(artifact.path)
+                    self._presented_reconstruction_id = node.id
+                except Exception:
+                    log.exception("Failed to display reconstruction stage preview")
+            return
+        self._reconstruction_job_node_id = None
         if event.result is not None:
+            if event.result.completed_stage is not ReconstructionStage.FINAL_MESH:
+                self._set_reconstruction_status(node, ReconstructionStatus.READY)
+                self._refresh_reconstruction_panel(node)
+                self.application.set_status(
+                    "3D generation stopped after "
+                    f"{event.result.completed_stage.value.replace('_', ' ')}"
+                )
+                return
             try:
                 viewport = self._ensure_reconstruction_viewport()
                 vertices, triangles, meshes = viewport.load_glb(
@@ -895,17 +937,92 @@ class NativeEditorRoot:
                 self.application.set_status(f"3D viewport error: {exc}")
         elif event.status:
             if event.error:
+                for stage, stage_status in node.stage_statuses.items():
+                    if stage_status is ReconstructionStageStatus.RUNNING:
+                        node.stage_statuses[stage] = (
+                            ReconstructionStageStatus.FAILED
+                        )
                 self._set_reconstruction_status(
                     node, ReconstructionStatus.FAILED
                 )
+                self._refresh_reconstruction_panel(node)
             self.application.set_status(event.status)
+
+    def _select_reconstruction_stage(self, stage: ReconstructionStage) -> None:
+        node = self.application.layer_stack.active_layer
+        if not isinstance(node, ReconstructionLayer):
+            return
+        artifact = node.stage_artifacts.get(stage)
+        if artifact is not None:
+            node.selected_preview_stage = stage
+            if artifact.preview_kind == "mesh" and os.path.isfile(artifact.path):
+                self._ensure_reconstruction_viewport().load_glb(artifact.path)
+                self._presented_reconstruction_id = node.id
+        else:
+            node.target_stage = stage
+        self._refresh_reconstruction_panel(node)
+
+    def _set_reconstruction_parameter(self, key: str, value) -> None:
+        node = self.application.layer_stack.active_layer
+        controller = self.reconstruction_controller
+        if (
+            not isinstance(node, ReconstructionLayer)
+            or (controller is not None and controller.is_busy)
+        ):
+            return
+        try:
+            node.generation_parameters = replace(
+                node.generation_parameters, **{key: value}
+            )
+        except (TypeError, ValueError):
+            return
+        self._refresh_reconstruction_panel(node)
+
+    def _refresh_reconstruction_panel(self, node: ReconstructionLayer) -> None:
+        update = getattr(
+            getattr(self, "view", None),
+            "update_reconstruction_stages",
+            None,
+        )
+        if callable(update):
+            busy = bool(
+                self.reconstruction_controller
+                and self.reconstruction_controller.is_busy
+            )
+            update(
+                node.stage_statuses,
+                node.stage_progress,
+                node.target_stage,
+                node.selected_preview_stage,
+                busy=busy,
+            )
+            update_parameters = getattr(
+                self.view, "update_reconstruction_parameters", None
+            )
+            if callable(update_parameters):
+                update_parameters(node.generation_parameters, busy=busy)
 
     def _sync_reconstruction_selection(
             self, node: ReconstructionLayer | None) -> None:
-        if node is None or self._presented_reconstruction_id == node.id:
+        set_context = getattr(self.view, "set_reconstruction_context", None)
+        if node is None:
+            if callable(set_context):
+                set_context(False)
             return
         viewport = self._ensure_reconstruction_viewport()
-        if node.glb_path and os.path.isfile(node.glb_path):
+        if callable(set_context):
+            set_context(True, node.reconstruction_status.value)
+        self._refresh_reconstruction_panel(node)
+        if self._presented_reconstruction_id == node.id:
+            return
+        artifact = node.stage_artifacts.get(node.selected_preview_stage)
+        if (
+            artifact is not None
+            and artifact.preview_kind == "mesh"
+            and os.path.isfile(artifact.path)
+        ):
+            viewport.load_glb(artifact.path)
+        elif node.glb_path and os.path.isfile(node.glb_path):
             viewport.load_glb(node.glb_path)
         else:
             viewport.clear_model()

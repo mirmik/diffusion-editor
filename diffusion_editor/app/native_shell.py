@@ -15,6 +15,14 @@ from termin.gui_native import (
     TcDocument,
 )
 
+from ..generation.types import (
+    RECONSTRUCTION_PREVIEW_STAGES,
+    RECONSTRUCTION_STAGES,
+    RECONSTRUCTION_STAGE_LABELS,
+    ReconstructionParameters,
+    ReconstructionStage,
+    ReconstructionStageStatus,
+)
 from .presentation import ViewPorts
 
 
@@ -22,6 +30,8 @@ CommandHandler = Callable[[], None]
 
 _CHROME_BACKGROUND = SrgbColor(0.075, 0.080, 0.095, 1.0)
 _WORKSPACE_EDGE = SrgbColor(0.32, 0.35, 0.40, 1.0)
+_RECONSTRUCTION_RESOLUTIONS = (1024, 1280, 1536)
+_RECONSTRUCTION_TEXTURE_SIZES = (1024, 2048, 4096)
 
 
 def _set_widget_background(widget, color: SrgbColor) -> None:
@@ -84,7 +94,7 @@ COMMAND_SPECS = (
     NativeCommandSpec("layer.detect", "Detect Objects…"),
     NativeCommandSpec(
         "generation.3d",
-        "Generate 3D Model",
+        "Generate to Selected Stage",
         tooltip="Generate a Pixal3D model from the current composite",
     ),
     NativeCommandSpec(
@@ -190,12 +200,17 @@ TOOLBAR_COMMANDS = (
     None,
     "view.fit",
     "layer.new_3d_reconstruction",
-    "generation.3d",
-    "view.3d_light_from_camera",
     None,
     "selection.all",
     "selection.clear",
     "selection.invert",
+)
+
+RECONSTRUCTION_TOOLBAR_COMMANDS = (
+    "generation.3d",
+    "generation.3d_cancel",
+    None,
+    "view.3d_light_from_camera",
 )
 
 
@@ -213,6 +228,7 @@ class NativeEditorView:
         self._set_platform_window_title = set_window_title
         self._command_handlers = dict(command_handlers)
         self._command_refs: dict[str, list[tuple[CommandModel, object]]] = {}
+        self._command_buttons: dict[str, list[object]] = {}
         self._command_states = {
             spec.action_id: (spec.enabled, spec.checked)
             for spec in COMMAND_SPECS
@@ -276,6 +292,21 @@ class NativeEditorView:
         self.canvas_view = None
         self.reconstruction_viewport = None
         self.canvas_reconstruction_splitter = None
+        self.reconstruction_toolbar_model = None
+        self.reconstruction_toolbar = None
+        self.reconstruction_buttons = {}
+        self.reconstruction_stage_buttons = {}
+        self.reconstruction_stage_checks = {}
+        self._reconstruction_stage_handler = None
+        self._reconstruction_parameter_handler = None
+        self._syncing_reconstruction_parameters = False
+        self.reconstruction_parameter_controls = {}
+        self.reconstruction_status = None
+        self.reconstruction_panel = None
+        self.reconstruction_mode = False
+        self._canvas_splitter_parking = document.create_vstack(
+            "DiffusionEditorCanvasSplitterParking"
+        )
         self.layer_panel = document.create_vstack("DiffusionEditorLayerPanel")
         self.layer_panel.stable_id = "diffusion-editor.layer-panel"
         self.layer_panel.set_layout_spacing(4.0)
@@ -391,6 +422,8 @@ class NativeEditorView:
             model.set_enabled(native_id, enabled)
             if model.command(native_id).data.checkable:
                 model.set_checked(native_id, checked)
+        for button in self._command_buttons.get(canonical_id, ()):
+            button.widget.enabled = enabled
         self._request_repaint()
 
     def set_command_handler(
@@ -487,19 +520,354 @@ class NativeEditorView:
             raise RuntimeError("native canvas must be mounted before the 3D viewport")
         if self.reconstruction_viewport is not None:
             raise RuntimeError("reconstruction viewport is already mounted")
-        self.canvas_host.remove_child(self.canvas_view.widget)
         splitter = self._document.create_splitter(
             True,
             "DiffusionEditorCanvasReconstructionSplitter",
         )
         splitter.widget.stable_id = "diffusion-editor.reconstruction.splitter"
-        splitter.set_first(self.canvas_view.widget)
+        splitter.set_first(self._canvas_splitter_parking)
         splitter.set_second(viewport_view.widget)
         splitter.set_split_fraction(0.50)
         splitter.set_min_extents(260.0, 260.0)
-        self.canvas_host.add_flex_child(splitter.widget, 1.0)
+        toolbar_model = self._create_model(RECONSTRUCTION_TOOLBAR_COMMANDS)
+        toolbar = self._document.create_vstack(
+            "DiffusionEditorReconstructionActions"
+        )
+        toolbar.stable_id = "diffusion-editor.reconstruction.toolbar"
+        toolbar.set_layout_spacing(4.0)
+        reconstruction_buttons = {}
+        for command_id in RECONSTRUCTION_TOOLBAR_COMMANDS:
+            if command_id is None:
+                continue
+            canonical_id = self._canonical_id(command_id)
+            spec = COMMAND_SPEC_BY_ID[command_id]
+            button = self._document.create_button(spec.label)
+            button.widget.stable_id = (
+                "diffusion-editor.reconstruction."
+                + command_id.replace(".", "-")
+            )
+            button.widget.enabled = self._command_states[canonical_id][0]
+            self._connections.append(button.connect_clicked(
+                lambda command_id=command_id: self.activate_command(command_id)
+            ))
+            self._command_buttons.setdefault(canonical_id, []).append(button)
+            reconstruction_buttons[command_id] = button
+            toolbar.add_preferred_child(button.widget)
+
+        status = self._document.create_label(
+            "Empty", "DiffusionEditorReconstructionStatus"
+        )
+        status.stable_id = "diffusion-editor.reconstruction.status"
+        title = self._document.create_label(
+            "3D Reconstruction", "DiffusionEditorReconstructionTitle"
+        )
+        title.stable_id = "diffusion-editor.reconstruction.title"
+        stage_list = self._document.create_vstack(
+            "DiffusionEditorReconstructionStages"
+        )
+        stage_list.stable_id = "diffusion-editor.reconstruction.stages"
+        stage_list.set_layout_spacing(2.0)
+        stage_buttons = {}
+        stage_checks = {}
+        for stage in RECONSTRUCTION_STAGES:
+            row = self._document.create_hstack(
+                "DiffusionEditorReconstructionStageRow"
+            )
+            row.set_layout_spacing(4.0)
+            checkbox = self._document.create_checkbox(False)
+            checkbox.widget.stable_id = (
+                f"diffusion-editor.reconstruction.stage-check.{stage.value}"
+            )
+            checkbox.widget.enabled = False
+            button = self._document.create_button(
+                RECONSTRUCTION_STAGE_LABELS[stage]
+            )
+            button.widget.stable_id = (
+                f"diffusion-editor.reconstruction.stage.{stage.value}"
+            )
+            if stage in RECONSTRUCTION_PREVIEW_STAGES:
+                self._connections.append(button.connect_clicked(
+                    lambda stage=stage: self._activate_reconstruction_stage(stage)
+                ))
+            else:
+                button.widget.enabled = False
+            stage_buttons[stage] = button
+            stage_checks[stage] = checkbox
+            row.add_preferred_child(checkbox.widget)
+            row.add_flex_child(button.widget, 1.0)
+            stage_list.add_preferred_child(row)
+
+        parameters_title = self._document.create_label(
+            "Generation parameters", "DiffusionEditorReconstructionParametersTitle"
+        )
+        parameters_title.stable_id = (
+            "diffusion-editor.reconstruction.parameters.title"
+        )
+        parameters_panel = self._document.create_vstack(
+            "DiffusionEditorReconstructionParameters"
+        )
+        parameters_panel.stable_id = "diffusion-editor.reconstruction.parameters"
+        parameters_panel.set_layout_spacing(3.0)
+        defaults = ReconstructionParameters()
+        parameter_controls = {}
+
+        def add_slider(key, label, value, minimum, maximum, step, decimals=0):
+            control = self._document.create_slider_edit(float(value))
+            control.widget.stable_id = (
+                f"diffusion-editor.reconstruction.parameter.{key}"
+            )
+            control.label = label
+            control.set_range(float(minimum), float(maximum))
+            control.set_step(float(step))
+            control.set_decimals(int(decimals))
+            self._connections.append(control.connect_changed(
+                lambda changed, key=key: self._change_reconstruction_parameter(
+                    key, changed
+                )
+            ))
+            parameter_controls[key] = control
+            parameters_panel.add_preferred_child(control.widget)
+
+        def add_spin(key, label, value, minimum, maximum, step, decimals=0):
+            row = self._document.create_hstack(
+                "DiffusionEditorReconstructionParameterRow"
+            )
+            row.set_layout_spacing(4.0)
+            caption = self._document.create_label(
+                label, "DiffusionEditorReconstructionParameterLabel"
+            )
+            caption.stable_id = (
+                f"diffusion-editor.reconstruction.parameter.{key}.label"
+            )
+            control = self._document.create_spin_box(float(value))
+            control.widget.stable_id = (
+                f"diffusion-editor.reconstruction.parameter.{key}"
+            )
+            control.set_range(float(minimum), float(maximum))
+            control.step = float(step)
+            control.decimals = int(decimals)
+            self._connections.append(control.connect_changed(
+                lambda changed, key=key: self._change_reconstruction_parameter(
+                    key, changed
+                )
+            ))
+            parameter_controls[key] = control
+            row.add_flex_child(caption, 1.0)
+            row.add_fixed_child(control.widget, 108.0)
+            parameters_panel.add_preferred_child(row)
+
+        def add_combo(key, label, values):
+            row = self._document.create_hstack(
+                "DiffusionEditorReconstructionParameterRow"
+            )
+            row.set_layout_spacing(4.0)
+            caption = self._document.create_label(
+                label, "DiffusionEditorReconstructionParameterLabel"
+            )
+            caption.stable_id = (
+                f"diffusion-editor.reconstruction.parameter.{key}.label"
+            )
+            control = self._document.create_combo_box()
+            control.widget.stable_id = (
+                f"diffusion-editor.reconstruction.parameter.{key}"
+            )
+            for item in values:
+                control.add_item(str(item))
+            control.selected_index = values.index(getattr(defaults, key))
+            self._connections.append(control.connect_changed(
+                lambda index, *_rest, key=key, values=values:
+                self._change_reconstruction_parameter(key, values[index])
+            ))
+            parameter_controls[key] = control
+            row.add_flex_child(caption, 1.0)
+            row.add_fixed_child(control.widget, 92.0)
+            parameters_panel.add_preferred_child(row)
+
+        add_spin("seed", "Seed", defaults.seed, 0, 2_147_483_647, 1)
+        add_slider("steps", "Sampling steps", defaults.steps, 1, 50, 1)
+        add_combo("resolution", "HR resolution", _RECONSTRUCTION_RESOLUTIONS)
+        add_slider(
+            "manual_fov_degrees", "Camera FOV (0 = Auto)",
+            defaults.manual_fov_degrees, 0, 120, 1,
+        )
+        add_slider(
+            "decimation_target", "Final mesh faces",
+            defaults.decimation_target, 50_000, 1_000_000, 10_000,
+        )
+        add_combo("texture_size", "Texture size", _RECONSTRUCTION_TEXTURE_SIZES)
+        low_vram_row = self._document.create_hstack(
+            "DiffusionEditorReconstructionParameterRow"
+        )
+        low_vram_row.set_layout_spacing(4.0)
+        low_vram = self._document.create_checkbox(defaults.low_vram)
+        low_vram.widget.stable_id = (
+            "diffusion-editor.reconstruction.parameter.low_vram"
+        )
+        low_vram_label = self._document.create_label(
+            "Low VRAM", "DiffusionEditorReconstructionParameterLabel"
+        )
+        low_vram_label.stable_id = (
+            "diffusion-editor.reconstruction.parameter.low_vram.label"
+        )
+        self._connections.append(low_vram.connect_changed(
+            lambda checked: self._change_reconstruction_parameter(
+                "low_vram", checked
+            )
+        ))
+        parameter_controls["low_vram"] = low_vram
+        low_vram_row.add_preferred_child(low_vram.widget)
+        low_vram_row.add_flex_child(low_vram_label, 1.0)
+        parameters_panel.add_preferred_child(low_vram_row)
+        panel_content = self._document.create_vstack(
+            "DiffusionEditorReconstructionPanelContent"
+        )
+        panel_content.stable_id = (
+            "diffusion-editor.reconstruction.panel-content"
+        )
+        panel_content.set_layout_spacing(4.0)
+        panel_content.add_preferred_child(title)
+        panel_content.add_preferred_child(parameters_title)
+        panel_content.add_preferred_child(parameters_panel)
+        panel_content.add_preferred_child(stage_list)
+        panel_content.add_preferred_child(toolbar)
+        panel_content.add_preferred_child(status)
+        panel = self._document.create_scroll_area()
+        panel.widget.stable_id = "diffusion-editor.reconstruction.panel"
+        panel.set_scroll_axes(False, True)
+        panel.set_content(panel_content)
+
         self.canvas_reconstruction_splitter = splitter
         self.reconstruction_viewport = viewport_view
+        self.reconstruction_toolbar_model = toolbar_model
+        self.reconstruction_toolbar = toolbar
+        self.reconstruction_buttons = reconstruction_buttons
+        self.reconstruction_stage_buttons = stage_buttons
+        self.reconstruction_stage_checks = stage_checks
+        self.reconstruction_parameter_controls = parameter_controls
+        self.reconstruction_status = status
+        self.reconstruction_panel = panel
+        self._request_repaint()
+
+    def set_reconstruction_stage_handler(self, handler) -> None:
+        self._reconstruction_stage_handler = handler
+
+    def set_reconstruction_parameter_handler(self, handler) -> None:
+        self._reconstruction_parameter_handler = handler
+
+    def _change_reconstruction_parameter(self, key: str, value) -> None:
+        if (
+            self._syncing_reconstruction_parameters
+            or self._reconstruction_parameter_handler is None
+        ):
+            return
+        if key in {"seed", "steps", "resolution", "decimation_target", "texture_size"}:
+            value = int(round(float(value)))
+        elif key == "manual_fov_degrees":
+            value = float(value)
+        elif key == "low_vram":
+            value = bool(value)
+        self._reconstruction_parameter_handler(key, value)
+
+    def update_reconstruction_parameters(
+        self,
+        parameters: ReconstructionParameters,
+        *,
+        busy: bool = False,
+    ) -> None:
+        controls = self.reconstruction_parameter_controls
+        if not controls:
+            return
+        self._syncing_reconstruction_parameters = True
+        try:
+            controls["seed"].value = float(parameters.seed)
+            controls["steps"].value = float(parameters.steps)
+            controls["resolution"].selected_index = (
+                _RECONSTRUCTION_RESOLUTIONS.index(parameters.resolution)
+            )
+            controls["manual_fov_degrees"].value = (
+                parameters.manual_fov_degrees
+            )
+            controls["decimation_target"].value = float(
+                parameters.decimation_target
+            )
+            controls["texture_size"].selected_index = (
+                _RECONSTRUCTION_TEXTURE_SIZES.index(parameters.texture_size)
+            )
+            controls["low_vram"].checked = parameters.low_vram
+            for control in controls.values():
+                control.widget.enabled = not busy
+        finally:
+            self._syncing_reconstruction_parameters = False
+        self._request_repaint()
+
+    def _activate_reconstruction_stage(self, stage: ReconstructionStage) -> None:
+        if self._reconstruction_stage_handler is not None:
+            self._reconstruction_stage_handler(stage)
+
+    def update_reconstruction_stages(
+        self,
+        statuses,
+        progress,
+        target: ReconstructionStage,
+        selected: ReconstructionStage,
+        *,
+        busy: bool = False,
+    ) -> None:
+        for stage, button in self.reconstruction_stage_buttons.items():
+            state = statuses.get(stage, ReconstructionStageStatus.PENDING)
+            current, total = progress.get(stage, (0, 0))
+            details = []
+            if stage is selected:
+                details.append("preview")
+            if stage is target:
+                details.append("target")
+            if state is ReconstructionStageStatus.RUNNING:
+                details.append(
+                    f"generating {current}/{total}" if total else "generating"
+                )
+            elif state is ReconstructionStageStatus.FAILED:
+                details.append("failed")
+            elif state is ReconstructionStageStatus.SKIPPED:
+                details.append("skipped")
+            suffix = f" · {' · '.join(details)}" if details else ""
+            button.set_text(f"{RECONSTRUCTION_STAGE_LABELS[stage]}{suffix}")
+            self.reconstruction_stage_checks[stage].checked = (
+                state is ReconstructionStageStatus.READY
+            )
+            button.widget.enabled = (
+                stage in RECONSTRUCTION_PREVIEW_STAGES
+                and (not busy or state is ReconstructionStageStatus.READY)
+            )
+        self._request_repaint()
+
+    def set_reconstruction_context(
+            self, visible: bool, status: str = "") -> None:
+        self._require_open()
+        visible = bool(visible)
+        if self.reconstruction_status is not None:
+            self.reconstruction_status.text = status.title() if status else ""
+        panel = self.reconstruction_panel
+        splitter = self.canvas_reconstruction_splitter
+        canvas = self.canvas_view
+        if (
+                panel is None
+                or splitter is None
+                or canvas is None
+                or visible == self.reconstruction_mode):
+            self.reconstruction_mode = visible
+            self._request_repaint()
+            return
+        if visible:
+            self.main_splitter.set_first(panel.widget)
+            self.canvas_host.remove_child(canvas.widget)
+            splitter.set_first(canvas.widget)
+            self.canvas_host.add_flex_child(splitter.widget, 1.0)
+        else:
+            self.main_splitter.set_first(self.left_scroll.widget)
+            self.canvas_host.remove_child(splitter.widget)
+            splitter.set_first(self._canvas_splitter_parking)
+            self.canvas_host.add_flex_child(canvas.widget, 1.0)
+        self.reconstruction_mode = visible
         self._request_repaint()
 
     def mount_generation_panels(
