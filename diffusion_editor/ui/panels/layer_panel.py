@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from termin.geombase import SrgbColor
 from tcgui.widgets.vstack import VStack
 from tcgui.widgets.hstack import HStack
 from tcgui.widgets.button import Button
@@ -153,9 +154,9 @@ class LayerPanel(VStack):
         solo_cb.checked = layer.id == self._layer_stack.solo_layer_id
         solo_cb.text = ""
         solo_cb.preferred_width = px(16)
-        solo_cb.box_color = (0.55, 0.43, 0.05, 1.0)
-        solo_cb.check_color = (1.0, 0.82, 0.12, 1.0)
-        solo_cb.hover_color = (0.85, 0.68, 0.14, 1.0)
+        solo_cb.box_color = SrgbColor(0.55, 0.43, 0.05, 1.0)
+        solo_cb.check_color = SrgbColor(1.0, 0.82, 0.12, 1.0)
+        solo_cb.hover_color = SrgbColor(0.85, 0.68, 0.14, 1.0)
         solo_cb.tooltip = "Solo layer"
 
         def _make_solo_handler(ly):
@@ -172,7 +173,7 @@ class LayerPanel(VStack):
         name_lbl = Label()
         name_lbl.text = layer.name + tool_suffix
         name_lbl.font_size = 13
-        name_lbl.color = (0.9, 0.9, 0.9, 1.0)
+        name_lbl.color = SrgbColor(0.9, 0.9, 0.9, 1.0)
         row.add_child(name_lbl)
 
         node = TreeNode(content=row)

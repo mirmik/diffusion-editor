@@ -8,16 +8,16 @@ import numpy as np
 from tcbase import log
 from termin.gui_native import (
     CanvasTextureLayer,
-    Color,
     CursorIntent,
     DynamicTextureOwnership,
     Point,
     PointerEventType,
     Rect,
     Size,
+    SrgbColor,
     TcDocument,
 )
-from tgfx import Tgfx2Context
+from tgfx import TextureEncoding, Tgfx2Context
 
 from ..document.layer import Layer
 from ..document.change_event import DocumentChangeEvent
@@ -268,7 +268,7 @@ class NativeEditorCanvas:
 
         if not lease.empty:
             lease.clear()
-        lease.set_rgba8(pixels)
+        lease.set_rgba8(pixels, TextureEncoding.SRGB)
 
     def _sync_gpu_image(self) -> None:
         bridge = self.controller.composite_bridge
@@ -350,13 +350,13 @@ class NativeEditorCanvas:
         if rect.width <= 0 or rect.height <= 0:
             return
         if annotation.kind == "active-layer":
-            context.stroke_rect(rect, Color(0.0, 0.0, 0.0, 0.85), 3.0)
-            context.stroke_rect(rect, Color(1.0, 1.0, 1.0, 0.95), 1.0)
+            context.stroke_rect(rect, SrgbColor(0.0, 0.0, 0.0, 0.85), 3.0)
+            context.stroke_rect(rect, SrgbColor(1.0, 1.0, 1.0, 0.95), 1.0)
         elif annotation.kind == "selection":
-            context.fill_rect(rect, Color(0.0, 0.8, 1.0, 0.12))
-            context.stroke_rect(rect, Color(0.0, 0.8, 1.0, 0.7), 2.0)
+            context.fill_rect(rect, SrgbColor(0.0, 0.8, 1.0, 0.12))
+            context.stroke_rect(rect, SrgbColor(0.0, 0.8, 1.0, 0.7), 2.0)
         elif annotation.kind == "patch":
-            context.stroke_rect(rect, Color(0.2, 0.78, 0.31, 0.8), 2.0)
+            context.stroke_rect(rect, SrgbColor(0.2, 0.78, 0.31, 0.8), 2.0)
 
     def _require_open(self) -> None:
         if self._closed:

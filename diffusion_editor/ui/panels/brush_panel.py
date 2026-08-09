@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from termin.geombase import SrgbColor
 from tcgui.widgets.group_box import GroupBox
 from tcgui.widgets.hstack import HStack
 from tcgui.widgets.button import Button
@@ -138,7 +139,8 @@ class BrushPanel(GroupBox):
 
     def _update_color_btn(self):
         r, g, b, _ = self._brush.color
-        self._color_btn.background_color = (r / 255, g / 255, b / 255, 1.0)
+        self._color_btn.background_color = SrgbColor(
+            r / 255, g / 255, b / 255, 1.0)
 
     def _pick_color(self):
         r, g, b, a = self._brush.color

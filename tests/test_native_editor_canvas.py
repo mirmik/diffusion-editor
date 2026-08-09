@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from termin.gui_native import DynamicTextureOwnership
+from tgfx import TextureEncoding
 
 from diffusion_editor.canvas.native_editor_canvas import NativeEditorCanvas
 
@@ -29,7 +30,8 @@ class _Lease:
         self.trace.append((self.name, "borrow", owner, texture))
         self.ownership = DynamicTextureOwnership.BORROWED
 
-    def set_rgba8(self, data):
+    def set_rgba8(self, data, encoding):
+        assert encoding == TextureEncoding.SRGB
         self.trace.append((self.name, "set", data.copy()))
         self.ownership = DynamicTextureOwnership.OWNED
         self.height, self.width = data.shape[:2]

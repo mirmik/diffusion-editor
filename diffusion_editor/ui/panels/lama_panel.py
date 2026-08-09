@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from termin.geombase import SrgbColor
 from tcgui.widgets.scroll_area import ScrollArea
 from tcgui.widgets.vstack import VStack
 from tcgui.widgets.hstack import HStack
@@ -98,7 +99,7 @@ class LamaPanel(ScrollArea):
         self._layer_info = Label()
         self._layer_info.text = "No LaMa layer selected"
         self._layer_info.font_size = 11
-        self._layer_info.color = (0.7, 0.7, 0.7, 1.0)
+        self._layer_info.color = SrgbColor(0.7, 0.7, 0.7, 1.0)
         action_group.add_child(self._layer_info)
 
         remove_btn = Button()

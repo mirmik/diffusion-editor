@@ -1,5 +1,4 @@
 from termin.gui_native import (
-    Color,
     EventResult,
     KeyCode,
     KeyEvent,
@@ -7,6 +6,7 @@ from termin.gui_native import (
     PointerEvent,
     PointerEventType,
     Rect,
+    SrgbColor,
     tc_ui_document_create,
     tc_ui_document_destroy,
 )
@@ -145,7 +145,7 @@ def test_native_brush_color_dialog_accept_cancel_and_reopen():
     dialog = controls.brush.color_dialog
 
     assert dialog.show(Rect(0.0, 0.0, 640.0, 480.0))
-    dialog.color = Color(0.2, 0.4, 0.6, 0.8)
+    dialog.color = SrgbColor(0.2, 0.4, 0.6, 0.8)
     assert dialog.activate("ok")
     assert brush_intents[-1].action == BrushControlAction.COLOR
     assert brush_intents[-1].value == (51, 102, 153, 204)

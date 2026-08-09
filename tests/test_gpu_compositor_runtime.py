@@ -3,9 +3,11 @@ import struct
 
 import numpy as np
 import pytest
+from tgfx import TextureEncoding
 
 from diffusion_editor.canvas.gpu_compositor import GPUCompositor
 from diffusion_editor.canvas import gpu_compositor as gpu_compositor_module
+from diffusion_editor.canvas.gpu_compositor import _linear_rgba_to_srgb8
 from diffusion_editor.document.layer_stack import LayerStack
 
 
@@ -54,11 +56,12 @@ class _FakeGraphics:
         self.calls = []
         self._next_texture = 1
 
-    def create_texture_rgba8(self, width, height, data):
+    def create_texture_rgba8(self, width, height, data, encoding):
+        assert encoding == TextureEncoding.LINEAR
         texture = f"texture-{self._next_texture}"
         self._next_texture += 1
         self.calls.append((
-            "create", texture, width, height, np.asarray(data).copy()))
+            "create", texture, width, height, np.asarray(data).copy(), encoding))
         return texture
 
     def upload_texture(self, texture, data):
@@ -88,6 +91,14 @@ def _upload_compositor(width=8, height=6):
     graphics = _FakeGraphics()
     compositor = GPUCompositor(stack, graphics)
     return compositor, layer, graphics
+
+
+def test_linear_readback_is_encoded_to_srgb_without_changing_alpha():
+    linear = np.array([[[0.0, 0.0031308, 0.5, 0.25]]], dtype=np.float32)
+
+    encoded = _linear_rgba_to_srgb8(linear)
+
+    np.testing.assert_array_equal(encoded, [[[0, 10, 188, 64]]])
 
 
 def test_composite_uses_symbolic_texture_binding():

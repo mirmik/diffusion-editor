@@ -7,6 +7,7 @@ import logging
 import numpy as np
 
 from tcbase import Key, MouseButton, Mods
+from termin.geombase import SrgbColor
 from tcgui.widgets.canvas import Canvas
 from tcgui.widgets.events import KeyEvent
 
@@ -37,7 +38,7 @@ class EditorCanvas(Canvas):
                  gpu_compositing: bool = True,
                  ctx=None):
         super().__init__()
-        self.background_color = (0.08, 0.08, 0.10, 1.0)
+        self.background_color = SrgbColor(0.08, 0.08, 0.10, 1.0)
         self._layer_stack = layer_stack
         self._composite_bridge = CanvasCompositeBridge(
             layer_stack,

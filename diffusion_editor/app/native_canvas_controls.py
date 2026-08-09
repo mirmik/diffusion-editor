@@ -5,11 +5,11 @@ from __future__ import annotations
 from typing import Callable
 
 from termin.gui_native import (
-    Color,
     CommandData,
     CommandModel,
     EdgeInsets,
     Rect,
+    SrgbColor,
     TcDocument,
 )
 
@@ -110,7 +110,7 @@ class NativeBrushPanel:
             self.color_button.connect_clicked(self._show_color_dialog))
         content.add_preferred_child(self.color_button.widget)
 
-        initial = Color(*(channel / 255.0 for channel in state.color))
+        initial = SrgbColor(*(channel / 255.0 for channel in state.color))
         self.color_dialog = document.create_color_dialog(
             initial,
             show_alpha=True,
@@ -256,14 +256,14 @@ class NativeBrushPanel:
     def _show_color_dialog(self) -> None:
         if self._closed or self.color_dialog.open:
             return
-        self.color_dialog.color = Color(
+        self.color_dialog.color = SrgbColor(
             *(channel / 255.0 for channel in self._state.color))
         viewport = self._viewport_rect()
         if viewport.width <= 0 or viewport.height <= 0:
             viewport = Rect(0.0, 0.0, 640.0, 480.0)
         self.color_dialog.show(viewport)
 
-    def _on_color_finished(self, color: Color | None) -> None:
+    def _on_color_finished(self, color: SrgbColor | None) -> None:
         if color is None or self._closed:
             return
         rgba = tuple(

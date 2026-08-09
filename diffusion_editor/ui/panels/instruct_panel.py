@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import random
 
+from termin.geombase import SrgbColor
 from tcgui.widgets.scroll_area import ScrollArea
 from tcgui.widgets.vstack import VStack
 from tcgui.widgets.hstack import HStack
@@ -49,7 +50,7 @@ class InstructPanel(ScrollArea):
         self._model_status = Label()
         self._model_status.text = "Not loaded"
         self._model_status.font_size = 11
-        self._model_status.color = (0.5, 0.5, 0.5, 1.0)
+        self._model_status.color = SrgbColor(0.5, 0.5, 0.5, 1.0)
         model_group.add_child(self._model_status)
 
         content.add_child(model_group)
@@ -177,7 +178,7 @@ class InstructPanel(ScrollArea):
         self._layer_info = Label()
         self._layer_info.text = "No instruct layer selected"
         self._layer_info.font_size = 11
-        self._layer_info.color = (0.7, 0.7, 0.7, 1.0)
+        self._layer_info.color = SrgbColor(0.7, 0.7, 0.7, 1.0)
         self._layer_group.add_child(self._layer_info)
 
         action_row = HStack()

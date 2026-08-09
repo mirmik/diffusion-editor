@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import random
 
+from termin.geombase import SrgbColor
 from tcgui.widgets.scroll_area import ScrollArea
 from tcgui.widgets.vstack import VStack
 from tcgui.widgets.hstack import HStack
@@ -70,13 +71,13 @@ class DiffusionPanel(ScrollArea):
         self._model_status = Label()
         self._model_status.text = "No model loaded"
         self._model_status.font_size = 11
-        self._model_status.color = (0.5, 0.5, 0.5, 1.0)
+        self._model_status.color = SrgbColor(0.5, 0.5, 0.5, 1.0)
         model_group.add_child(self._model_status)
 
         self._model_diag = Label()
         self._model_diag.text = ""
         self._model_diag.font_size = 11
-        self._model_diag.color = (0.5, 0.5, 0.5, 1.0)
+        self._model_diag.color = SrgbColor(0.5, 0.5, 0.5, 1.0)
         model_group.add_child(self._model_diag)
 
         content.add_child(model_group)
@@ -269,7 +270,7 @@ class DiffusionPanel(ScrollArea):
         self._ip_status = Label()
         self._ip_status.text = "Not loaded"
         self._ip_status.font_size = 11
-        self._ip_status.color = (0.5, 0.5, 0.5, 1.0)
+        self._ip_status.color = SrgbColor(0.5, 0.5, 0.5, 1.0)
         ip_group.add_child(self._ip_status)
 
         self._ip_scale_slider = SliderEdit()
@@ -284,7 +285,7 @@ class DiffusionPanel(ScrollArea):
         self._ip_reference = Label()
         self._ip_reference.text = "Reference: none"
         self._ip_reference.font_size = 11
-        self._ip_reference.color = (0.5, 0.5, 0.5, 1.0)
+        self._ip_reference.color = SrgbColor(0.5, 0.5, 0.5, 1.0)
         ip_group.add_child(self._ip_reference)
 
         ip_ref_row = HStack()
@@ -315,7 +316,7 @@ class DiffusionPanel(ScrollArea):
         self._layer_info = Label()
         self._layer_info.text = "No diffusion layer selected"
         self._layer_info.font_size = 11
-        self._layer_info.color = (0.7, 0.7, 0.7, 1.0)
+        self._layer_info.color = SrgbColor(0.7, 0.7, 0.7, 1.0)
         self._layer_group.add_child(self._layer_info)
 
         regen_row = HStack()

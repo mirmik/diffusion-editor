@@ -8,6 +8,7 @@ import random
 import numpy as np
 from PIL import Image
 from tcbase import log
+from termin.geombase import SrgbColor
 
 from tcgui.widgets.ui import UI
 from tcgui.widgets.vstack import VStack
@@ -1505,7 +1506,7 @@ class EditorWindow:
 
     # Background colour painted by the UIRenderer's offscreen clear
     # so transparent UI regions show this through the composite.
-    UI_BACKGROUND = (0.12, 0.12, 0.14, 1.0)
+    UI_BACKGROUND = SrgbColor(0.12, 0.12, 0.14, 1.0)
 
     def render(self, vw: int, vh: int):
         self.ui.render(vw, vh, background_color=self.UI_BACKGROUND)

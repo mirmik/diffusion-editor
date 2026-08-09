@@ -6,6 +6,8 @@ import struct
 
 import numpy as np
 from tcbase import log
+from termin.geombase import LinearColor
+from tgfx import TextureEncoding
 
 from ..document.layer_stack import LayerStack
 from ..document.layer import Layer
@@ -16,12 +18,18 @@ from tgfx._tgfx_native import (
     ShaderLanguage,
     TcShader,
     Tgfx2Context,
+    Tgfx2PixelFormat,
     Tgfx2TextureHandle,
     Tgfx2BlendFactor,
     tc_shader_ensure_tgfx2,
 )
 
 Rect = tuple[int, int, int, int]
+_TRANSPARENT_LINEAR = LinearColor(0.0, 0.0, 0.0, 0.0)
+# LayerStack's CPU contract composites uint8 channels in authored sRGB value
+# space. Keep GPU layer sampling numerically identical, then perform the one
+# required sRGB-to-linear conversion in the final display pass.
+_LAYER_TEXTURE_ENCODING = TextureEncoding.LINEAR
 
 # ---------------------------------------------------------------------------
 # Scoped Slang sources
@@ -101,15 +109,30 @@ struct FragmentOutput {
     float4 color : SV_Target0;
 };
 
+float srgb_channel_to_linear(float value) {
+    return value <= 0.04045
+        ? value / 12.92
+        : pow((value + 0.055) / 1.055, 2.4);
+}
+
+float3 srgb_to_linear(float3 value) {
+    return float3(
+        srgb_channel_to_linear(value.r),
+        srgb_channel_to_linear(value.g),
+        srgb_channel_to_linear(value.b));
+}
+
 [shader("fragment")]
 FragmentOutput fs_main(FragmentInput input) {
     float4 premultiplied = u_texture.Sample(input.uv);
     FragmentOutput output;
-    if (premultiplied.a > 0.001)
-        output.color = float4(premultiplied.rgb / premultiplied.a,
+    if (premultiplied.a > 0.001) {
+        float3 straight_srgb = premultiplied.rgb / premultiplied.a;
+        output.color = float4(srgb_to_linear(straight_srgb),
                               premultiplied.a);
-    else
+    } else {
         output.color = float4(0.0);
+    }
     return output;
 }
 """
@@ -150,6 +173,21 @@ def _canvas_quad_verts(x0: int, y0: int, x1: int, y1: int,
         right, top,    0.0,  1.0, 1.0, 0.0, 0.0,
         left,  top,    0.0,  0.0, 1.0, 0.0, 0.0,
     ], dtype=np.float32)
+
+
+def _linear_rgba_to_srgb8(linear_rgba: np.ndarray) -> np.ndarray:
+    """Encode linear float RGBA pixels for the editor's uint8 CPU contract."""
+    values = np.clip(linear_rgba, 0.0, 1.0)
+    rgb = values[..., :3]
+    encoded_rgb = np.where(
+        rgb <= 0.0031308,
+        rgb * 12.92,
+        1.055 * np.power(rgb, 1.0 / 2.4) - 0.055,
+    )
+    encoded = np.empty_like(values)
+    encoded[..., :3] = encoded_rgb
+    encoded[..., 3] = values[..., 3]
+    return np.rint(encoded * 255.0).astype(np.uint8)
 
 
 class GPUCompositor:
@@ -235,9 +273,8 @@ class GPUCompositor:
             # --- Main pass: accumulate layers with premultiplied-alpha blending ---
             ctx.begin_pass(
                 color=self._main_tex,
-                depth=Tgfx2TextureHandle(),  # no depth
-                clear_color_enabled=True,
-                r=0.0, g=0.0, b=0.0, a=0.0,
+                depth=None,
+                clear_linear_color=_TRANSPARENT_LINEAR,
                 clear_depth=1.0,
                 clear_depth_enabled=False,
             )
@@ -264,9 +301,8 @@ class GPUCompositor:
             # --- Un-premultiply pass: main_tex → display_tex ---
             ctx.begin_pass(
                 color=self._display_tex,
-                depth=Tgfx2TextureHandle(),
-                clear_color_enabled=True,
-                r=0.0, g=0.0, b=0.0, a=0.0,
+                depth=None,
+                clear_linear_color=_TRANSPARENT_LINEAR,
                 clear_depth=1.0,
                 clear_depth_enabled=False,
             )
@@ -366,7 +402,12 @@ class GPUCompositor:
             return np.zeros((h, w, 4), dtype=np.uint8)
 
         result = self._readback_texture(
-            self._display_tex, self._fbo_w, self._fbo_h, "display")
+            self._display_tex,
+            self._fbo_w,
+            self._fbo_h,
+            "display",
+            encode_srgb=True,
+        )
         if result is not None:
             return result
         return np.zeros((self._fbo_h, self._fbo_w, 4), dtype=np.uint8)
@@ -385,7 +426,12 @@ class GPUCompositor:
             "premultiplied compositor": self._readback_texture(
                 self._main_tex, self._fbo_w, self._fbo_h, "main"),
             "display compositor": self._readback_texture(
-                self._display_tex, self._fbo_w, self._fbo_h, "display"),
+                self._display_tex,
+                self._fbo_w,
+                self._fbo_h,
+                "display",
+                encode_srgb=True,
+            ),
         }
 
     def dispose(self):
@@ -462,7 +508,9 @@ class GPUCompositor:
             texture,
             width: int,
             height: int,
-            label: str) -> np.ndarray | None:
+            label: str,
+            *,
+            encode_srgb: bool = False) -> np.ndarray | None:
         if (
                 texture is None
                 or self._graphics is None
@@ -480,7 +528,12 @@ class GPUCompositor:
             log.error(f"GPUCompositor {label} readback failed")
             return None
         float_data = buf.reshape((height, width, 4))
-        result = np.clip(float_data * 255.0, 0, 255).astype(np.uint8)
+        if encode_srgb:
+            result = _linear_rgba_to_srgb8(float_data)
+        else:
+            result = np.rint(
+                np.clip(float_data, 0.0, 1.0) * 255.0
+            ).astype(np.uint8)
         # IRenderDevice normalizes texture readback to top-down rows on every
         # backend; applying an OpenGL-specific flip here mirrored CPU users.
         return np.ascontiguousarray(result)
@@ -501,7 +554,11 @@ class GPUCompositor:
         self._temp_texs_in_use = 0
 
         self._main_tex = self._graphics.create_color_attachment(w, h)
-        self._display_tex = self._graphics.create_color_attachment(w, h)
+        # The display pass converts authored sRGB values to linear light.
+        # Keep that result in float16: an 8-bit linear attachment loses too
+        # much precision in dark tones before native Canvas presents to sRGB.
+        self._display_tex = self._graphics.create_color_attachment(
+            w, h, Tgfx2PixelFormat.RGBA16F)
         self._fbo_w = w
         self._fbo_h = h
 
@@ -516,7 +573,8 @@ class GPUCompositor:
             revision = int(getattr(layer, "pixel_revision", 0))
             if lid not in self._layer_textures:
                 img = np.ascontiguousarray(layer.image).reshape(-1)
-                tex = self._graphics.create_texture_rgba8(w, h, img)
+                tex = self._graphics.create_texture_rgba8(
+                    w, h, img, _LAYER_TEXTURE_ENCODING)
                 self._layer_textures[lid] = tex
                 self._layer_tex_size[lid] = (w, h)
                 self._layer_tex_revision[lid] = revision
@@ -527,7 +585,8 @@ class GPUCompositor:
             if prev_w != w or prev_h != h:
                 img = np.ascontiguousarray(layer.image).reshape(-1)
                 self._graphics.destroy_texture(self._layer_textures[lid])
-                tex = self._graphics.create_texture_rgba8(w, h, img)
+                tex = self._graphics.create_texture_rgba8(
+                    w, h, img, _LAYER_TEXTURE_ENCODING)
                 self._layer_textures[lid] = tex
                 self._layer_tex_size[lid] = (w, h)
                 self._layer_tex_revision[lid] = revision
@@ -613,9 +672,8 @@ class GPUCompositor:
             ctx.end_pass()
             ctx.begin_pass(
                 color=temp,
-                depth=Tgfx2TextureHandle(),
-                clear_color_enabled=True,
-                r=0.0, g=0.0, b=0.0, a=0.0,
+                depth=None,
+                clear_linear_color=_TRANSPARENT_LINEAR,
                 clear_depth=1.0,
                 clear_depth_enabled=False,
             )
@@ -636,13 +694,12 @@ class GPUCompositor:
             self._draw_layer_quad(layer, opacity=1.0)
 
             ctx.end_pass()
-            # Reopen parent pass; begin_pass with clear_color_enabled=False
-            # preserves existing contents of target_tex.
+            # Reopen the parent pass without a clear color to preserve the
+            # existing contents of target_tex.
             ctx.begin_pass(
                 color=target_tex,
-                depth=Tgfx2TextureHandle(),
-                clear_color_enabled=False,
-                r=0.0, g=0.0, b=0.0, a=0.0,
+                depth=None,
+                clear_linear_color=None,
                 clear_depth=1.0,
                 clear_depth_enabled=False,
             )
