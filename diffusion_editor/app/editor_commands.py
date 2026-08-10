@@ -41,6 +41,7 @@ class EditorCommandCoordinator:
             "edit.copy_visible": self.copy_visible,
             "edit.paste": self.paste,
             "selection.all": self.select_all,
+            "selection.background": self.select_background,
             "selection.clear": self.clear_selection,
             "selection.invert": self.invert_selection,
             "layer.new": self.new_layer,
@@ -71,6 +72,11 @@ class EditorCommandCoordinator:
                 canvas_ready and self._application.clipboard is not None
             ),
             "selection.all": canvas_ready,
+            "selection.background": (
+                canvas_ready
+                and active is not None
+                and not self._application.segmentation_controller.is_busy
+            ),
             "selection.clear": (
                 canvas_ready and not self._stack.selection.is_empty
             ),
@@ -110,6 +116,20 @@ class EditorCommandCoordinator:
 
     def select_all(self) -> None:
         self._execute(SelectAllCommand(), "Selected entire canvas")
+
+    def select_background(self) -> None:
+        self._before_mutation()
+        layer = self._stack.active_layer
+        if layer is None:
+            self.refresh()
+            return
+        event = (
+            self._application.segmentation_controller
+            .start_select_background_selection(layer)
+        )
+        if event.status is not None:
+            self._application.set_status(event.status)
+        self.refresh()
 
     def clear_selection(self) -> None:
         self._execute(ClearSelectionCommand(), "Selection cleared")

@@ -647,8 +647,12 @@ def test_offscreen_root_creates_selected_reconstruction_object(
         assert isinstance(node, ReconstructionLayer)
         root.view._change_reconstruction_parameter("steps", 20.0)
         root.view._change_reconstruction_parameter("resolution", 1280)
+        root.view._change_reconstruction_parameter(
+            "lr_conditioning_resolution", 1024
+        )
         assert node.generation_parameters.steps == 20
         assert node.generation_parameters.resolution == 1280
+        assert node.generation_parameters.lr_conditioning_resolution == 1024
         root.view._activate_reconstruction_stage(
             ReconstructionStage.HR_COORDINATES
         )

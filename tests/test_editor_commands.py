@@ -2,6 +2,7 @@ import numpy as np
 
 from diffusion_editor.app.application import EditorApplication, EngineSet
 from diffusion_editor.app.editor_commands import EditorCommandCoordinator
+from diffusion_editor.generation.types import EnginePollEvent, SegmentationResult
 
 
 class _Settings:
@@ -15,8 +16,13 @@ class _Settings:
 class _Engine:
     model_info = {}
 
+    def __init__(self):
+        self.poll_result = None
+
     def poll_event(self):
-        return None
+        result = self.poll_result
+        self.poll_result = None
+        return result
 
     def shutdown(self):
         pass
@@ -89,4 +95,44 @@ def test_layer_and_selection_commands_cancel_active_mutation_first():
     commands.handlers["layer.flatten"]()
     assert len(application.layer_stack.all_layers()) == 1
     assert len(cancelled) == 2
+    application.close()
+
+
+def test_select_background_command_submits_full_composite_segmentation():
+    application = _application()
+    image = np.zeros((4, 5, 4), dtype=np.uint8)
+    image[:, :] = (12, 34, 56, 255)
+    application.layer_stack.init_from_image(image)
+    requests = []
+    application.engines.segmentation.submit_request = (
+        lambda request, **_kwargs: requests.append(request) or True
+    )
+    commands = EditorCommandCoordinator(application)
+
+    assert application.command_states["selection.background"] == (True, False)
+    commands.handlers["selection.background"]()
+
+    assert application.status_text == "Selecting background..."
+    assert len(requests) == 1
+    np.testing.assert_array_equal(requests[0].image, image)
+    assert requests[0].invert is True
+    assert application.command_states["selection.background"] == (False, False)
+
+    mask = np.zeros((4, 5), dtype=np.uint8)
+    mask[:, :2] = 255
+    application.engines.segmentation.poll_result = EnginePollEvent(
+        task_type="segmentation",
+        result=SegmentationResult(mask=mask),
+    )
+    application.poll()
+
+    np.testing.assert_array_equal(
+        application.layer_stack.selection.data,
+        mask.astype(np.float32) / 255.0,
+    )
+    assert application.status_text == "Background selected"
+    application.document.undo()
+    assert application.layer_stack.selection.is_empty
+    application.document.redo()
+    assert np.all(application.layer_stack.selection.data[:, :2] == 1.0)
     application.close()

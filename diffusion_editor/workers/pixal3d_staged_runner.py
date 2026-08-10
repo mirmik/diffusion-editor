@@ -8,6 +8,7 @@ keeping the stage protocol and stopping semantics under editor ownership.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -204,6 +205,228 @@ def _shape_preview(meshes, path: Path, face_target: int = 100_000) -> Path:
     return path
 
 
+def _lr_conditioner(pipeline, resolution: int):
+    """Select a trained conditioner while retaining LR grid coordinates."""
+    if resolution == 512:
+        return pipeline.image_cond_model_shape_512, None
+    if resolution == 1024:
+        return pipeline.image_cond_model_shape_1024, 32
+    raise ValueError(f"Unsupported LR conditioning resolution: {resolution}")
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _save_shape_checkpoint(
+    path: Path,
+    normalized_latent,
+    resolution: int,
+    camera: dict,
+    source_path: Path,
+    model_path: str,
+) -> Path:
+    """Write a pickle-free, session-local checkpoint for masked refinement."""
+    import numpy as np
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        path,
+        protocol_version=np.asarray([1], dtype=np.int32),
+        coords=_tensor_numpy(normalized_latent.coords),
+        normalized_feats=_tensor_numpy(normalized_latent.feats),
+        resolution=np.asarray([resolution], dtype=np.int32),
+        camera_angle_x=np.asarray(
+            [float(camera["camera_angle_x"])], dtype=np.float64
+        ),
+        camera_distance=np.asarray(
+            [float(camera["distance"])], dtype=np.float64
+        ),
+        mesh_scale=np.asarray(
+            [float(camera.get("mesh_scale", 1.0))], dtype=np.float64
+        ),
+        source_sha256=np.asarray(_file_sha256(source_path)),
+        model_path=np.asarray(str(Path(model_path).resolve())),
+    )
+    return path
+
+
+def _project_mask_to_tokens(mask_image, coords, resolution: int, camera: dict):
+    """Project an image-space soft mask onto fixed Pixal3D HR coordinates."""
+    import numpy as np
+    import torch
+    import torch.nn.functional as functional
+    from PIL import Image
+    from pixal3d.trainers.flow_matching.mixins.image_conditioned_proj import (
+        project_points_to_image_batch,
+    )
+
+    projection_resolution = max(mask_image.size)
+    mask = mask_image.convert("L").resize(
+        (projection_resolution, projection_resolution),
+        resample=Image.Resampling.BILINEAR,
+    )
+    mask_values = torch.from_numpy(
+        np.asarray(mask, dtype=np.float32) / 255.0
+    ).to(coords.device)[None, None]
+
+    grid_resolution = resolution // 16
+    raw_points = coords[:, 1:].float() / (grid_resolution - 1) * 2.0 - 1.0
+    rotation = torch.tensor(
+        ((1.0, 0.0, 0.0), (0.0, 0.0, -1.0), (0.0, 1.0, 0.0)),
+        device=coords.device,
+    )
+    points = raw_points @ rotation.T
+    points = points / float(camera.get("mesh_scale", 1.0)) / 2.0
+    transform = torch.tensor(
+        (
+            (1.0, 0.0, 0.0, 0.0),
+            (0.0, 0.0, -1.0, -float(camera["distance"])),
+            (0.0, 1.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0, 1.0),
+        ),
+        device=coords.device,
+    )[None]
+    image_points, _depth, valid = project_points_to_image_batch(
+        points,
+        transform,
+        torch.tensor([float(camera["camera_angle_x"])], device=coords.device),
+        projection_resolution,
+    )
+    queries = (image_points + 0.5) / projection_resolution * 2.0 - 1.0
+    weights = functional.grid_sample(
+        mask_values,
+        queries.view(1, -1, 1, 2),
+        mode="bilinear",
+        padding_mode="zeros",
+        align_corners=False,
+    ).view(-1)
+    return weights * valid.view(-1).to(weights.dtype)
+
+
+def _run_refine(args, reporter, upstream, sp, torch, np) -> None:
+    from PIL import Image
+
+    checkpoint_path = Path(args.refine_checkpoint)
+    with np.load(checkpoint_path, allow_pickle=False) as saved:
+        if int(saved["protocol_version"][0]) != 1:
+            raise ValueError("unsupported Pixal3D refine checkpoint version")
+        expected_model = str(Path(args.model_path).resolve())
+        if str(saved["model_path"].item()) != expected_model:
+            raise ValueError("refine checkpoint belongs to a different model")
+        resolution = int(saved["resolution"][0])
+        coords = torch.from_numpy(saved["coords"].copy()).to("cuda")
+        base_feats = torch.from_numpy(
+            saved["normalized_feats"].copy()
+        ).to("cuda").float()
+        camera = {
+            "camera_angle_x": float(saved["camera_angle_x"][0]),
+            "distance": float(saved["camera_distance"][0]),
+            "mesh_scale": float(saved["mesh_scale"][0]),
+        }
+
+    condition_image = Image.open(args.image).convert("RGB")
+    mask_image = Image.open(args.refine_mask).convert("L")
+    if condition_image.size != mask_image.size:
+        raise ValueError("refine mask must match conditioning image dimensions")
+
+    pipeline = upstream.init_pipeline(args.model_path, low_vram=args.low_vram)
+    token_mask = _project_mask_to_tokens(
+        mask_image, coords, resolution, camera
+    )
+    if not bool((token_mask > 0.0).any()):
+        raise ValueError("refine mask does not select any visible 3D tokens")
+    cond = pipeline.get_proj_cond_shape(
+        pipeline.image_cond_model_shape_1024,
+        [condition_image],
+        coords,
+        grid_resolution_override=resolution // 16,
+        **camera,
+    )
+    x0 = sp.SparseTensor(feats=base_feats, coords=coords)
+    generator = torch.Generator(device="cuda").manual_seed(args.refine_seed)
+    noise = torch.randn(
+        base_feats.shape,
+        generator=generator,
+        device=base_feats.device,
+        dtype=base_feats.dtype,
+    )
+    sampler = pipeline.shape_slat_sampler
+    sigma_min = sampler.sigma_min
+    raw_times = np.linspace(args.refine_strength, 0.0, args.refine_steps + 1)
+    times = (
+        args.refine_rescale_t * raw_times
+        / (1 + (args.refine_rescale_t - 1) * raw_times)
+    )
+
+    def reference_at(value: float):
+        sigma = sigma_min + (1 - sigma_min) * value
+        return (1 - value) * base_feats + sigma * noise
+
+    sample = x0.replace(reference_at(float(times[0])))
+    flow = pipeline.models["shape_slat_flow_model_1024"]
+    if pipeline.low_vram:
+        flow.to(pipeline.device)
+    blend = token_mask[:, None].to(base_feats.dtype)
+    reporter.emit("hr_shape_flow", "running", total=args.refine_steps)
+    with torch.inference_mode():
+        for index, (current, previous) in enumerate(
+            zip(times[:-1], times[1:]), 1
+        ):
+            out = sampler.sample_once(
+                flow,
+                sample,
+                float(current),
+                float(previous),
+                cond["cond"],
+                neg_cond=cond["neg_cond"],
+                guidance_strength=args.refine_guidance,
+                guidance_rescale=0.5,
+                guidance_interval=(0.6, 1.0),
+            )
+            reference = reference_at(float(previous))
+            sample = out.pred_x_prev.replace(
+                out.pred_x_prev.feats * blend + reference * (1 - blend)
+            )
+            reporter.emit(
+                "hr_shape_flow", "running",
+                progress=index, total=args.refine_steps,
+            )
+    if pipeline.low_vram:
+        flow.cpu()
+    sample = sample.replace(sample.feats * blend + base_feats * (1 - blend))
+    reporter.emit(
+        "hr_shape_flow", "ready",
+        progress=args.refine_steps, total=args.refine_steps,
+    )
+
+    refined_checkpoint = Path(args.checkpoint)
+    _save_shape_checkpoint(
+        refined_checkpoint,
+        sample,
+        resolution,
+        camera,
+        Path(args.image),
+        args.model_path,
+    )
+    std = torch.tensor(
+        pipeline.shape_slat_normalization["std"], device=sample.device
+    )[None]
+    mean = torch.tensor(
+        pipeline.shape_slat_normalization["mean"], device=sample.device
+    )[None]
+    decoded = sample.replace(sample.feats * std + mean)
+    meshes, _subdivisions = pipeline.decode_shape_slat(decoded, resolution)
+    output = _shape_preview(meshes, Path(args.output))
+    reporter.emit(
+        "final_mesh", "ready", artifact_path=output, preview_kind="mesh"
+    )
+
+
 def run(args) -> None:
     sys.path.insert(0, str(Path(args.pixal3d_root).resolve()))
     import torch
@@ -217,6 +440,9 @@ def run(args) -> None:
 
     torch.set_grad_enabled(False)
     reporter = StageReporter(Path(args.events))
+    if args.refine_checkpoint:
+        _run_refine(args, reporter, upstream, sp, torch, np)
+        return
     active_flow = {"stage": ""}
 
     def tracked_sample(
@@ -316,8 +542,15 @@ def run(args) -> None:
 
     reporter.emit("lr_shape_flow", "running", total=args.steps)
     active_flow["stage"] = "lr_shape_flow"
+    lr_conditioner, lr_grid_override = _lr_conditioner(
+        pipeline, args.lr_conditioning_resolution
+    )
     cond_lr = pipeline.get_proj_cond_shape(
-        pipeline.image_cond_model_shape_512, [image], coords, **camera
+        lr_conditioner,
+        [image],
+        coords,
+        grid_resolution_override=lr_grid_override,
+        **camera,
     )
     lr_slat = pipeline.sample_shape_slat(
         cond_lr, pipeline.models["shape_slat_flow_model_512"], coords, sampler
@@ -398,6 +631,15 @@ def run(args) -> None:
     ).samples
     if pipeline.low_vram:
         flow.cpu()
+    if args.checkpoint:
+        _save_shape_checkpoint(
+            Path(args.checkpoint),
+            hr_slat,
+            actual_hr_resolution,
+            camera,
+            preprocessed,
+            args.model_path,
+        )
     std = torch.tensor(pipeline.shape_slat_normalization["std"])[None].to(hr_slat.device)
     mean = torch.tensor(pipeline.shape_slat_normalization["mean"])[None].to(hr_slat.device)
     shape_slat = hr_slat * std + mean
@@ -493,9 +735,23 @@ def main() -> int:
     parser.add_argument("--image", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--events", required=True)
+    parser.add_argument("--checkpoint")
+    parser.add_argument("--refine-checkpoint")
+    parser.add_argument("--refine-mask")
+    parser.add_argument("--refine-strength", type=float, default=0.35)
+    parser.add_argument("--refine-steps", type=int, default=8)
+    parser.add_argument("--refine-seed", type=int, default=123)
+    parser.add_argument("--refine-rescale-t", type=float, default=3.0)
+    parser.add_argument("--refine-guidance", type=float, default=7.5)
     parser.add_argument("--model_path", required=True)
     parser.add_argument("--target-stage", choices=STAGES, default="final_mesh")
     parser.add_argument("--resolution", type=int, default=1024)
+    parser.add_argument(
+        "--lr-conditioning-resolution",
+        type=int,
+        choices=(512, 1024),
+        default=512,
+    )
     parser.add_argument("--steps", type=int, default=12)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--decimation-target", type=int, default=200_000)

@@ -289,6 +289,7 @@ class NativeEditorRoot:
         self.reconstruction_controller = None
         self.reconstruction_viewport = None
         self._reconstruction_job_node_id: str | None = None
+        self._reconstruction_parent_run_id: str | None = None
         self._presented_reconstruction_id: str | None = None
         self.automation = None
 
@@ -847,6 +848,7 @@ class NativeEditorRoot:
             )
             if event.status:
                 self._reconstruction_job_node_id = node.id
+                self._reconstruction_parent_run_id = None
                 self._set_reconstruction_status(
                     node, ReconstructionStatus.GENERATING
                 )
@@ -854,6 +856,40 @@ class NativeEditorRoot:
         except Exception as exc:
             log.exception("Failed to start 3D reconstruction")
             self.application.set_status(f"Cannot start 3D generation: {exc}")
+
+    def start_reconstruction_refine(
+        self,
+        node: ReconstructionLayer,
+        conditioning_image: Image.Image,
+        mask_image: Image.Image,
+        *,
+        parameters=None,
+    ):
+        """Backend entry point for a future reconstruction-refine UI."""
+        controller = self.reconstruction_controller
+        if controller is None or controller.is_busy:
+            return None
+        if self.application.layer_stack.find_layer_by_id(node.id) is not node:
+            raise ValueError("reconstruction node does not belong to the document")
+        parent = node.active_run or node.base_run
+        if parent is None or not parent.checkpoint_path:
+            raise ValueError("active reconstruction run has no refine checkpoint")
+        if not os.path.isfile(parent.checkpoint_path):
+            raise ValueError("active reconstruction refine checkpoint is missing")
+        event = controller.start_refine(
+            conditioning_image,
+            mask_image,
+            parent.checkpoint_path,
+            parameters=parameters,
+        )
+        if event.status and event.error is None:
+            self._reconstruction_job_node_id = node.id
+            self._reconstruction_parent_run_id = parent.run_id
+            self._set_reconstruction_status(node, ReconstructionStatus.GENERATING)
+            self.application.set_status(event.status)
+        elif event.status:
+            self.application.set_status(event.status)
+        return event
 
     def _cancel_reconstruction(self) -> None:
         controller = self.reconstruction_controller
@@ -900,6 +936,8 @@ class NativeEditorRoot:
                     log.exception("Failed to display reconstruction stage preview")
             return
         self._reconstruction_job_node_id = None
+        parent_run_id = getattr(self, "_reconstruction_parent_run_id", None)
+        self._reconstruction_parent_run_id = None
         if event.result is not None:
             if event.result.completed_stage is not ReconstructionStage.FINAL_MESH:
                 self._set_reconstruction_status(node, ReconstructionStatus.READY)
@@ -921,6 +959,15 @@ class NativeEditorRoot:
                         vertices,
                         triangles,
                         meshes,
+                        source_path=event.result.source_path,
+                        conditioning_path=event.result.conditioning_path,
+                        checkpoint_path=event.result.checkpoint_path,
+                        run_kind=event.result.kind,
+                        parent_run_id=(
+                            parent_run_id
+                            if event.result.kind.value == "masked_refine"
+                            else None
+                        ),
                     )
                 )
                 self._presented_reconstruction_id = node.id

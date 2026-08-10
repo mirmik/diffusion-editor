@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
 from numbers import Integral
 from typing import Callable, Protocol
 
@@ -11,6 +12,7 @@ from PIL import Image, ImageFilter
 
 from .layer import Layer
 from .reconstruction import ReconstructionLayer, ReconstructionStatus
+from ..generation.types import ReconstructionRun, ReconstructionRunKind
 from .change_event import DocumentChangeKind
 from .tool import DiffusionTool, InstructTool, Tool
 from .layer_stack import LayerStack
@@ -205,11 +207,34 @@ class PublishReconstructionResultCommand:
     vertex_count: int
     triangle_count: int
     mesh_count: int
+    source_path: str = ""
+    conditioning_path: str | None = None
+    checkpoint_path: str | None = None
+    run_kind: ReconstructionRunKind = ReconstructionRunKind.BASE
+    parent_run_id: str | None = None
+    run_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     label: str = "Publish 3D Reconstruction"
 
     def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
         if layer_stack.find_layer_by_id(self.layer.id) is not self.layer:
             raise ValueError("reconstruction node does not belong to the layer stack")
+        run = ReconstructionRun(
+            run_id=self.run_id,
+            kind=self.run_kind,
+            glb_path=str(self.glb_path),
+            source_path=str(self.source_path),
+            conditioning_path=self.conditioning_path,
+            checkpoint_path=self.checkpoint_path,
+            parent_run_id=self.parent_run_id,
+            vertex_count=int(self.vertex_count),
+            triangle_count=int(self.triangle_count),
+            mesh_count=int(self.mesh_count),
+        )
+        runs = (
+            (run,)
+            if self.run_kind is ReconstructionRunKind.BASE
+            else (*self.layer.runs, run)
+        )
         return _attribute_delta(
             layer_stack,
             self.layer,
@@ -220,6 +245,8 @@ class PublishReconstructionResultCommand:
                 "vertex_count": int(self.vertex_count),
                 "triangle_count": int(self.triangle_count),
                 "mesh_count": int(self.mesh_count),
+                "runs": runs,
+                "active_run_id": run.run_id,
             },
         )
 

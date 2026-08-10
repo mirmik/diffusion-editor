@@ -31,6 +31,7 @@ CommandHandler = Callable[[], None]
 _CHROME_BACKGROUND = SrgbColor(0.075, 0.080, 0.095, 1.0)
 _WORKSPACE_EDGE = SrgbColor(0.32, 0.35, 0.40, 1.0)
 _RECONSTRUCTION_RESOLUTIONS = (1024, 1280, 1536)
+_RECONSTRUCTION_LR_CONDITIONING_RESOLUTIONS = (512, 1024)
 _RECONSTRUCTION_TEXTURE_SIZES = (1024, 2048, 4096)
 
 
@@ -81,6 +82,11 @@ COMMAND_SPECS = (
     NativeCommandSpec("edit.paste", "Paste", "Ctrl+V"),
     NativeCommandSpec("edit.settings", "Settings…"),
     NativeCommandSpec("selection.all", "Select All", "Ctrl+A"),
+    NativeCommandSpec(
+        "selection.background",
+        "Select Background",
+        tooltip="Select the image background using automatic segmentation",
+    ),
     NativeCommandSpec("selection.clear", "Clear Selection", "Ctrl+D"),
     NativeCommandSpec("selection.invert", "Invert Selection", "Ctrl+Shift+I"),
     NativeCommandSpec("layer.new", "New Layer", "Ctrl+Shift+N"),
@@ -156,6 +162,7 @@ MENU_COMMANDS = (
         "Select",
         (
             "selection.all",
+            "selection.background",
             "selection.clear",
             None,
             "selection.invert",
@@ -686,6 +693,11 @@ class NativeEditorView:
         add_spin("seed", "Seed", defaults.seed, 0, 2_147_483_647, 1)
         add_slider("steps", "Sampling steps", defaults.steps, 1, 50, 1)
         add_combo("resolution", "HR resolution", _RECONSTRUCTION_RESOLUTIONS)
+        add_combo(
+            "lr_conditioning_resolution",
+            "LR conditioning",
+            _RECONSTRUCTION_LR_CONDITIONING_RESOLUTIONS,
+        )
         add_slider(
             "manual_fov_degrees", "Camera FOV (0 = Auto)",
             defaults.manual_fov_degrees, 0, 120, 1,
@@ -760,7 +772,14 @@ class NativeEditorView:
             or self._reconstruction_parameter_handler is None
         ):
             return
-        if key in {"seed", "steps", "resolution", "decimation_target", "texture_size"}:
+        if key in {
+            "seed",
+            "steps",
+            "resolution",
+            "lr_conditioning_resolution",
+            "decimation_target",
+            "texture_size",
+        }:
             value = int(round(float(value)))
         elif key == "manual_fov_degrees":
             value = float(value)
@@ -783,6 +802,11 @@ class NativeEditorView:
             controls["steps"].value = float(parameters.steps)
             controls["resolution"].selected_index = (
                 _RECONSTRUCTION_RESOLUTIONS.index(parameters.resolution)
+            )
+            controls["lr_conditioning_resolution"].selected_index = (
+                _RECONSTRUCTION_LR_CONDITIONING_RESOLUTIONS.index(
+                    parameters.lr_conditioning_resolution
+                )
             )
             controls["manual_fov_degrees"].value = (
                 parameters.manual_fov_degrees

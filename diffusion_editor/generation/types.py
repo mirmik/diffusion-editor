@@ -64,11 +64,17 @@ class ReconstructionStageStatus(str, Enum):
     FAILED = "failed"
 
 
+class ReconstructionRunKind(str, Enum):
+    BASE = "base"
+    MASKED_REFINE = "masked_refine"
+
+
 @dataclass(frozen=True)
 class ReconstructionParameters:
     seed: int = 42
     steps: int = 12
     resolution: int = 1024
+    lr_conditioning_resolution: int = 512
     manual_fov_degrees: float = 0.0
     decimation_target: int = 200_000
     texture_size: int = 2048
@@ -81,6 +87,8 @@ class ReconstructionParameters:
             raise ValueError("reconstruction steps must be in [1, 50]")
         if self.resolution not in (1024, 1280, 1536):
             raise ValueError("reconstruction resolution must be 1024, 1280, or 1536")
+        if self.lr_conditioning_resolution not in (512, 1024):
+            raise ValueError("LR conditioning resolution must be 512 or 1024")
         if not 0.0 <= self.manual_fov_degrees <= 120.0:
             raise ValueError("manual camera FOV must be in [0, 120] degrees")
         if not 50_000 <= self.decimation_target <= 1_000_000:
@@ -93,6 +101,7 @@ class ReconstructionParameters:
             "seed": self.seed,
             "steps": self.steps,
             "resolution": self.resolution,
+            "lr_conditioning_resolution": self.lr_conditioning_resolution,
             "manual_fov_degrees": self.manual_fov_degrees,
             "decimation_target": self.decimation_target,
             "texture_size": self.texture_size,
@@ -107,11 +116,49 @@ class ReconstructionParameters:
             seed=int(payload.get("seed", 42)),
             steps=int(payload.get("steps", 12)),
             resolution=int(payload.get("resolution", 1024)),
+            lr_conditioning_resolution=int(
+                payload.get("lr_conditioning_resolution", 512)
+            ),
             manual_fov_degrees=float(payload.get("manual_fov_degrees", 0.0)),
             decimation_target=int(payload.get("decimation_target", 200_000)),
             texture_size=int(payload.get("texture_size", 2048)),
             low_vram=bool(payload.get("low_vram", True)),
         )
+
+
+@dataclass(frozen=True)
+class ReconstructionRefineParameters:
+    strength: float = 0.35
+    steps: int = 8
+    seed: int = 123
+    rescale_t: float = 3.0
+    guidance_strength: float = 7.5
+
+    def __post_init__(self) -> None:
+        if not 0.0 < self.strength <= 1.0:
+            raise ValueError("refine strength must be in (0, 1]")
+        if not 1 <= self.steps <= 50:
+            raise ValueError("refine steps must be in [1, 50]")
+        if not 0 <= self.seed <= 2_147_483_647:
+            raise ValueError("refine seed must be in [0, 2147483647]")
+        if self.rescale_t <= 0.0:
+            raise ValueError("refine rescale_t must be positive")
+        if self.guidance_strength < 0.0:
+            raise ValueError("refine guidance strength must be non-negative")
+
+
+@dataclass(frozen=True)
+class ReconstructionRun:
+    run_id: str
+    kind: ReconstructionRunKind
+    glb_path: str
+    source_path: str
+    conditioning_path: str | None = None
+    checkpoint_path: str | None = None
+    parent_run_id: str | None = None
+    vertex_count: int = 0
+    triangle_count: int = 0
+    mesh_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -229,6 +276,14 @@ class ReconstructionRequest:
 
 
 @dataclass(frozen=True)
+class ReconstructionRefineRequest:
+    conditioning_image: Image.Image
+    mask_image: Image.Image
+    base_checkpoint_path: str
+    parameters: ReconstructionRefineParameters = ReconstructionRefineParameters()
+
+
+@dataclass(frozen=True)
 class ReconstructionStageArtifact:
     stage: ReconstructionStage
     path: str
@@ -250,6 +305,9 @@ class ReconstructionResult:
     source_path: str
     completed_stage: ReconstructionStage = ReconstructionStage.FINAL_MESH
     artifacts: tuple[ReconstructionStageArtifact, ...] = ()
+    kind: ReconstructionRunKind = ReconstructionRunKind.BASE
+    conditioning_path: str | None = None
+    checkpoint_path: str | None = None
 
 
 @dataclass(frozen=True)

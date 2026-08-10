@@ -130,11 +130,19 @@ pending stage be selected as the next generation target. Coordinate stages are
 published as lightweight GLB geometry previews; shape and final stages publish
 mesh previews. Per-reconstruction generation controls cover seed, sampling
 steps, HR resolution, automatic or manual camera FOV, final mesh face budget,
-texture size, and low-VRAM execution. Their values are saved with the layer and
-snapshotted when a job starts. The current vertical slice captures the full
-visible composite;
+texture size, low-VRAM execution, and an experimental 512/1024 LR conditioning
+resolution selector. The 1024 option uses the trained 1024 shape conditioner
+while retaining the LR coordinate grid. Parameter values are saved with the
+layer and snapshotted when a job starts. The current vertical slice captures
+the full visible composite;
 project-owned artifact persistence, checkpoint resume, and the below-object
 source boundary remain follow-up work.
+
+The backend also has an experimental, UI-neutral masked-refinement path. Base
+runs leave a session-local HR shape checkpoint; a same-sized preprocessed
+conditioning image and soft mask can produce a geometry-only child run without
+overwriting its parent. See
+[Pixal3D masked refinement backend](docs/pixal3d-masked-refinement.md).
 
 For live development automation, enable the local Editor MCP server in
 **Edit → Settings** and restart the editor. Termin's existing MCP/CLI helper

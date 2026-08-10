@@ -13,6 +13,7 @@ from tcbase import log
 
 from ..agent.tools import create_editor_tool_registry
 from ..document.document_service import DocumentService
+from ..document.commands import SetLayerSelectionCommand
 from ..document.history import HistoryManager
 from ..document.layer import Layer
 from ..document.layer_stack import LayerStack
@@ -179,6 +180,9 @@ class EditorApplication:
         self.segmentation_controller = SegmentationGenerationController(
             engine=self.engines.segmentation,
             composite_below=composite_below,
+            composite=lambda: np.ascontiguousarray(
+                self.layer_stack.composite()
+            ),
             document_state=document_state,
         )
         self.grounding_controller = GroundingController(
@@ -605,6 +609,17 @@ class EditorApplication:
             if command is not None:
                 self.document.execute(command)
             self.set_status(status)
+        elif event.selection_result is not None:
+            context, seg_mask = event.selection_result
+            _layer, rejection = self._resolve_generation_target(context)
+            if rejection is not None:
+                self.set_status(rejection)
+                return
+            self.document.execute(SetLayerSelectionCommand(
+                mask=seg_mask,
+                label="Select Background",
+            ))
+            self.set_status("Background selected")
         elif event.status:
             self.set_status(event.status)
 

@@ -10,7 +10,7 @@ from termin.gui_native import (
     tc_ui_document_destroy,
 )
 
-from diffusion_editor.app.native_shell import NativeEditorView
+from diffusion_editor.app.native_shell import MENU_COMMANDS, NativeEditorView
 from diffusion_editor.generation.types import (
     RECONSTRUCTION_STAGES,
     ReconstructionParameters,
@@ -36,6 +36,7 @@ EXPECTED_COMMANDS = (
     "edit.paste",
     "edit.settings",
     "selection.all",
+    "selection.background",
     "selection.clear",
     "selection.invert",
     "layer.new",
@@ -49,6 +50,22 @@ EXPECTED_COMMANDS = (
     "view.fit",
     "view.agent_panel",
 )
+
+
+def test_select_menu_contains_background_segmentation_command():
+    selection_menu = next(
+        command_ids
+        for menu_id, _label, command_ids in MENU_COMMANDS
+        if menu_id == "selection"
+    )
+
+    assert selection_menu == (
+        "selection.all",
+        "selection.background",
+        "selection.clear",
+        None,
+        "selection.invert",
+    )
 
 
 def _snapshot_by_id(document):
@@ -288,6 +305,7 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar():
             seed=123,
             steps=18,
             resolution=1280,
+            lr_conditioning_resolution=1024,
             manual_fov_degrees=45.0,
             decimation_target=350_000,
             texture_size=4096,
@@ -297,6 +315,9 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar():
         assert view.reconstruction_parameter_controls["seed"].value == 123.0
         assert view.reconstruction_parameter_controls[
             "resolution"
+        ].selected_index == 1
+        assert view.reconstruction_parameter_controls[
+            "lr_conditioning_resolution"
         ].selected_index == 1
         assert all(
             not control.widget.enabled
@@ -387,6 +408,7 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar():
             "seed",
             "steps",
             "resolution",
+            "lr_conditioning_resolution",
             "manual_fov_degrees",
             "decimation_target",
             "texture_size",

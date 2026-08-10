@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
+from io import BytesIO
 import math
 
 import numpy as np
+from PIL import Image
 from tcbase import Action, MouseButton
 from tcbase._geom_native import LinearColor
 from termin.geombase import OrbitCamera, Vec3
@@ -16,7 +19,14 @@ from tgfx import (
     PIXEL_RGBA8,
     Tgfx2Context,
     Tgfx2ShaderStage,
+    TextureEncoding,
     draw_tc_mesh,
+)
+from tgfx._tgfx_native import (
+    ShaderArtifactPolicy,
+    ShaderLanguage,
+    TcShader,
+    tc_shader_ensure_tgfx2,
 )
 
 
@@ -65,6 +75,73 @@ void main() {
     frag_color = vec4(color, 1.0);
 }
 """
+
+_TEXTURED_VERTEX_SHADER = """#version 450 core
+#ifdef VULKAN
+layout(push_constant) uniform PCBlock {
+    mat4 u_mvp;
+    vec4 u_color;
+    vec4 u_light_direction;
+} pc;
+#define U_MVP pc.u_mvp
+#else
+uniform mat4 u_mvp;
+#define U_MVP u_mvp
+#endif
+layout(location=0) in vec3 a_position;
+layout(location=2) in vec2 a_uv;
+layout(location=0) out vec3 v_position;
+layout(location=1) out vec2 v_uv;
+void main() {
+    v_position = a_position;
+    v_uv = a_uv;
+    gl_Position = U_MVP * vec4(a_position, 1.0);
+}
+"""
+
+_TEXTURED_FRAGMENT_SHADER = """#version 450 core
+#ifdef VULKAN
+layout(push_constant) uniform PCBlock {
+    mat4 u_mvp;
+    vec4 u_color;
+    vec4 u_light_direction;
+} pc;
+#define U_COLOR pc.u_color
+#define U_LIGHT_DIRECTION pc.u_light_direction.xyz
+#else
+uniform vec4 u_color;
+uniform vec3 u_light_direction;
+#define U_COLOR u_color
+#define U_LIGHT_DIRECTION u_light_direction
+#endif
+layout(binding=0) uniform sampler2D u_base_color_texture;
+layout(location=0) in vec3 v_position;
+layout(location=1) in vec2 v_uv;
+layout(location=0) out vec4 frag_color;
+void main() {
+    vec3 normal = normalize(cross(dFdy(v_position), dFdx(v_position)));
+    vec3 light_direction = normalize(U_LIGHT_DIRECTION);
+    float diffuse = max(dot(normal, light_direction), 0.0);
+    vec4 base_color = texture(u_base_color_texture, v_uv) * U_COLOR;
+    frag_color = vec4(base_color.rgb * (0.28 + 0.72 * diffuse), base_color.a);
+}
+"""
+
+
+@dataclass
+class _MeshRenderItem:
+    mesh: object
+    texture: object | None = None
+    color: tuple[float, float, float, float] = (0.34, 0.72, 0.95, 1.0)
+
+
+def _decode_texture(payload: bytes) -> tuple[int, int, np.ndarray]:
+    with Image.open(BytesIO(payload)) as image:
+        # nanobind's writable uint8 ndarray boundary rejects Pillow's
+        # read-only array view, even when it is otherwise C-contiguous.
+        rgba = np.array(image.convert("RGBA"), dtype=np.uint8, order="C", copy=True)
+    height, width = rgba.shape[:2]
+    return width, height, rgba.reshape(-1).copy()
 
 
 class _OrbitCamera:
@@ -254,7 +331,7 @@ class NativeReconstructionViewport:
         self._light_direction = self._camera.direction_from_target()
         self._dirty = True
         self._closed = False
-        self._meshes: list[object] = []
+        self._mesh_items: list[_MeshRenderItem] = []
         self._glb_document = None
         self._color_texture = None
         self._depth_texture = None
@@ -265,6 +342,27 @@ class NativeReconstructionViewport:
         self._fragment_shader = self._graphics.device.create_shader(
             Tgfx2ShaderStage.Fragment, _FRAGMENT_SHADER
         )
+        self._textured_shader = TcShader.get_or_create(
+            "diffusion-editor-reconstruction-textured"
+        )
+        self._textured_shader.set_language(ShaderLanguage.GLSL)
+        self._textured_shader.set_artifact_policy(ShaderArtifactPolicy.REQUIRED)
+        self._textured_shader.set_sources_with_entries(
+            _TEXTURED_VERTEX_SHADER,
+            _TEXTURED_FRAGMENT_SHADER,
+            "",
+            "diffusion-editor-reconstruction-textured",
+            "diffusion_editor/app/reconstruction_textured.glsl",
+            "main",
+            "main",
+        )
+        textured_pair = tc_shader_ensure_tgfx2(
+            self._graphics.context, self._textured_shader
+        )
+        self._textured_vertex_shader = textured_pair.vs
+        self._textured_fragment_shader = textured_pair.fs
+        if not self._textured_vertex_shader or not self._textured_fragment_shader:
+            raise RuntimeError("Reconstruction texture shader compile failed")
         self.surface = _ViewportSurface(self._camera, self.invalidate)
         self.viewport = document.create_viewport3d()
         self.viewport.widget.stable_id = "diffusion-editor.reconstruction.viewport"
@@ -274,7 +372,7 @@ class NativeReconstructionViewport:
 
     @property
     def mesh_count(self) -> int:
-        return len(self._meshes)
+        return len(self._mesh_items)
 
     @property
     def light_direction(self) -> tuple[float, float, float]:
@@ -287,7 +385,8 @@ class NativeReconstructionViewport:
 
     def clear_model(self) -> None:
         self._require_open()
-        self._meshes.clear()
+        self._destroy_model_textures()
+        self._mesh_items.clear()
         self._glb_document = None
         self.invalidate()
 
@@ -296,7 +395,7 @@ class NativeReconstructionViewport:
         from ..native_glb import NativeGLBDocument
 
         source = NativeGLBDocument(path)
-        meshes = []
+        mesh_items = []
         vertices = 0
         indices = 0
         bounds_min = None
@@ -310,7 +409,16 @@ class NativeReconstructionViewport:
                 name=info.name or f"Reconstruction mesh {index}",
                 convert_to_z_up=True,
             )
-            meshes.append(mesh)
+            texture = None
+            color = (0.34, 0.72, 0.95, 1.0)
+            base_color = source.base_color_texture(index)
+            if base_color is not None:
+                width, height, pixels = _decode_texture(base_color.payload)
+                texture = self._graphics.create_texture_rgba8(
+                    width, height, pixels, TextureEncoding.SRGB
+                )
+                color = base_color.factor
+            mesh_items.append(_MeshRenderItem(mesh, texture, color))
             vertices += int(mesh.vertex_count)
             indices += int(mesh.index_count)
             payload = np.asarray(mesh.mesh.get_vertices_buffer(), dtype=np.float32)
@@ -321,15 +429,16 @@ class NativeReconstructionViewport:
                 local_max = positions.max(axis=0)
                 bounds_min = local_min if bounds_min is None else np.minimum(bounds_min, local_min)
                 bounds_max = local_max if bounds_max is None else np.maximum(bounds_max, local_max)
-        if not meshes:
+        if not mesh_items:
             raise RuntimeError("Generated GLB contains no meshes")
+        self._destroy_model_textures()
         self._glb_document = source
-        self._meshes = meshes
+        self._mesh_items = mesh_items
         if bounds_min is not None and bounds_max is not None:
             self._camera.fit(bounds_min, bounds_max)
             self._light_direction = self._camera.direction_from_target()
         self.invalidate()
-        return vertices, indices // 3, len(meshes)
+        return vertices, indices // 3, len(mesh_items)
 
     def invalidate(self) -> None:
         if self._closed:
@@ -358,14 +467,18 @@ class NativeReconstructionViewport:
         ctx.set_depth_write(True)
         ctx.set_blend(False)
         ctx.set_cull(CULL_NONE)
-        ctx.bind_shader(self._vertex_shader, self._fragment_shader)
-        self._set_draw_state(
-            self._camera.mvp(width, height),
-            (0.34, 0.72, 0.95, 1.0),
-            self._light_direction,
-        )
-        for mesh in self._meshes:
-            draw_tc_mesh(ctx, mesh)
+        mvp = self._camera.mvp(width, height)
+        for item in self._mesh_items:
+            if item.texture is None:
+                ctx.bind_shader(self._vertex_shader, self._fragment_shader)
+            else:
+                ctx.bind_shader(
+                    self._textured_vertex_shader, self._textured_fragment_shader
+                )
+                ctx.use_shader_resource_layout(self._textured_shader)
+                ctx.bind_texture_by_name("u_base_color_texture", item.texture)
+            self._set_draw_state(mvp, item.color, self._light_direction)
+            draw_tc_mesh(ctx, item.mesh)
         ctx.end_pass()
         if opened_frame:
             ctx.end_frame()
@@ -387,8 +500,14 @@ class NativeReconstructionViewport:
         self._graphics.device.destroy_shader(self._fragment_shader)
         self._color_texture = None
         self._depth_texture = None
-        self._meshes.clear()
+        self._destroy_model_textures()
+        self._mesh_items.clear()
         self._glb_document = None
+
+    def _destroy_model_textures(self) -> None:
+        for item in self._mesh_items:
+            if item.texture is not None:
+                self._graphics.destroy_texture(item.texture)
 
     def _ensure_textures(self, width: int, height: int) -> None:
         size = (max(int(width), 1), max(int(height), 1))

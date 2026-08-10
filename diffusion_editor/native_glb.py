@@ -24,9 +24,19 @@ _extraction_root: tempfile.TemporaryDirectory[str] | None = None
 @dataclass(frozen=True)
 class NativeMeshInfo:
     name: str
+    primitive_count: int
     vertex_count: int
     index_count: int
     skinned: bool
+
+
+@dataclass(frozen=True)
+class NativeBaseColorTexture:
+    """Encoded base-color image used by a whole static mesh."""
+
+    payload: bytes
+    mime_type: str
+    factor: tuple[float, float, float, float]
 
 
 def _load_native_module():
@@ -79,6 +89,7 @@ class NativeGLBDocument:
         self.meshes = tuple(
             NativeMeshInfo(
                 name=entry["name"],
+                primitive_count=int(entry["primitive_count"]),
                 vertex_count=int(entry["vertex_count"]),
                 index_count=int(entry["index_count"]),
                 skinned=bool(entry["skinned"]),
@@ -109,3 +120,38 @@ class NativeGLBDocument:
                 f"Native GLB build published no tmesh for UUID {mesh_uuid!r}"
             )
         return mesh
+
+    def base_color_texture(self, mesh_index: int) -> NativeBaseColorTexture | None:
+        """Return a texture that can be applied while drawing the whole mesh.
+
+        ``draw_tc_mesh`` currently draws every primitive in one call.  A texture
+        is therefore safe to bind only when the mesh has one primitive.  GLBs
+        without a compatible material deliberately retain the viewport's solid
+        fallback.
+        """
+
+        info = self.meshes[int(mesh_index)]
+        if info.primitive_count != 1:
+            return None
+        primitive = self._document.primitive_info(int(mesh_index), 0)
+        if not primitive["has_material"]:
+            return None
+        material = self._document.material_info(int(primitive["material_index"]))
+        view = material["base_color_texture"]
+        if (
+            not view.get("present", False)
+            or int(view.get("texcoord", -1)) != 0
+            or bool(view.get("has_transform", False))
+        ):
+            return None
+        texture = self._document.texture_info(int(view["texture_index"]))
+        if not texture["has_image"]:
+            return None
+        image_index = int(texture["image_index"])
+        image = self._document.image_info(image_index)
+        factor = tuple(float(value) for value in material["base_color_factor"])
+        return NativeBaseColorTexture(
+            payload=bytes(self._document.image_payload(image_index)),
+            mime_type=str(image["mime_type"]),
+            factor=(factor[0], factor[1], factor[2], factor[3]),
+        )

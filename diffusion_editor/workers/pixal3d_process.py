@@ -17,6 +17,7 @@ from PIL import Image
 
 from ..generation.types import (
     ReconstructionParameters,
+    ReconstructionRefineParameters,
     ReconstructionStage,
     ReconstructionStageArtifact,
     ReconstructionStageEvent,
@@ -65,10 +66,20 @@ class Pixal3DProcessClient:
         self._process: subprocess.Popen[bytes] | None = None
         self._artifact_roots: list[Path] = []
         self._artifacts: list[ReconstructionStageArtifact] = []
+        self._checkpoint_path: Path | None = None
+        self._conditioning_path: Path | None = None
 
     @property
     def artifacts(self) -> tuple[ReconstructionStageArtifact, ...]:
         return tuple(self._artifacts)
+
+    @property
+    def checkpoint_path(self) -> Path | None:
+        return self._checkpoint_path
+
+    @property
+    def conditioning_path(self) -> Path | None:
+        return self._conditioning_path
 
     def generate(
         self,
@@ -87,6 +98,9 @@ class Pixal3DProcessClient:
         output_path = artifact_root / "model.glb"
         log_path = artifact_root / "pixal3d.log"
         events_path = artifact_root / "events.jsonl"
+        checkpoint_path = artifact_root / "shape-checkpoint.npz"
+        self._checkpoint_path = None
+        self._conditioning_path = None
         image.convert("RGBA").save(source_path, format="PNG")
         self._artifacts = [ReconstructionStageArtifact(
             ReconstructionStage.SOURCE_IMAGE,
@@ -103,6 +117,9 @@ class Pixal3DProcessClient:
             return output_path, source_path
 
         resolution = parameters.resolution if parameters else self._resolution
+        lr_conditioning_resolution = (
+            parameters.lr_conditioning_resolution if parameters else 512
+        )
         steps = parameters.steps if parameters else self._steps
         decimation_target = (
             parameters.decimation_target if parameters else self._decimation_target
@@ -132,12 +149,102 @@ class Pixal3DProcessClient:
                 "--events", str(events_path),
                 "--target-stage", target_stage.value,
                 "--manual-fov", str(manual_fov),
+                "--lr-conditioning-resolution",
+                str(lr_conditioning_resolution),
+                "--checkpoint", str(checkpoint_path),
             ))
         elif manual_fov > 0.0:
             command.extend(("--fov", str(manual_fov)))
         if low_vram:
             command.append("--low_vram")
 
+        self._run_command(command, log_path, events_path, cancel, on_event)
+        if checkpoint_path.is_file():
+            self._checkpoint_path = checkpoint_path
+        preprocessed = artifact_root / "preprocessed.png"
+        if preprocessed.is_file():
+            self._conditioning_path = preprocessed
+
+        if (
+            target_stage is ReconstructionStage.FINAL_MESH
+            and (not output_path.is_file() or output_path.stat().st_size == 0)
+        ):
+            raise RuntimeError("Pixal3D completed without producing a GLB")
+        return output_path, source_path
+
+    def refine(
+        self,
+        conditioning_image: Image.Image,
+        mask_image: Image.Image,
+        base_checkpoint_path: str | Path,
+        cancel: threading.Event,
+        *,
+        parameters: ReconstructionRefineParameters | None = None,
+        low_vram: bool | None = None,
+        on_event: Callable[[ReconstructionStageEvent], None] | None = None,
+    ) -> tuple[Path, Path]:
+        """Run geometry-only masked HR-shape refinement."""
+        self._validate_runtime()
+        if not self._staged:
+            raise RuntimeError("masked refinement requires the staged runner")
+        base_checkpoint = Path(base_checkpoint_path)
+        if not base_checkpoint.is_file():
+            raise RuntimeError(f"refine checkpoint not found: {base_checkpoint}")
+        if conditioning_image.size != mask_image.size:
+            raise ValueError("refine mask must match conditioning image dimensions")
+
+        snapshot = parameters or ReconstructionRefineParameters()
+        artifact_root = Path(tempfile.mkdtemp(
+            prefix="diffusion-editor-pixal3d-refine-"
+        ))
+        self._artifact_roots.append(artifact_root)
+        condition_path = artifact_root / "conditioning.png"
+        mask_path = artifact_root / "mask.png"
+        output_path = artifact_root / "refined.glb"
+        checkpoint_path = artifact_root / "shape-checkpoint.npz"
+        events_path = artifact_root / "events.jsonl"
+        log_path = artifact_root / "pixal3d.log"
+        conditioning_image.convert("RGB").save(condition_path, format="PNG")
+        mask_image.convert("L").save(mask_path, format="PNG")
+        self._artifacts = [ReconstructionStageArtifact(
+            ReconstructionStage.SOURCE_IMAGE, str(condition_path), "image"
+        )]
+        self._checkpoint_path = None
+        self._conditioning_path = condition_path
+        command = [
+            str(self._python), str(self._runner_path),
+            "--pixal3d-root", str(self._root),
+            "--image", str(condition_path),
+            "--output", str(output_path),
+            "--events", str(events_path),
+            "--model_path", str(self._model_path),
+            "--checkpoint", str(checkpoint_path),
+            "--refine-checkpoint", str(base_checkpoint),
+            "--refine-mask", str(mask_path),
+            "--refine-strength", str(snapshot.strength),
+            "--refine-steps", str(snapshot.steps),
+            "--refine-seed", str(snapshot.seed),
+            "--refine-rescale-t", str(snapshot.rescale_t),
+            "--refine-guidance", str(snapshot.guidance_strength),
+        ]
+        if self._low_vram if low_vram is None else bool(low_vram):
+            command.append("--low_vram")
+        self._run_command(command, log_path, events_path, cancel, on_event)
+        if not output_path.is_file() or output_path.stat().st_size == 0:
+            raise RuntimeError("Pixal3D refinement completed without a GLB")
+        if not checkpoint_path.is_file():
+            raise RuntimeError("Pixal3D refinement completed without a checkpoint")
+        self._checkpoint_path = checkpoint_path
+        return output_path, condition_path
+
+    def _run_command(
+        self,
+        command: list[str],
+        log_path: Path,
+        events_path: Path,
+        cancel: threading.Event,
+        on_event: Callable[[ReconstructionStageEvent], None] | None,
+    ) -> None:
         environment = os.environ.copy()
         existing_pythonpath = environment.get("PYTHONPATH", "")
         environment["PYTHONPATH"] = (
@@ -147,7 +254,6 @@ class Pixal3DProcessClient:
         )
         environment.setdefault("ATTN_BACKEND", "sdpa")
         environment.setdefault("SPARSE_ATTN_BACKEND", "sdpa")
-
         with log_path.open("wb") as log_file:
             process = subprocess.Popen(
                 command,
@@ -170,21 +276,14 @@ class Pixal3DProcessClient:
                         self._terminate(process)
                         raise RuntimeError("Pixal3D generation cancelled")
                 if process.returncode != 0:
-                    raise RuntimeError(self._failure_message(log_path, process.returncode))
+                    raise RuntimeError(
+                        self._failure_message(log_path, process.returncode)
+                    )
             finally:
                 with self._lock:
                     if self._process is process:
                         self._process = None
-
-        if self._staged:
-            self._read_stage_events(events_path, event_offset, on_event)
-
-        if (
-            target_stage is ReconstructionStage.FINAL_MESH
-            and (not output_path.is_file() or output_path.stat().st_size == 0)
-        ):
-            raise RuntimeError("Pixal3D completed without producing a GLB")
-        return output_path, source_path
+        self._read_stage_events(events_path, event_offset, on_event)
 
     def shutdown(self, timeout: float = 2.0) -> None:
         with self._lock:
@@ -206,6 +305,11 @@ class Pixal3DProcessClient:
             raise RuntimeError(
                 f"Pixal3D inference entry point not found: {script}. Set "
                 "DIFFUSION_EDITOR_PIXAL3D_ROOT."
+            )
+        if not self._model_path.exists():
+            raise RuntimeError(
+                f"Pixal3D model not found: {self._model_path}. Set "
+                "DIFFUSION_EDITOR_PIXAL3D_MODEL."
             )
 
     def _read_stage_events(
@@ -246,12 +350,6 @@ class Pixal3DProcessClient:
                 if callback is not None:
                     callback(event)
             return stream.tell()
-        if not self._model_path.exists():
-            raise RuntimeError(
-                f"Pixal3D model not found: {self._model_path}. Set "
-                "DIFFUSION_EDITOR_PIXAL3D_MODEL."
-            )
-
     @staticmethod
     def _terminate(process: subprocess.Popen[bytes], timeout: float = 2.0) -> None:
         if process.poll() is not None:

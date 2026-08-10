@@ -8,6 +8,8 @@ import os
 from ..generation.types import (
     RECONSTRUCTION_STAGES,
     ReconstructionParameters,
+    ReconstructionRun,
+    ReconstructionRunKind,
     ReconstructionStage,
     ReconstructionStageArtifact,
     ReconstructionStageEvent,
@@ -42,7 +44,24 @@ class ReconstructionLayer(Layer):
         self.triangle_count = 0
         self.mesh_count = 0
         self.generation_parameters = ReconstructionParameters()
+        self.runs: tuple[ReconstructionRun, ...] = ()
+        self.active_run_id: str | None = None
         self._initialize_stage_state()
+
+    @property
+    def active_run(self) -> ReconstructionRun | None:
+        return next(
+            (run for run in self.runs if run.run_id == self.active_run_id),
+            None,
+        )
+
+    @property
+    def base_run(self) -> ReconstructionRun | None:
+        return next(
+            (run for run in reversed(self.runs)
+             if run.kind is ReconstructionRunKind.BASE),
+            None,
+        )
 
     def _initialize_stage_state(self) -> None:
         """Initialize transient staged-generation state.
@@ -111,6 +130,8 @@ class ReconstructionLayer(Layer):
         layer.vertex_count = int(state.get("vertex_count", 0))
         layer.triangle_count = int(state.get("triangle_count", 0))
         layer.mesh_count = int(state.get("mesh_count", 0))
+        layer.runs = ()
+        layer.active_run_id = None
         try:
             layer.generation_parameters = ReconstructionParameters.from_dict(
                 state.get("generation_parameters")
@@ -119,6 +140,17 @@ class ReconstructionLayer(Layer):
             layer.generation_parameters = ReconstructionParameters()
         layer._initialize_stage_state()
         if layer.glb_path and os.path.isfile(layer.glb_path):
+            restored_run = ReconstructionRun(
+                run_id="restored-base",
+                kind=ReconstructionRunKind.BASE,
+                glb_path=layer.glb_path,
+                source_path="",
+                vertex_count=layer.vertex_count,
+                triangle_count=layer.triangle_count,
+                mesh_count=layer.mesh_count,
+            )
+            layer.runs = (restored_run,)
+            layer.active_run_id = restored_run.run_id
             final_stage = ReconstructionStage.FINAL_MESH
             layer.stage_statuses[final_stage] = ReconstructionStageStatus.READY
             layer.stage_artifacts[final_stage] = ReconstructionStageArtifact(

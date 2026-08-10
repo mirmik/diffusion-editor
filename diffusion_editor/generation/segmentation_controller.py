@@ -31,6 +31,9 @@ class SegmentationControllerEvent:
     segmentation_result: (
         tuple[InferenceJobContext, np.ndarray] | None
     ) = None
+    selection_result: (
+        tuple[InferenceJobContext, np.ndarray] | None
+    ) = None
     segmentation_error: str | None = None
 
 
@@ -38,6 +41,7 @@ class SegmentationControllerEvent:
 class _PendingSegmentationJob:
     context: InferenceJobContext
     request: SegmentationRequest
+    destination: str = "layer_mask"
 
 
 class SegmentationGenerationController:
@@ -46,15 +50,24 @@ class SegmentationGenerationController:
             *,
             engine: SegmentationEngine,
             composite_below: Callable[[Layer], np.ndarray | None],
+            composite: Callable[[], np.ndarray | None] | None = None,
             document_state: Callable[[], JobDocumentState] | None = None,
             job_id_factory: Callable[[], str] = new_job_id):
         self._engine = engine
         self._composite_below = composite_below
+        self._composite = composite
         self._document_state = document_state or standalone_document_state
         self._job_id_factory = job_id_factory
         self._pending_job: _PendingSegmentationJob | None = None
         self._active_operation_id: str | None = None
         self._invalidated_operations: dict[str, str] = {}
+
+    @property
+    def is_busy(self) -> bool:
+        return (
+            self._active_operation_id is not None
+            or bool(getattr(self._engine, "is_busy", False))
+        )
 
     @property
     def pending_context(self) -> InferenceJobContext | None:
@@ -103,9 +116,37 @@ class SegmentationGenerationController:
             cancel_engine(self._engine)
 
     def start_select_background(self, layer: Layer) -> SegmentationControllerEvent:
-        if self._engine.is_busy or self._active_operation_id is not None:
+        if self.is_busy:
             return SegmentationControllerEvent()
         composite = self._composite_below(layer)
+        return self._start(
+            layer,
+            composite,
+            destination="layer_mask",
+            status="Segmenting background...",
+        )
+
+    def start_select_background_selection(
+            self, layer: Layer) -> SegmentationControllerEvent:
+        if self.is_busy:
+            return SegmentationControllerEvent()
+        composite = self._composite() if self._composite is not None else None
+        return self._start(
+            layer,
+            composite,
+            destination="selection",
+            status="Selecting background...",
+        )
+
+    def _start(
+            self,
+            layer: Layer,
+            composite: np.ndarray | None,
+            *,
+            destination: str,
+            status: str) -> SegmentationControllerEvent:
+        if self.is_busy:
+            return SegmentationControllerEvent()
         if composite is None:
             return SegmentationControllerEvent()
 
@@ -142,9 +183,10 @@ class SegmentationGenerationController:
         self._pending_job = _PendingSegmentationJob(
             context=context,
             request=request,
+            destination=destination,
         )
         self._active_operation_id = context.job_id
-        return SegmentationControllerEvent(status="Segmenting background...")
+        return SegmentationControllerEvent(status=status)
 
     def poll(self) -> SegmentationControllerEvent | None:
         engine_event = self._engine.poll_event()
@@ -191,9 +233,7 @@ class SegmentationGenerationController:
             return SegmentationControllerEvent(
                 status="Segmentation result ignored: invalid result"
             )
-        return SegmentationControllerEvent(
-            segmentation_result=(
-                job.context,
-                np.ascontiguousarray(result.mask),
-            ),
-        )
+        output = (job.context, np.ascontiguousarray(result.mask))
+        if job.destination == "selection":
+            return SegmentationControllerEvent(selection_result=output)
+        return SegmentationControllerEvent(segmentation_result=output)

@@ -17,6 +17,7 @@ from diffusion_editor.generation.reconstruction_controller import (
 from diffusion_editor.workers.pixal3d_process import Pixal3DProcessClient
 from diffusion_editor.generation.types import (
     ReconstructionParameters,
+    ReconstructionRefineParameters,
     ReconstructionStage,
     ReconstructionStageStatus,
 )
@@ -58,14 +59,40 @@ parser.add_argument('--events')
 parser.add_argument('--model_path')
 parser.add_argument('--target-stage')
 parser.add_argument('--resolution')
+parser.add_argument('--lr-conditioning-resolution')
 parser.add_argument('--steps')
 parser.add_argument('--seed')
 parser.add_argument('--decimation-target')
 parser.add_argument('--texture-size')
 parser.add_argument('--manual-fov')
+parser.add_argument('--checkpoint')
+parser.add_argument('--refine-checkpoint')
+parser.add_argument('--refine-mask')
+parser.add_argument('--refine-strength')
+parser.add_argument('--refine-steps')
+parser.add_argument('--refine-seed')
+parser.add_argument('--refine-rescale-t')
+parser.add_argument('--refine-guidance')
 parser.add_argument('--low_vram', action='store_true')
 args = parser.parse_args()
 Path(args.output).with_name('parameters.json').write_text(json.dumps(vars(args)))
+if args.refine_checkpoint:
+    Path(args.output).write_bytes(b'glTF-refined')
+    Path(args.checkpoint).write_bytes(b'npz-refined')
+    with Path(args.events).open('w') as stream:
+        stream.write(json.dumps({
+            'stage': 'hr_shape_flow',
+            'status': 'ready',
+            'progress': int(args.refine_steps),
+            'total': int(args.refine_steps),
+        }) + '\n')
+        stream.write(json.dumps({
+            'stage': 'final_mesh',
+            'status': 'ready',
+            'artifact_path': args.output,
+            'preview_kind': 'mesh',
+        }) + '\n')
+    raise SystemExit(0)
 preview = Path(args.output).with_name('sparse.glb')
 preview.write_bytes(b'glTF-preview')
 with Path(args.events).open('w') as stream:
@@ -201,6 +228,7 @@ def test_staged_client_passes_generation_parameter_snapshot(tmp_path):
         seed=123,
         steps=7,
         resolution=1280,
+        lr_conditioning_resolution=1024,
         manual_fov_degrees=45.0,
         decimation_target=350_000,
         texture_size=4096,
@@ -219,10 +247,57 @@ def test_staged_client_passes_generation_parameter_snapshot(tmp_path):
     assert captured["seed"] == "123"
     assert captured["steps"] == "7"
     assert captured["resolution"] == "1280"
+    assert captured["lr_conditioning_resolution"] == "1024"
     assert captured["decimation_target"] == "350000"
     assert captured["texture_size"] == "4096"
+    assert captured["checkpoint"].endswith("shape-checkpoint.npz")
     assert float(captured["manual_fov"]) == pytest.approx(math.pi / 4)
     assert captured["low_vram"] is False
+    client.shutdown()
+
+
+def test_staged_client_runs_masked_refine_as_separate_artifact(tmp_path):
+    root = tmp_path / "pixal3d"
+    root.mkdir()
+    runner = tmp_path / "staged.py"
+    runner.write_text(_FAKE_STAGED_RUNNER)
+    model = tmp_path / "model"
+    model.mkdir()
+    base_checkpoint = tmp_path / "base.npz"
+    base_checkpoint.write_bytes(b"npz-base")
+    client = Pixal3DProcessClient(
+        python=sys.executable,
+        root=root,
+        model_path=model,
+        runner_path=runner,
+        staged=True,
+    )
+    events = []
+
+    output, condition = client.refine(
+        Image.new("RGB", (16, 16), "white"),
+        Image.new("L", (16, 16), 255),
+        base_checkpoint,
+        threading.Event(),
+        parameters=ReconstructionRefineParameters(
+            strength=0.6, steps=8, seed=321
+        ),
+        on_event=events.append,
+    )
+
+    captured = json.loads(output.with_name("parameters.json").read_text())
+    assert output.read_bytes() == b"glTF-refined"
+    assert condition.is_file()
+    assert client.checkpoint_path is not None
+    assert client.checkpoint_path.read_bytes() == b"npz-refined"
+    assert captured["refine_checkpoint"] == str(base_checkpoint)
+    assert captured["refine_strength"] == "0.6"
+    assert captured["refine_steps"] == "8"
+    assert captured["refine_seed"] == "321"
+    assert [event.stage for event in events] == [
+        ReconstructionStage.HR_SHAPE_FLOW,
+        ReconstructionStage.FINAL_MESH,
+    ]
     client.shutdown()
 
 
@@ -248,6 +323,37 @@ def test_reconstruction_controller_reports_worker_result(tmp_path):
     assert event.result.glb_path.endswith("model.glb")
     assert stage_events[0].stage.value == "source_image"
     engine.shutdown()
+
+
+def test_reconstruction_controller_snapshots_refine_inputs() -> None:
+    class Engine:
+        is_busy = False
+        request = None
+        job_id = None
+
+        def submit_refine_request(self, request, *, job_id=None):
+            self.request = request
+            self.job_id = job_id
+            return True
+
+    engine = Engine()
+    controller = ReconstructionController(engine)
+    condition = Image.new("RGB", (8, 8), "white")
+    mask = Image.new("L", (8, 8), 255)
+
+    event = controller.start_refine(
+        condition,
+        mask,
+        "/tmp/base.npz",
+        parameters=ReconstructionRefineParameters(strength=0.6, steps=8),
+    )
+
+    assert event.status and "Refining" in event.status
+    assert engine.job_id.startswith("reconstruction_refine_")
+    assert engine.request.base_checkpoint_path == "/tmp/base.npz"
+    assert engine.request.parameters.strength == 0.6
+    assert engine.request.conditioning_image is not condition
+    assert engine.request.mask_image is not mask
 
 
 def _capture_error(errors, callback) -> None:
