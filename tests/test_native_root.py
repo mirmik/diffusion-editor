@@ -26,7 +26,10 @@ from diffusion_editor.app.native_shell import COMMAND_SPECS
 from diffusion_editor.app.presentation import ViewPorts
 from diffusion_editor.canvas.brush import BrushToolMode
 from diffusion_editor.document.reconstruction import ReconstructionLayer
-from diffusion_editor.generation.types import ReconstructionStage
+from diffusion_editor.generation.types import (
+    ReconstructionStage,
+    ReconstructionStageArtifact,
+)
 
 
 class _MemorySettings:
@@ -650,9 +653,15 @@ def test_offscreen_root_creates_selected_reconstruction_object(
         root.view._change_reconstruction_parameter(
             "lr_conditioning_resolution", 1024
         )
+        root.view._activate_reconstruction_refine("strength", 0.65)
+        root.view._activate_reconstruction_refine("steps", 12.0)
+        root.view._activate_reconstruction_refine("paint", True)
         assert node.generation_parameters.steps == 20
         assert node.generation_parameters.resolution == 1280
         assert node.generation_parameters.lr_conditioning_resolution == 1024
+        assert node.refine_parameters.strength == 0.65
+        assert node.refine_parameters.steps == 12
+        assert root.canvas_controls_coordinator.selection_state.edit_mode
         root.view._activate_reconstruction_stage(
             ReconstructionStage.HR_COORDINATES
         )
@@ -668,7 +677,34 @@ def test_offscreen_root_creates_selected_reconstruction_object(
         application.layer_stack.active_layer = background
         root.tick()
         assert root.view.reconstruction_mode is False
+        assert not root.canvas_controls_coordinator.selection_state.edit_mode
 
         application.layer_stack.active_layer = node
         root.tick()
         assert root.view.reconstruction_mode is True
+
+
+def test_reconstruction_point_artifact_is_loaded_as_point_cloud(tmp_path) -> None:
+    path = tmp_path / "preview.ply"
+    path.write_bytes(b"ply\n")
+    loaded = []
+
+    class Viewport:
+        def load_glb(self, _path):
+            raise AssertionError("point preview must not be loaded as GLB")
+
+        def load_point_cloud(self, point_path):
+            loaded.append(point_path)
+
+    root = NativeEditorRoot.__new__(NativeEditorRoot)
+    viewport = Viewport()
+    root._ensure_reconstruction_viewport = lambda: viewport
+
+    artifact = ReconstructionStageArtifact(
+        ReconstructionStage.POINT_CLOUD,
+        str(path),
+        "points",
+    )
+
+    assert root._load_reconstruction_artifact(artifact)
+    assert loaded == [str(path)]

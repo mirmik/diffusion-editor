@@ -6,8 +6,10 @@ from enum import Enum
 import os
 
 from ..generation.types import (
+    RECONSTRUCTION_BACKEND_STAGES,
     RECONSTRUCTION_STAGES,
     ReconstructionParameters,
+    ReconstructionRefineParameters,
     ReconstructionRun,
     ReconstructionRunKind,
     ReconstructionStage,
@@ -44,6 +46,7 @@ class ReconstructionLayer(Layer):
         self.triangle_count = 0
         self.mesh_count = 0
         self.generation_parameters = ReconstructionParameters()
+        self.refine_parameters = ReconstructionRefineParameters()
         self.runs: tuple[ReconstructionRun, ...] = ()
         self.active_run_id: str | None = None
         self._initialize_stage_state()
@@ -72,6 +75,7 @@ class ReconstructionLayer(Layer):
         """
         self.target_stage = ReconstructionStage.FINAL_MESH
         self.selected_preview_stage = ReconstructionStage.SOURCE_IMAGE
+        self.preview_stage_pinned = False
         self.stage_statuses = {
             stage: ReconstructionStageStatus.PENDING
             for stage in RECONSTRUCTION_STAGES
@@ -84,11 +88,16 @@ class ReconstructionLayer(Layer):
         ] = {}
 
     def begin_staged_generation(self) -> None:
-        target_index = RECONSTRUCTION_STAGES.index(self.target_stage)
-        for index, stage in enumerate(RECONSTRUCTION_STAGES):
+        supported = RECONSTRUCTION_BACKEND_STAGES[
+            self.generation_parameters.backend
+        ]
+        if self.target_stage not in supported:
+            self.target_stage = ReconstructionStage.FINAL_MESH
+        target_index = supported.index(self.target_stage)
+        for stage in RECONSTRUCTION_STAGES:
             self.stage_statuses[stage] = (
                 ReconstructionStageStatus.PENDING
-                if index <= target_index
+                if stage in supported and supported.index(stage) <= target_index
                 else ReconstructionStageStatus.SKIPPED
             )
             self.stage_progress[stage] = (0, 0)
@@ -99,7 +108,8 @@ class ReconstructionLayer(Layer):
         self.stage_progress[event.stage] = (event.progress, event.total)
         if event.artifact is not None:
             self.stage_artifacts[event.stage] = event.artifact
-            self.selected_preview_stage = event.stage
+            if not self.preview_stage_pinned:
+                self.selected_preview_stage = event.stage
 
     def to_dict(self, path: str) -> dict:
         payload = super().to_dict(path)
@@ -111,6 +121,7 @@ class ReconstructionLayer(Layer):
             "triangle_count": self.triangle_count,
             "mesh_count": self.mesh_count,
             "generation_parameters": self.generation_parameters.to_dict(),
+            "refine_parameters": self.refine_parameters.to_dict(),
         }
         return payload
 
@@ -138,6 +149,12 @@ class ReconstructionLayer(Layer):
             )
         except (TypeError, ValueError):
             layer.generation_parameters = ReconstructionParameters()
+        try:
+            layer.refine_parameters = ReconstructionRefineParameters.from_dict(
+                state.get("refine_parameters")
+            )
+        except (TypeError, ValueError):
+            layer.refine_parameters = ReconstructionRefineParameters()
         layer._initialize_stage_state()
         if layer.glb_path and os.path.isfile(layer.glb_path):
             restored_run = ReconstructionRun(
@@ -148,6 +165,20 @@ class ReconstructionLayer(Layer):
                 vertex_count=layer.vertex_count,
                 triangle_count=layer.triangle_count,
                 mesh_count=layer.mesh_count,
+                stage_statuses=tuple(
+                    ReconstructionStageStatus.READY
+                    if stage is ReconstructionStage.FINAL_MESH
+                    else ReconstructionStageStatus.PENDING
+                    for stage in RECONSTRUCTION_STAGES
+                ),
+                stage_progress=tuple(
+                    (0, 0) for _stage in RECONSTRUCTION_STAGES
+                ),
+                stage_artifacts=(ReconstructionStageArtifact(
+                    ReconstructionStage.FINAL_MESH,
+                    layer.glb_path,
+                    "mesh",
+                ),),
             )
             layer.runs = (restored_run,)
             layer.active_run_id = restored_run.run_id

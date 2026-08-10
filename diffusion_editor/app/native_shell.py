@@ -16,10 +16,15 @@ from termin.gui_native import (
 )
 
 from ..generation.types import (
+    RECONSTRUCTION_BACKEND_STAGES,
+    RECONSTRUCTION_BACKEND_LABELS,
     RECONSTRUCTION_PREVIEW_STAGES,
     RECONSTRUCTION_STAGES,
     RECONSTRUCTION_STAGE_LABELS,
     ReconstructionParameters,
+    ReconstructionBackend,
+    ReconstructionRefineParameters,
+    ReconstructionRunKind,
     ReconstructionStage,
     ReconstructionStageStatus,
 )
@@ -33,6 +38,7 @@ _WORKSPACE_EDGE = SrgbColor(0.32, 0.35, 0.40, 1.0)
 _RECONSTRUCTION_RESOLUTIONS = (1024, 1280, 1536)
 _RECONSTRUCTION_LR_CONDITIONING_RESOLUTIONS = (512, 1024)
 _RECONSTRUCTION_TEXTURE_SIZES = (1024, 2048, 4096)
+_HI3DGEN_NORMAL_RESOLUTIONS = (512, 768, 1024)
 
 
 def _set_widget_background(widget, color: SrgbColor) -> None:
@@ -80,6 +86,12 @@ COMMAND_SPECS = (
     NativeCommandSpec("edit.copy", "Copy", "Ctrl+C"),
     NativeCommandSpec("edit.copy_visible", "Copy Visible", "Ctrl+Shift+C"),
     NativeCommandSpec("edit.paste", "Paste", "Ctrl+V"),
+    NativeCommandSpec(
+        "edit.clear_selected_pixels",
+        "Clear Selected Pixels",
+        "Delete",
+        tooltip="Replace selected pixels of the active layer with transparency",
+    ),
     NativeCommandSpec("edit.settings", "Settings…"),
     NativeCommandSpec("selection.all", "Select All", "Ctrl+A"),
     NativeCommandSpec(
@@ -153,6 +165,7 @@ MENU_COMMANDS = (
             "edit.copy",
             "edit.copy_visible",
             "edit.paste",
+            "edit.clear_selected_pixels",
             None,
             "edit.settings",
         ),
@@ -306,8 +319,12 @@ class NativeEditorView:
         self.reconstruction_stage_checks = {}
         self._reconstruction_stage_handler = None
         self._reconstruction_parameter_handler = None
+        self._reconstruction_refine_handler = None
         self._syncing_reconstruction_parameters = False
+        self._syncing_reconstruction_refine = False
         self.reconstruction_parameter_controls = {}
+        self.reconstruction_refine_controls = {}
+        self._reconstruction_run_ids = []
         self.reconstruction_status = None
         self.reconstruction_panel = None
         self.reconstruction_mode = False
@@ -663,7 +680,7 @@ class NativeEditorView:
             row.add_fixed_child(control.widget, 108.0)
             parameters_panel.add_preferred_child(row)
 
-        def add_combo(key, label, values):
+        def add_combo(key, label, values, labels=None):
             row = self._document.create_hstack(
                 "DiffusionEditorReconstructionParameterRow"
             )
@@ -679,7 +696,9 @@ class NativeEditorView:
                 f"diffusion-editor.reconstruction.parameter.{key}"
             )
             for item in values:
-                control.add_item(str(item))
+                control.add_item(
+                    labels.get(item, str(item)) if labels else str(item)
+                )
             control.selected_index = values.index(getattr(defaults, key))
             self._connections.append(control.connect_changed(
                 lambda index, *_rest, key=key, values=values:
@@ -690,6 +709,12 @@ class NativeEditorView:
             row.add_fixed_child(control.widget, 92.0)
             parameters_panel.add_preferred_child(row)
 
+        add_combo(
+            "backend",
+            "Backend",
+            tuple(ReconstructionBackend),
+            RECONSTRUCTION_BACKEND_LABELS,
+        )
         add_spin("seed", "Seed", defaults.seed, 0, 2_147_483_647, 1)
         add_slider("steps", "Sampling steps", defaults.steps, 1, 50, 1)
         add_combo("resolution", "HR resolution", _RECONSTRUCTION_RESOLUTIONS)
@@ -707,6 +732,23 @@ class NativeEditorView:
             defaults.decimation_target, 50_000, 1_000_000, 10_000,
         )
         add_combo("texture_size", "Texture size", _RECONSTRUCTION_TEXTURE_SIZES)
+        add_slider(
+            "spar3d_guidance_scale", "Point guidance",
+            defaults.spar3d_guidance_scale, 0, 20, 0.1, 1,
+        )
+        add_slider(
+            "hi3dgen_slat_steps", "Hi3D latent steps",
+            defaults.hi3dgen_slat_steps, 1, 50, 1,
+        )
+        add_slider(
+            "hi3dgen_guidance_scale", "Hi3D guidance",
+            defaults.hi3dgen_guidance_scale, 0, 20, 0.1, 1,
+        )
+        add_combo(
+            "hi3dgen_normal_resolution",
+            "Normal resolution",
+            _HI3DGEN_NORMAL_RESOLUTIONS,
+        )
         low_vram_row = self._document.create_hstack(
             "DiffusionEditorReconstructionParameterRow"
         )
@@ -730,6 +772,154 @@ class NativeEditorView:
         low_vram_row.add_preferred_child(low_vram.widget)
         low_vram_row.add_flex_child(low_vram_label, 1.0)
         parameters_panel.add_preferred_child(low_vram_row)
+
+        refine_title = self._document.create_label(
+            "Masked refinement", "DiffusionEditorReconstructionRefineTitle"
+        )
+        refine_title.stable_id = "diffusion-editor.reconstruction.refine.title"
+        refine_panel = self._document.create_vstack(
+            "DiffusionEditorReconstructionRefine"
+        )
+        refine_panel.stable_id = "diffusion-editor.reconstruction.refine"
+        refine_panel.set_layout_spacing(3.0)
+        refine_defaults = ReconstructionRefineParameters()
+        refine_controls = {}
+
+        def emit_refine(action, value=None):
+            self._activate_reconstruction_refine(action, value)
+
+        def add_refine_checkbox(key, label, checked=False):
+            row = self._document.create_hstack(
+                "DiffusionEditorReconstructionRefineRow"
+            )
+            row.set_layout_spacing(4.0)
+            control = self._document.create_checkbox(checked)
+            control.widget.stable_id = (
+                f"diffusion-editor.reconstruction.refine.{key}"
+            )
+            caption = self._document.create_label(
+                label, "DiffusionEditorReconstructionRefineLabel"
+            )
+            self._connections.append(control.connect_changed(
+                lambda value, key=key: emit_refine(key, bool(value))
+            ))
+            refine_controls[key] = control
+            row.add_preferred_child(control.widget)
+            row.add_flex_child(caption, 1.0)
+            refine_panel.add_preferred_child(row)
+
+        def add_refine_slider(
+            key, label, value, minimum, maximum, step, decimals=0
+        ):
+            control = self._document.create_slider_edit(float(value))
+            control.widget.stable_id = (
+                f"diffusion-editor.reconstruction.refine.{key}"
+            )
+            control.label = label
+            control.set_range(float(minimum), float(maximum))
+            control.set_step(float(step))
+            control.set_decimals(int(decimals))
+            self._connections.append(control.connect_changed(
+                lambda changed, key=key: emit_refine(key, changed)
+            ))
+            refine_controls[key] = control
+            refine_panel.add_preferred_child(control.widget)
+
+        def add_refine_spin(key, label, value, minimum, maximum):
+            row = self._document.create_hstack(
+                "DiffusionEditorReconstructionRefineRow"
+            )
+            row.set_layout_spacing(4.0)
+            caption = self._document.create_label(
+                label, "DiffusionEditorReconstructionRefineLabel"
+            )
+            control = self._document.create_spin_box(float(value))
+            control.widget.stable_id = (
+                f"diffusion-editor.reconstruction.refine.{key}"
+            )
+            control.set_range(float(minimum), float(maximum))
+            control.step = 1.0
+            control.decimals = 0
+            self._connections.append(control.connect_changed(
+                lambda changed, key=key: emit_refine(key, changed)
+            ))
+            refine_controls[key] = control
+            row.add_flex_child(caption, 1.0)
+            row.add_fixed_child(control.widget, 108.0)
+            refine_panel.add_preferred_child(row)
+
+        add_refine_checkbox("paint", "Paint refine mask")
+        add_refine_checkbox("erase", "Erase mask")
+        add_refine_checkbox(
+            "resize_detail_to_1024", "Resize masked detail to 1024", True
+        )
+        add_refine_slider("brush_size", "Brush size", 50, 1, 500, 1)
+        add_refine_slider("brush_hardness", "Hardness", 0.4, 0, 1, 0.05, 2)
+        add_refine_slider("brush_flow", "Flow", 1.0, 0, 1, 0.05, 2)
+        add_refine_slider(
+            "strength", "Strength", refine_defaults.strength,
+            0.05, 1.0, 0.05, 2,
+        )
+        add_refine_spin("steps", "Refine steps", refine_defaults.steps, 1, 50)
+        add_refine_spin(
+            "seed", "Refine seed", refine_defaults.seed, 0, 2_147_483_647
+        )
+
+        version_row = self._document.create_hstack(
+            "DiffusionEditorReconstructionRefineRow"
+        )
+        version_row.set_layout_spacing(4.0)
+        version_label = self._document.create_label(
+            "Version", "DiffusionEditorReconstructionRefineLabel"
+        )
+        version_combo = self._document.create_combo_box()
+        version_combo.widget.stable_id = (
+            "diffusion-editor.reconstruction.refine.version"
+        )
+        self._connections.append(version_combo.connect_changed(
+            lambda index, *_rest: emit_refine(
+                "select_run",
+                self._reconstruction_run_ids[index]
+                if 0 <= index < len(self._reconstruction_run_ids)
+                else None,
+            )
+        ))
+        refine_controls["version"] = version_combo
+        version_row.add_flex_child(version_label, 1.0)
+        version_row.add_fixed_child(version_combo.widget, 120.0)
+        refine_panel.add_preferred_child(version_row)
+
+        clear_mask = self._document.create_button("Clear refine mask")
+        clear_mask.widget.stable_id = (
+            "diffusion-editor.reconstruction.refine.clear"
+        )
+        self._connections.append(clear_mask.connect_clicked(
+            lambda: emit_refine("clear")
+        ))
+        refine_controls["clear"] = clear_mask
+        refine_panel.add_preferred_child(clear_mask.widget)
+
+        run_refine = self._document.create_button("Refine geometry in mask")
+        run_refine.widget.stable_id = (
+            "diffusion-editor.reconstruction.refine.run"
+        )
+        self._connections.append(run_refine.connect_clicked(
+            lambda: emit_refine("run")
+        ))
+        refine_controls["run"] = run_refine
+        refine_panel.add_preferred_child(run_refine.widget)
+
+        run_texture_refine = self._document.create_button(
+            "Refine texture in mask"
+        )
+        run_texture_refine.widget.stable_id = (
+            "diffusion-editor.reconstruction.refine.run_texture"
+        )
+        self._connections.append(run_texture_refine.connect_clicked(
+            lambda: emit_refine("run_texture")
+        ))
+        refine_controls["run_texture"] = run_texture_refine
+        refine_panel.add_preferred_child(run_texture_refine.widget)
         panel_content = self._document.create_vstack(
             "DiffusionEditorReconstructionPanelContent"
         )
@@ -740,6 +930,8 @@ class NativeEditorView:
         panel_content.add_preferred_child(title)
         panel_content.add_preferred_child(parameters_title)
         panel_content.add_preferred_child(parameters_panel)
+        panel_content.add_preferred_child(refine_title)
+        panel_content.add_preferred_child(refine_panel)
         panel_content.add_preferred_child(stage_list)
         panel_content.add_preferred_child(toolbar)
         panel_content.add_preferred_child(status)
@@ -756,6 +948,7 @@ class NativeEditorView:
         self.reconstruction_stage_buttons = stage_buttons
         self.reconstruction_stage_checks = stage_checks
         self.reconstruction_parameter_controls = parameter_controls
+        self.reconstruction_refine_controls = refine_controls
         self.reconstruction_status = status
         self.reconstruction_panel = panel
         self._request_repaint()
@@ -765,6 +958,17 @@ class NativeEditorView:
 
     def set_reconstruction_parameter_handler(self, handler) -> None:
         self._reconstruction_parameter_handler = handler
+
+    def set_reconstruction_refine_handler(self, handler) -> None:
+        self._reconstruction_refine_handler = handler
+
+    def _activate_reconstruction_refine(self, action: str, value=None) -> None:
+        if (
+            self._syncing_reconstruction_refine
+            or self._reconstruction_refine_handler is None
+        ):
+            return
+        self._reconstruction_refine_handler(action, value)
 
     def _change_reconstruction_parameter(self, key: str, value) -> None:
         if (
@@ -779,9 +983,13 @@ class NativeEditorView:
             "lr_conditioning_resolution",
             "decimation_target",
             "texture_size",
+            "hi3dgen_slat_steps",
+            "hi3dgen_normal_resolution",
         }:
             value = int(round(float(value)))
         elif key == "manual_fov_degrees":
+            value = float(value)
+        elif key in {"spar3d_guidance_scale", "hi3dgen_guidance_scale"}:
             value = float(value)
         elif key == "low_vram":
             value = bool(value)
@@ -798,6 +1006,9 @@ class NativeEditorView:
             return
         self._syncing_reconstruction_parameters = True
         try:
+            controls["backend"].selected_index = tuple(
+                ReconstructionBackend
+            ).index(parameters.backend)
             controls["seed"].value = float(parameters.seed)
             controls["steps"].value = float(parameters.steps)
             controls["resolution"].selected_index = (
@@ -817,9 +1028,57 @@ class NativeEditorView:
             controls["texture_size"].selected_index = (
                 _RECONSTRUCTION_TEXTURE_SIZES.index(parameters.texture_size)
             )
+            controls["spar3d_guidance_scale"].value = (
+                parameters.spar3d_guidance_scale
+            )
+            controls["hi3dgen_slat_steps"].value = float(
+                parameters.hi3dgen_slat_steps
+            )
+            controls["hi3dgen_guidance_scale"].value = (
+                parameters.hi3dgen_guidance_scale
+            )
+            controls["hi3dgen_normal_resolution"].selected_index = (
+                _HI3DGEN_NORMAL_RESOLUTIONS.index(
+                    parameters.hi3dgen_normal_resolution
+                )
+            )
             controls["low_vram"].checked = parameters.low_vram
             for control in controls.values():
                 control.widget.enabled = not busy
+            pixal3d = parameters.backend is ReconstructionBackend.PIXAL3D
+            spar3d = parameters.backend is ReconstructionBackend.SPAR3D
+            hi3dgen = parameters.backend is ReconstructionBackend.HI3DGEN
+            controls["lr_conditioning_resolution"].widget.enabled = (
+                pixal3d and not busy
+            )
+            controls["manual_fov_degrees"].widget.enabled = (
+                pixal3d and not busy
+            )
+            controls["spar3d_guidance_scale"].widget.enabled = (
+                spar3d and not busy
+            )
+            controls["hi3dgen_slat_steps"].widget.enabled = (
+                hi3dgen and not busy
+            )
+            controls["hi3dgen_guidance_scale"].widget.enabled = (
+                hi3dgen and not busy
+            )
+            controls["hi3dgen_normal_resolution"].widget.enabled = (
+                hi3dgen and not busy
+            )
+            controls["steps"].widget.enabled = not spar3d and not busy
+            controls["resolution"].widget.enabled = (
+                not spar3d and not hi3dgen and not busy
+            )
+            controls["decimation_target"].widget.enabled = (
+                not spar3d and not busy
+            )
+            controls["texture_size"].widget.enabled = (
+                not spar3d and not hi3dgen and not busy
+            )
+            controls["low_vram"].widget.enabled = (
+                not hi3dgen and not busy
+            )
         finally:
             self._syncing_reconstruction_parameters = False
         self._request_repaint()
@@ -827,6 +1086,85 @@ class NativeEditorView:
     def _activate_reconstruction_stage(self, stage: ReconstructionStage) -> None:
         if self._reconstruction_stage_handler is not None:
             self._reconstruction_stage_handler(stage)
+
+    def update_reconstruction_refine(
+        self,
+        parameters: ReconstructionRefineParameters,
+        runs,
+        active_run_id,
+        *,
+        mask_ready: bool,
+        refine_supported: bool = True,
+        can_refine: bool,
+        can_texture_refine: bool = False,
+        paint_active: bool = False,
+        erase_active: bool = False,
+        brush_size: int = 50,
+        brush_hardness: float = 0.4,
+        brush_flow: float = 1.0,
+        busy: bool = False,
+    ) -> None:
+        controls = self.reconstruction_refine_controls
+        if not controls:
+            return
+        self._syncing_reconstruction_refine = True
+        try:
+            controls["paint"].checked = paint_active
+            controls["erase"].checked = erase_active
+            controls["resize_detail_to_1024"].checked = (
+                parameters.resize_detail_to_1024
+            )
+            controls["brush_size"].value = float(brush_size)
+            controls["brush_hardness"].value = brush_hardness
+            controls["brush_flow"].value = brush_flow
+            controls["strength"].value = parameters.strength
+            controls["steps"].value = float(parameters.steps)
+            controls["seed"].value = float(parameters.seed)
+            labels = []
+            refined_index = 0
+            for run in runs:
+                if run.kind is ReconstructionRunKind.BASE:
+                    labels.append(
+                        f"Base ({RECONSTRUCTION_BACKEND_LABELS[run.backend]})"
+                    )
+                else:
+                    refined_index += 1
+                    labels.append(f"Refined {refined_index}")
+            version = controls["version"]
+            current_labels = [
+                version.item_text(index) for index in range(version.item_count)
+            ]
+            if current_labels != labels:
+                version.clear()
+                for label in labels:
+                    version.add_item(label)
+            self._reconstruction_run_ids = [run.run_id for run in runs]
+            try:
+                version.selected_index = self._reconstruction_run_ids.index(
+                    active_run_id
+                )
+            except ValueError:
+                version.selected_index = -1
+            for key in (
+                "paint", "erase", "resize_detail_to_1024",
+                "brush_size", "brush_hardness",
+                "brush_flow", "strength", "steps", "seed",
+            ):
+                controls[key].widget.enabled = refine_supported and not busy
+            controls["clear"].widget.enabled = (
+                refine_supported and mask_ready and not busy
+            )
+            controls["run"].widget.enabled = (
+                refine_supported and can_refine and mask_ready and not busy
+            )
+            controls["run_texture"].widget.enabled = (
+                refine_supported
+                and can_texture_refine and mask_ready and not busy
+            )
+            controls["version"].widget.enabled = bool(runs) and not busy
+        finally:
+            self._syncing_reconstruction_refine = False
+        self._request_repaint()
 
     def update_reconstruction_stages(
         self,
@@ -836,7 +1174,12 @@ class NativeEditorView:
         selected: ReconstructionStage,
         *,
         busy: bool = False,
+        backend: ReconstructionBackend | None = None,
     ) -> None:
+        supported = (
+            RECONSTRUCTION_BACKEND_STAGES[backend]
+            if backend is not None else RECONSTRUCTION_STAGES
+        )
         for stage, button in self.reconstruction_stage_buttons.items():
             state = statuses.get(stage, ReconstructionStageStatus.PENDING)
             current, total = progress.get(stage, (0, 0))
@@ -859,6 +1202,8 @@ class NativeEditorView:
                 state is ReconstructionStageStatus.READY
             )
             button.widget.enabled = (
+                stage in supported
+                and
                 stage in RECONSTRUCTION_PREVIEW_STAGES
                 and (not busy or state is ReconstructionStageStatus.READY)
             )

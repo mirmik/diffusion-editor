@@ -9,6 +9,7 @@ from diffusion_editor.app.native_reconstruction_viewport import (
     _OrbitCamera,
     _decode_texture,
     _draw_constants,
+    _should_fit_camera,
 )
 
 
@@ -28,6 +29,13 @@ def test_fit_resets_camera_to_pixal3d_front() -> None:
         math.cos(math.radians(12.0)),
         math.sin(math.radians(12.0)),
     ), abs=1e-6)
+
+
+def test_comparison_loads_fit_only_the_first_model_by_default() -> None:
+    assert _should_fit_camera(False, None)
+    assert not _should_fit_camera(True, None)
+    assert _should_fit_camera(True, True)
+    assert not _should_fit_camera(False, False)
 
 
 def test_draw_constants_include_configurable_light_direction() -> None:

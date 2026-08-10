@@ -8,6 +8,7 @@ from diffusion_editor.app.native_root import NativeEditorRoot
 from diffusion_editor.document.commands import (
     AddReconstructionLayerCommand,
     PublishReconstructionResultCommand,
+    SelectReconstructionRunCommand,
 )
 from diffusion_editor.document.document_service import DocumentService
 from diffusion_editor.document.history import HistoryManager
@@ -20,7 +21,9 @@ from diffusion_editor.generation.reconstruction_controller import (
     ReconstructionControllerEvent,
 )
 from diffusion_editor.generation.types import (
+    ReconstructionBackend,
     ReconstructionParameters,
+    ReconstructionRefineParameters,
     ReconstructionRunKind,
     ReconstructionResult,
     ReconstructionStage,
@@ -73,6 +76,7 @@ def test_reconstruction_result_is_bound_to_its_node_and_roundtrips(tmp_path) -> 
     node = stack.active_layer
     assert isinstance(node, ReconstructionLayer)
     node.generation_parameters = ReconstructionParameters(
+        backend=ReconstructionBackend.TRELLIS2,
         seed=99,
         steps=20,
         resolution=1280,
@@ -81,6 +85,14 @@ def test_reconstruction_result_is_bound_to_its_node_and_roundtrips(tmp_path) -> 
         decimation_target=300_000,
         texture_size=4096,
         low_vram=False,
+    )
+    node.refine_parameters = ReconstructionRefineParameters(
+        strength=0.55,
+        steps=11,
+        seed=456,
+        rescale_t=2.5,
+        guidance_strength=6.0,
+        resize_detail_to_1024=False,
     )
     glb_path = tmp_path / "character.glb"
     glb_path.write_bytes(b"glTF")
@@ -109,6 +121,8 @@ def test_reconstruction_result_is_bound_to_its_node_and_roundtrips(tmp_path) -> 
     assert restored.reconstruction_status == ReconstructionStatus.READY
     assert restored.glb_path == str(glb_path)
     assert restored.generation_parameters == node.generation_parameters
+    assert restored.generation_parameters.backend is ReconstructionBackend.TRELLIS2
+    assert restored.refine_parameters == node.refine_parameters
     assert len(restored.runs) == 1
     assert restored.active_run is restored.base_run
     assert restored.target_stage is ReconstructionStage.FINAL_MESH
@@ -128,8 +142,23 @@ def test_refined_run_is_appended_without_replacing_base(tmp_path) -> None:
     assert isinstance(node, ReconstructionLayer)
     base = tmp_path / "base.glb"
     refined = tmp_path / "refined.glb"
+    base_hr = tmp_path / "base-hr.glb"
+    refined_hr = tmp_path / "refined-hr.glb"
     base.write_bytes(b"base")
     refined.write_bytes(b"refined")
+    base_hr.write_bytes(b"base-hr")
+    refined_hr.write_bytes(b"refined-hr")
+    node.apply_stage_event(ReconstructionStageEvent(
+        ReconstructionStage.HR_SHAPE_LATENT,
+        ReconstructionStageStatus.READY,
+        8,
+        8,
+        ReconstructionStageArtifact(
+            ReconstructionStage.HR_SHAPE_LATENT,
+            str(base_hr),
+            "mesh",
+        ),
+    ))
     document.execute(PublishReconstructionResultCommand(
         node, str(base), 100, 30, 1,
         checkpoint_path=str(tmp_path / "base.npz"),
@@ -137,6 +166,17 @@ def test_refined_run_is_appended_without_replacing_base(tmp_path) -> None:
     base_run = node.active_run
     assert base_run is not None
 
+    node.apply_stage_event(ReconstructionStageEvent(
+        ReconstructionStage.HR_SHAPE_LATENT,
+        ReconstructionStageStatus.READY,
+        6,
+        6,
+        ReconstructionStageArtifact(
+            ReconstructionStage.HR_SHAPE_LATENT,
+            str(refined_hr),
+            "mesh",
+        ),
+    ))
     document.execute(PublishReconstructionResultCommand(
         node, str(refined), 110, 35, 1,
         run_kind=ReconstructionRunKind.MASKED_REFINE,
@@ -149,7 +189,62 @@ def test_refined_run_is_appended_without_replacing_base(tmp_path) -> None:
     assert node.active_run is not None
     assert node.active_run.kind is ReconstructionRunKind.MASKED_REFINE
     assert node.active_run.parent_run_id == base_run.run_id
+    refined_run = node.active_run
     assert node.glb_path == str(refined)
+    assert {
+        artifact.stage: artifact.path
+        for artifact in node.active_run.stage_artifacts
+    }[ReconstructionStage.HR_SHAPE_LATENT] == str(refined_hr)
+
+    node.selected_preview_stage = ReconstructionStage.HR_SHAPE_LATENT
+    node.preview_stage_pinned = True
+
+    document.execute(SelectReconstructionRunCommand(node, base_run.run_id))
+
+    assert node.active_run is base_run
+    assert node.glb_path == str(base)
+    assert node.selected_preview_stage is ReconstructionStage.HR_SHAPE_LATENT
+    assert node.stage_artifacts[
+        ReconstructionStage.HR_SHAPE_LATENT
+    ].path == str(base_hr)
+    assert node.stage_progress[ReconstructionStage.HR_SHAPE_LATENT] == (8, 8)
+    assert node.stage_artifacts[ReconstructionStage.FINAL_MESH].path == str(base)
+    assert document.undo() == "Select 3D Reconstruction Version"
+    assert node.glb_path == str(refined)
+    assert node.selected_preview_stage is ReconstructionStage.HR_SHAPE_LATENT
+    assert node.stage_artifacts[
+        ReconstructionStage.HR_SHAPE_LATENT
+    ].path == str(refined_hr)
+
+    document.execute(SelectReconstructionRunCommand(node, base_run.run_id))
+    loaded = []
+
+    class Viewport:
+        def load_glb(self, path):
+            loaded.append(path)
+
+    class Application:
+        layer_stack = stack
+        status = ""
+
+        def set_status(self, status):
+            self.status = status
+
+    root = NativeEditorRoot.__new__(NativeEditorRoot)
+    application = Application()
+    application.document = document
+    root.application = application
+    root.reconstruction_controller = None
+    root.canvas_controls_coordinator = None
+    root.view = None
+    root._presented_reconstruction_id = None
+    root._ensure_reconstruction_viewport = lambda: Viewport()
+
+    root._handle_reconstruction_refine("select_run", refined_run.run_id)
+
+    assert node.active_run is refined_run
+    assert node.selected_preview_stage is ReconstructionStage.HR_SHAPE_LATENT
+    assert loaded == [str(refined_hr)]
 
 
 def test_root_refine_entry_point_uses_active_run_checkpoint(tmp_path) -> None:
@@ -159,9 +254,15 @@ def test_root_refine_entry_point_uses_active_run_checkpoint(tmp_path) -> None:
     assert isinstance(node, ReconstructionLayer)
     checkpoint = tmp_path / "base.npz"
     checkpoint.write_bytes(b"checkpoint")
+    texture_checkpoint = tmp_path / "base-texture.npz"
+    texture_checkpoint.write_bytes(b"texture-checkpoint")
+    source = tmp_path / "source.png"
+    Image.new("RGBA", (10, 8), (10, 20, 30, 255)).save(source)
     document.execute(PublishReconstructionResultCommand(
         node, str(tmp_path / "base.glb"), 100, 30, 1,
+        source_path=str(source),
         checkpoint_path=str(checkpoint),
+        texture_checkpoint_path=str(texture_checkpoint),
     ))
     parent = node.active_run
     assert parent is not None
@@ -176,15 +277,33 @@ def test_root_refine_entry_point_uses_active_run_checkpoint(tmp_path) -> None:
     class Controller:
         is_busy = False
         captured = None
+        texture_captured = None
 
-        def start_refine(self, image, mask, base_checkpoint_path, *, parameters):
-            self.captured = (image, mask, base_checkpoint_path, parameters)
+        def start_refine(
+            self, image, mask, base_checkpoint_path, *,
+            parameters, generation_parameters,
+        ):
+            self.captured = (
+                image, mask, base_checkpoint_path,
+                parameters, generation_parameters,
+            )
             return ReconstructionControllerEvent(status="Refining")
+
+        def start_texture_refine(
+            self, image, mask, shape_path, texture_path, *,
+            parameters, generation_parameters,
+        ):
+            self.texture_captured = (
+                image, mask, shape_path, texture_path,
+                parameters, generation_parameters,
+            )
+            return ReconstructionControllerEvent(status="Refining texture")
 
     controller = Controller()
     root = NativeEditorRoot.__new__(NativeEditorRoot)
     root.application = Application()
     root.reconstruction_controller = controller
+    root.canvas_controls_coordinator = None
     root._reconstruction_job_node_id = None
     root._reconstruction_parent_run_id = None
 
@@ -199,6 +318,32 @@ def test_root_refine_entry_point_uses_active_run_checkpoint(tmp_path) -> None:
     assert root._reconstruction_job_node_id == node.id
     assert root._reconstruction_parent_run_id == parent.run_id
     assert node.reconstruction_status is ReconstructionStatus.GENERATING
+
+    stack.selection.data[2:6, 3:7] = 1.0
+    root._start_selected_reconstruction_refine(node)
+
+    (
+        captured_image, captured_mask, _, captured_parameters,
+        captured_generation_parameters,
+    ) = controller.captured
+    assert captured_image.size == (10, 8)
+    assert captured_mask.size == (10, 8)
+    assert np.asarray(captured_mask)[2:6, 3:7].min() == 255
+    assert captured_parameters == node.refine_parameters
+    assert captured_generation_parameters == node.generation_parameters
+
+    texture_event = root.start_reconstruction_texture_refine(
+        node,
+        Image.new("RGB", (10, 8)),
+        Image.new("L", (10, 8), 255),
+        parameters=node.refine_parameters,
+    )
+
+    assert texture_event is not None
+    assert texture_event.status == "Refining texture"
+    assert controller.texture_captured[2:4] == (
+        str(checkpoint), str(texture_checkpoint)
+    )
 
 
 def test_reconstruction_node_tracks_target_progress_and_preview(tmp_path) -> None:
@@ -230,6 +375,45 @@ def test_reconstruction_node_tracks_target_progress_and_preview(tmp_path) -> Non
     assert node.stage_progress[ReconstructionStage.SPARSE_OCCUPANCY] == (12, 12)
     assert node.stage_artifacts[ReconstructionStage.SPARSE_OCCUPANCY] == preview
 
+    node.selected_preview_stage = ReconstructionStage.SPARSE_OCCUPANCY
+    node.preview_stage_pinned = True
+    final_preview = ReconstructionStageArtifact(
+        ReconstructionStage.FINAL_MESH,
+        str(tmp_path / "final.glb"),
+        "mesh",
+    )
+    node.apply_stage_event(ReconstructionStageEvent(
+        ReconstructionStage.FINAL_MESH,
+        ReconstructionStageStatus.READY,
+        artifact=final_preview,
+    ))
+
+    assert node.selected_preview_stage is ReconstructionStage.SPARSE_OCCUPANCY
+    assert node.stage_artifacts[ReconstructionStage.FINAL_MESH] == final_preview
+
+
+def test_spar3d_staged_generation_only_enables_its_real_stages() -> None:
+    node = ReconstructionLayer("SPAR3D object")
+    node.generation_parameters = ReconstructionParameters(
+        backend=ReconstructionBackend.SPAR3D
+    )
+    node.target_stage = ReconstructionStage.FINAL_MESH
+
+    node.begin_staged_generation()
+
+    assert node.stage_statuses[ReconstructionStage.SOURCE_IMAGE] is (
+        ReconstructionStageStatus.PENDING
+    )
+    assert node.stage_statuses[ReconstructionStage.POINT_CLOUD] is (
+        ReconstructionStageStatus.PENDING
+    )
+    assert node.stage_statuses[ReconstructionStage.SPARSE_OCCUPANCY] is (
+        ReconstructionStageStatus.SKIPPED
+    )
+    assert node.stage_statuses[ReconstructionStage.FINAL_MESH] is (
+        ReconstructionStageStatus.PENDING
+    )
+
 
 def test_root_binds_late_worker_result_to_launching_node(tmp_path) -> None:
     stack, document = _document()
@@ -237,6 +421,9 @@ def test_root_binds_late_worker_result_to_launching_node(tmp_path) -> None:
     document.execute(AddReconstructionLayerCommand("Character reconstruction"))
     node = stack.active_layer
     assert isinstance(node, ReconstructionLayer)
+    node.generation_parameters = ReconstructionParameters(
+        backend=ReconstructionBackend.TRELLIS2
+    )
     glb_path = tmp_path / "character.glb"
     glb_path.write_bytes(b"glTF")
 
@@ -254,6 +441,7 @@ def test_root_binds_late_worker_result_to_launching_node(tmp_path) -> None:
         def start(self, image, *, parameters, target_stage):
             assert image.size == (10, 8)
             assert parameters.seed == 42
+            assert parameters.backend is ReconstructionBackend.TRELLIS2
             assert target_stage.value == "final_mesh"
             return ReconstructionControllerEvent(status="Generating")
 
@@ -280,6 +468,7 @@ def test_root_binds_late_worker_result_to_launching_node(tmp_path) -> None:
     root._reconstruction_job_node_id = None
     root._presented_reconstruction_id = None
     root._ensure_reconstruction_viewport = lambda: viewport
+    root._read_reconstruction_glb_stats = lambda _path: (120, 40, 1)
 
     root._start_reconstruction()
     assert root._reconstruction_job_node_id == node.id
@@ -287,10 +476,16 @@ def test_root_binds_late_worker_result_to_launching_node(tmp_path) -> None:
 
     stack.active_layer = background
     controller.event = ReconstructionControllerEvent(
-        result=ReconstructionResult(str(glb_path), "source.png")
+        result=ReconstructionResult(
+            str(glb_path),
+            "source.png",
+            backend=ReconstructionBackend.TRELLIS2,
+        )
     )
     root._poll_reconstruction()
 
     assert node.reconstruction_status == ReconstructionStatus.READY
     assert node.glb_path == str(glb_path)
+    assert node.active_run is not None
+    assert node.active_run.backend is ReconstructionBackend.TRELLIS2
     assert stack.active_layer is background

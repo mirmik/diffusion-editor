@@ -155,3 +155,11 @@ class NativeGLBDocument:
             mime_type=str(image["mime_type"]),
             factor=(factor[0], factor[1], factor[2], factor[3]),
         )
+
+
+def inspect_glb_stats(path: str | Path) -> tuple[int, int, int]:
+    """Read mesh statistics without replacing the model shown in a viewport."""
+    document = NativeGLBDocument(path)
+    vertices = sum(mesh.vertex_count for mesh in document.meshes)
+    triangles = sum(mesh.index_count for mesh in document.meshes) // 3
+    return vertices, triangles, len(document.meshes)

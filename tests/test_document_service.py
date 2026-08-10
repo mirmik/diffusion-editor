@@ -15,6 +15,7 @@ from diffusion_editor.document.commands import (
     SnapshotCallbackCommand, ClearLayerMaskCommand, SetLayerPatchRectCommand,
     ClearLayerPatchRectCommand, ReplaceLayerMaskCommand,
     ApplyGeneratedResultCommand, SetLayerSelectionCommand,
+    ClearSelectedPixelsCommand,
     AttachLayerToolCommand, DetachLayerToolCommand,
     DrawGridCommand,
 )
@@ -414,6 +415,61 @@ def test_document_service_set_layer_selection_command_initializes_canvas_shape()
     assert np.all(stack.selection.data[2:5, 3:7] == 1.0)
     assert service.undo() == "Set Selection"
     assert stack.selection.is_empty
+
+
+def test_clear_selected_pixels_handles_soft_selection_and_offset_layer():
+    stack = LayerStack()
+    stack.on_changed = lambda: None
+    stack.init_from_image(np.zeros((5, 5, 4), dtype=np.uint8))
+    pixels = np.full((3, 4, 4), (10, 20, 30, 200), dtype=np.uint8)
+    layer = Layer("Offset", 4, 3, pixels, x=-1, y=1)
+    stack.insert_layer(layer)
+    history = HistoryManager(stack.load_state)
+    service = DocumentService(stack, history, stack.load_state)
+    selection = np.zeros((5, 5), dtype=np.float32)
+    selection[1:4, 0:2] = 1.0
+    selection[2, 1] = 0.5
+    stack.selection.data[:] = selection
+    before = layer.image.copy()
+
+    service.execute(ClearSelectedPixelsCommand(layer))
+
+    np.testing.assert_array_equal(layer.image[:, :, :3], before[:, :, :3])
+    assert np.all(layer.image[:, 1, 3] == 0)
+    assert layer.image[0, 2, 3] == 0
+    assert layer.image[1, 2, 3] == 100
+    assert layer.image[2, 2, 3] == 0
+    assert np.all(layer.image[:, (0, 3), 3] == 200)
+    np.testing.assert_array_equal(stack.selection.data, selection)
+
+    cleared = layer.image.copy()
+    assert service.undo() == "Clear Selected Pixels"
+    np.testing.assert_array_equal(layer.image, before)
+    assert service.redo() == "Clear Selected Pixels"
+    np.testing.assert_array_equal(layer.image, cleared)
+
+
+def test_clear_selected_pixels_without_overlap_does_not_add_history():
+    stack = LayerStack()
+    stack.on_changed = lambda: None
+    stack.init_from_image(np.full((5, 5, 4), 255, dtype=np.uint8))
+    layer = Layer(
+        "Outside",
+        2,
+        2,
+        np.full((2, 2, 4), 255, dtype=np.uint8),
+        x=8,
+        y=8,
+    )
+    stack.insert_layer(layer)
+    history = HistoryManager(stack.load_state)
+    service = DocumentService(stack, history, stack.load_state)
+    stack.selection.data[:] = 1.0
+
+    service.execute(ClearSelectedPixelsCommand(layer))
+
+    assert service.undo() is None
+    assert np.all(layer.image == 255)
 
 
 def test_document_service_apply_generated_result_command():

@@ -1,14 +1,33 @@
-# Pixal3D masked refinement backend
+# Pixal3D masked refinement
 
-The first refinement slice deliberately defines a UI-neutral boundary. The
-editor host supplies two same-sized images:
+The editor supplies two same-sized canvas-space images to the worker:
 
-- a square, already preprocessed conditioning image;
-- a soft grayscale mask in exactly the same image coordinates.
+- the original reconstruction source image;
+- a soft grayscale mask painted with the document selection brush.
 
-Canvas selection, crop overlays, brush controls, and conversion from document
-coordinates into this preprocessed space belong to a future UI adapter. They
-are not worker responsibilities.
+The worker resizes the pair together, obtains the same foreground alpha used by
+Pixal3D, and applies an identical square subject crop to the source and mask.
+This keeps the painted mask registered with the camera conditioning without
+duplicating Pixal3D preprocessing in the editor process.
+
+## Native UI
+
+Selecting a 3D Reconstruction object exposes a `Masked refinement` section in
+its contextual left panel. The 2D source canvas and 3D viewport remain visible
+side by side. `Paint refine mask` enables the existing soft document selection
+brush and its blue overlay; erasing, brush size, hardness, flow, strength,
+steps and seed are adjustable in the same panel. `Refine geometry in mask` and
+`Refine texture in mask` snapshot the source and mask and start asynchronous
+child runs. `Resize masked detail to 1024` is enabled by default and gives the
+selected image region the full spatial conditioning resolution.
+
+The `Version` control switches the viewport between `Base` and successive
+`Refined N` runs. Switching a version also chooses the checkpoint used by the
+next refinement.
+
+Loading another stage or run preserves the orbit camera. Once the user clicks
+a preview stage, incoming artifacts no longer replace that choice; automatic
+stage following remains active only before an explicit selection.
 
 ## Base checkpoint
 
@@ -45,9 +64,33 @@ the predicted features are kept inside the soft token mask and blended with
 `x_ref` outside it. At the end, the fully unselected part is restored exactly
 to `x0`.
 
-The current worker decodes a geometry-only GLB and writes another compatible
-checkpoint, so refinements may be chained. Texture refinement/regeneration is
-intentionally not part of this slice.
+After decoding the refined shape latent, the worker continues through a fresh
+`Texture flow`, saves a texture checkpoint, decodes PBR voxels and bakes a
+textured GLB. Geometry refinements may therefore be compared without losing
+the ordinary Pixal3D texture pass.
+
+## Masked texture refinement
+
+Every completed textured run owns two independent checkpoints:
+
+- normalized HR shape SLat and fixed sparse coordinates;
+- normalized texture SLat on the same coordinates.
+
+`Refine texture in mask` keeps the selected shape fixed, projects the canvas
+mask onto its sparse tokens and partially re-runs only Texture flow. After each
+Euler step, texture features outside the soft token mask follow the saved
+reference trajectory and are restored to the original texture latent at the
+end. The PBR volume and GLB atlas are then decoded and baked again.
+
+For additional detail, the worker extracts a padded square crop around the
+mask and feeds it through the 1024 conditioning encoder. Its projection grid
+first projects sparse 3D coordinates with the original full-frame camera, then
+remaps those full-frame pixels into crop coordinates. The crop therefore acts
+like the image editor's `Resize to 1024` without pretending that an off-centre
+crop is a centred camera image. Full-frame projected features remain outside
+the soft token mask; exact crop-projected features are blended inside it. Both
+global token sequences remain available to the flow model. The same path is
+used for masked geometry refine and masked texture refine.
 
 ## Run model
 
@@ -56,10 +99,15 @@ A base publication resets the run tuple. A masked-refine publication appends a
 child with `parent_run_id` and makes it active. The compatibility fields
 `glb_path` and mesh statistics continue to describe the active run.
 
-The native host exposes `start_reconstruction_refine(node, condition, mask)`
-as the integration point for the eventual panel. It snapshots both images,
-binds the asynchronous result to the launching node and parent run, and never
-overwrites the base run.
+Each run also owns an immutable snapshot of its stage statuses, progress and
+preview artifacts. Switching `Version` restores that complete snapshot and
+keeps the currently selected preview stage when the target run has it. This
+allows direct Base/refined comparisons at HR shape latent (and every other
+available preview), rather than changing only Final mesh. Texture-only runs
+inherit their parent's geometry-stage artifacts because their shape is fixed.
+
+The native host snapshots both images, binds the asynchronous result to the
+launching node and selected parent run, and never overwrites the base run.
 
 ## Current limitations
 
@@ -67,8 +115,10 @@ overwrites the base run.
   possible.
 - A 2D projection mask selects every visible-depth token under its pixels; a
   later UI may add depth or canonical-space controls.
-- The visible refined GLB is geometry-only.
+- Texture latent preservation is local, but decoding, UV generation and baking
+  rebuild the complete atlas and may introduce small differences outside the
+  selected region.
+- The mask currently reuses the document-level selection. It is transient and
+  shared rather than stored separately on each reconstruction object.
 - Runs and checkpoints are session-local and are reconstructed as one legacy
   base run after reopening a project.
-- Detail-crop conditioning and its crop-to-body registration remain a separate
-  extension.

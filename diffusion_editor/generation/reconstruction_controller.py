@@ -10,6 +10,7 @@ from PIL import Image
 
 from ..engines.reconstruction_engine import ReconstructionEngine
 from .types import (
+    RECONSTRUCTION_BACKEND_LABELS,
     ReconstructionRefineParameters,
     ReconstructionRefineRequest,
     ReconstructionRequest,
@@ -17,6 +18,7 @@ from .types import (
     ReconstructionResult,
     ReconstructionStage,
     ReconstructionStageEvent,
+    ReconstructionTextureRefineRequest,
 )
 
 
@@ -59,7 +61,10 @@ class ReconstructionController:
         if not self._engine.submit_request(request, job_id=job_id):
             return ReconstructionControllerEvent()
         self._active_job_id = job_id
-        return ReconstructionControllerEvent(status="Generating 3D model with Pixal3D...")
+        backend = RECONSTRUCTION_BACKEND_LABELS[snapshot.backend]
+        return ReconstructionControllerEvent(
+            status=f"Generating 3D model with {backend}..."
+        )
 
     def start_refine(
         self,
@@ -68,8 +73,9 @@ class ReconstructionController:
         base_checkpoint_path: str,
         *,
         parameters: ReconstructionRefineParameters | None = None,
+        generation_parameters: ReconstructionParameters | None = None,
     ) -> ReconstructionControllerEvent:
-        """Start geometry-only refinement; UI-to-mask mapping stays upstream."""
+        """Start masked geometry refinement followed by texture generation."""
         if self.is_busy:
             return ReconstructionControllerEvent()
         if conditioning_image.size != mask_image.size:
@@ -83,11 +89,51 @@ class ReconstructionController:
             mask_image=mask_image.copy(),
             base_checkpoint_path=str(base_checkpoint_path),
             parameters=parameters or ReconstructionRefineParameters(),
+            generation_parameters=(
+                generation_parameters or ReconstructionParameters()
+            ),
         )
         if not self._engine.submit_refine_request(request, job_id=job_id):
             return ReconstructionControllerEvent()
         self._active_job_id = job_id
         return ReconstructionControllerEvent(status="Refining 3D geometry with Pixal3D...")
+
+    def start_texture_refine(
+        self,
+        conditioning_image: Image.Image,
+        mask_image: Image.Image,
+        shape_checkpoint_path: str,
+        texture_checkpoint_path: str,
+        *,
+        parameters: ReconstructionRefineParameters | None = None,
+        generation_parameters: ReconstructionParameters | None = None,
+    ) -> ReconstructionControllerEvent:
+        if self.is_busy:
+            return ReconstructionControllerEvent()
+        if conditioning_image.size != mask_image.size:
+            return ReconstructionControllerEvent(
+                error="refine mask dimensions do not match conditioning image",
+                status="Cannot refine texture: mask dimensions do not match",
+            )
+        job_id = f"reconstruction_texture_refine_{uuid.uuid4().hex}"
+        request = ReconstructionTextureRefineRequest(
+            conditioning_image=conditioning_image.copy(),
+            mask_image=mask_image.copy(),
+            shape_checkpoint_path=str(shape_checkpoint_path),
+            texture_checkpoint_path=str(texture_checkpoint_path),
+            parameters=parameters or ReconstructionRefineParameters(),
+            generation_parameters=(
+                generation_parameters or ReconstructionParameters()
+            ),
+        )
+        if not self._engine.submit_texture_refine_request(
+            request, job_id=job_id
+        ):
+            return ReconstructionControllerEvent()
+        self._active_job_id = job_id
+        return ReconstructionControllerEvent(
+            status="Refining 3D texture with Pixal3D..."
+        )
 
     def cancel(self) -> bool:
         return self._engine.cancel()
@@ -111,8 +157,8 @@ class ReconstructionController:
             event.result, ReconstructionResult
         ):
             return ReconstructionControllerEvent(
-                error="invalid Pixal3D result",
-                status="3D generation failed: invalid worker result",
+                error="invalid 3D backend result",
+                status="3D generation failed: invalid backend result",
             )
         return ReconstructionControllerEvent(
             result=event.result,

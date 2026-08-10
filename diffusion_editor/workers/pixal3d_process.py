@@ -67,7 +67,10 @@ class Pixal3DProcessClient:
         self._artifact_roots: list[Path] = []
         self._artifacts: list[ReconstructionStageArtifact] = []
         self._checkpoint_path: Path | None = None
+        self._texture_checkpoint_path: Path | None = None
         self._conditioning_path: Path | None = None
+        self._backend_label = "Pixal3D"
+        self._environment_overrides: dict[str, str] = {}
 
     @property
     def artifacts(self) -> tuple[ReconstructionStageArtifact, ...]:
@@ -80,6 +83,10 @@ class Pixal3DProcessClient:
     @property
     def conditioning_path(self) -> Path | None:
         return self._conditioning_path
+
+    @property
+    def texture_checkpoint_path(self) -> Path | None:
+        return self._texture_checkpoint_path
 
     def generate(
         self,
@@ -99,7 +106,9 @@ class Pixal3DProcessClient:
         log_path = artifact_root / "pixal3d.log"
         events_path = artifact_root / "events.jsonl"
         checkpoint_path = artifact_root / "shape-checkpoint.npz"
+        texture_checkpoint_path = artifact_root / "texture-checkpoint.npz"
         self._checkpoint_path = None
+        self._texture_checkpoint_path = None
         self._conditioning_path = None
         image.convert("RGBA").save(source_path, format="PNG")
         self._artifacts = [ReconstructionStageArtifact(
@@ -152,6 +161,7 @@ class Pixal3DProcessClient:
                 "--lr-conditioning-resolution",
                 str(lr_conditioning_resolution),
                 "--checkpoint", str(checkpoint_path),
+                "--texture-checkpoint", str(texture_checkpoint_path),
             ))
         elif manual_fov > 0.0:
             command.extend(("--fov", str(manual_fov)))
@@ -161,6 +171,8 @@ class Pixal3DProcessClient:
         self._run_command(command, log_path, events_path, cancel, on_event)
         if checkpoint_path.is_file():
             self._checkpoint_path = checkpoint_path
+        if texture_checkpoint_path.is_file():
+            self._texture_checkpoint_path = texture_checkpoint_path
         preprocessed = artifact_root / "preprocessed.png"
         if preprocessed.is_file():
             self._conditioning_path = preprocessed
@@ -180,10 +192,11 @@ class Pixal3DProcessClient:
         cancel: threading.Event,
         *,
         parameters: ReconstructionRefineParameters | None = None,
+        generation_parameters: ReconstructionParameters | None = None,
         low_vram: bool | None = None,
         on_event: Callable[[ReconstructionStageEvent], None] | None = None,
     ) -> tuple[Path, Path]:
-        """Run geometry-only masked HR-shape refinement."""
+        """Refine HR shape, then regenerate and bake its texture."""
         self._validate_runtime()
         if not self._staged:
             raise RuntimeError("masked refinement requires the staged runner")
@@ -194,6 +207,7 @@ class Pixal3DProcessClient:
             raise ValueError("refine mask must match conditioning image dimensions")
 
         snapshot = parameters or ReconstructionRefineParameters()
+        generation = generation_parameters or ReconstructionParameters()
         artifact_root = Path(tempfile.mkdtemp(
             prefix="diffusion-editor-pixal3d-refine-"
         ))
@@ -202,15 +216,17 @@ class Pixal3DProcessClient:
         mask_path = artifact_root / "mask.png"
         output_path = artifact_root / "refined.glb"
         checkpoint_path = artifact_root / "shape-checkpoint.npz"
+        texture_checkpoint_path = artifact_root / "texture-checkpoint.npz"
         events_path = artifact_root / "events.jsonl"
         log_path = artifact_root / "pixal3d.log"
-        conditioning_image.convert("RGB").save(condition_path, format="PNG")
+        conditioning_image.convert("RGBA").save(condition_path, format="PNG")
         mask_image.convert("L").save(mask_path, format="PNG")
         self._artifacts = [ReconstructionStageArtifact(
             ReconstructionStage.SOURCE_IMAGE, str(condition_path), "image"
         )]
         self._checkpoint_path = None
-        self._conditioning_path = condition_path
+        self._texture_checkpoint_path = None
+        self._conditioning_path = None
         command = [
             str(self._python), str(self._runner_path),
             "--pixal3d-root", str(self._root),
@@ -219,6 +235,7 @@ class Pixal3DProcessClient:
             "--events", str(events_path),
             "--model_path", str(self._model_path),
             "--checkpoint", str(checkpoint_path),
+            "--texture-checkpoint", str(texture_checkpoint_path),
             "--refine-checkpoint", str(base_checkpoint),
             "--refine-mask", str(mask_path),
             "--refine-strength", str(snapshot.strength),
@@ -226,16 +243,110 @@ class Pixal3DProcessClient:
             "--refine-seed", str(snapshot.seed),
             "--refine-rescale-t", str(snapshot.rescale_t),
             "--refine-guidance", str(snapshot.guidance_strength),
+            "--steps", str(generation.steps),
+            "--seed", str(generation.seed),
+            "--decimation-target", str(generation.decimation_target),
+            "--texture-size", str(generation.texture_size),
         ]
-        if self._low_vram if low_vram is None else bool(low_vram):
+        if generation.low_vram if low_vram is None else bool(low_vram):
             command.append("--low_vram")
+        if snapshot.resize_detail_to_1024:
+            command.append("--resize-refine-detail")
         self._run_command(command, log_path, events_path, cancel, on_event)
         if not output_path.is_file() or output_path.stat().st_size == 0:
             raise RuntimeError("Pixal3D refinement completed without a GLB")
         if not checkpoint_path.is_file():
             raise RuntimeError("Pixal3D refinement completed without a checkpoint")
         self._checkpoint_path = checkpoint_path
+        if texture_checkpoint_path.is_file():
+            self._texture_checkpoint_path = texture_checkpoint_path
+        preprocessed = artifact_root / "preprocessed.png"
+        if preprocessed.is_file():
+            self._conditioning_path = preprocessed
         return output_path, condition_path
+
+    def refine_texture(
+        self,
+        conditioning_image: Image.Image,
+        mask_image: Image.Image,
+        shape_checkpoint_path: str | Path,
+        texture_checkpoint_path: str | Path,
+        cancel: threading.Event,
+        *,
+        parameters: ReconstructionRefineParameters | None = None,
+        generation_parameters: ReconstructionParameters | None = None,
+        on_event: Callable[[ReconstructionStageEvent], None] | None = None,
+    ) -> tuple[Path, Path]:
+        """Refine only the texture latent while retaining the selected shape."""
+        self._validate_runtime()
+        if not self._staged:
+            raise RuntimeError("masked texture refinement requires the staged runner")
+        shape_checkpoint = Path(shape_checkpoint_path)
+        texture_checkpoint = Path(texture_checkpoint_path)
+        for label, path in (
+            ("shape", shape_checkpoint), ("texture", texture_checkpoint)
+        ):
+            if not path.is_file():
+                raise RuntimeError(f"{label} refine checkpoint not found: {path}")
+        if conditioning_image.size != mask_image.size:
+            raise ValueError("refine mask must match conditioning image dimensions")
+
+        snapshot = parameters or ReconstructionRefineParameters()
+        generation = generation_parameters or ReconstructionParameters()
+        artifact_root = Path(tempfile.mkdtemp(
+            prefix="diffusion-editor-pixal3d-texture-refine-"
+        ))
+        self._artifact_roots.append(artifact_root)
+        source_path = artifact_root / "conditioning.png"
+        mask_path = artifact_root / "mask.png"
+        output_path = artifact_root / "texture-refined.glb"
+        next_texture_checkpoint = artifact_root / "texture-checkpoint.npz"
+        events_path = artifact_root / "events.jsonl"
+        log_path = artifact_root / "pixal3d.log"
+        conditioning_image.convert("RGBA").save(source_path, format="PNG")
+        mask_image.convert("L").save(mask_path, format="PNG")
+        self._artifacts = [ReconstructionStageArtifact(
+            ReconstructionStage.SOURCE_IMAGE, str(source_path), "image"
+        )]
+        self._checkpoint_path = shape_checkpoint
+        self._texture_checkpoint_path = None
+        self._conditioning_path = None
+        command = [
+            str(self._python), str(self._runner_path),
+            "--pixal3d-root", str(self._root),
+            "--image", str(source_path),
+            "--output", str(output_path),
+            "--events", str(events_path),
+            "--model_path", str(self._model_path),
+            "--refine-checkpoint", str(shape_checkpoint),
+            "--texture-refine-checkpoint", str(texture_checkpoint),
+            "--texture-checkpoint", str(next_texture_checkpoint),
+            "--refine-mask", str(mask_path),
+            "--refine-strength", str(snapshot.strength),
+            "--refine-steps", str(snapshot.steps),
+            "--refine-seed", str(snapshot.seed),
+            "--refine-rescale-t", str(snapshot.rescale_t),
+            "--steps", str(generation.steps),
+            "--seed", str(generation.seed),
+            "--decimation-target", str(generation.decimation_target),
+            "--texture-size", str(generation.texture_size),
+        ]
+        if generation.low_vram:
+            command.append("--low_vram")
+        if snapshot.resize_detail_to_1024:
+            command.append("--resize-refine-detail")
+        self._run_command(command, log_path, events_path, cancel, on_event)
+        if not output_path.is_file() or output_path.stat().st_size == 0:
+            raise RuntimeError("Pixal3D texture refinement completed without a GLB")
+        if not next_texture_checkpoint.is_file():
+            raise RuntimeError(
+                "Pixal3D texture refinement completed without a checkpoint"
+            )
+        self._texture_checkpoint_path = next_texture_checkpoint
+        preprocessed = artifact_root / "preprocessed.png"
+        if preprocessed.is_file():
+            self._conditioning_path = preprocessed
+        return output_path, source_path
 
     def _run_command(
         self,
@@ -254,6 +365,7 @@ class Pixal3DProcessClient:
         )
         environment.setdefault("ATTN_BACKEND", "sdpa")
         environment.setdefault("SPARSE_ATTN_BACKEND", "sdpa")
+        environment.update(self._environment_overrides)
         with log_path.open("wb") as log_file:
             process = subprocess.Popen(
                 command,
@@ -274,7 +386,9 @@ class Pixal3DProcessClient:
                     )
                     if cancel.wait(0.1):
                         self._terminate(process)
-                        raise RuntimeError("Pixal3D generation cancelled")
+                        raise RuntimeError(
+                            f"{self._backend_label} generation cancelled"
+                        )
                 if process.returncode != 0:
                     raise RuntimeError(
                         self._failure_message(log_path, process.returncode)
@@ -367,12 +481,11 @@ class Pixal3DProcessClient:
                 process.kill()
             process.wait(timeout=timeout)
 
-    @staticmethod
-    def _failure_message(log_path: Path, return_code: int) -> str:
+    def _failure_message(self, log_path: Path, return_code: int) -> str:
         try:
             lines = log_path.read_text(errors="replace").splitlines()
         except OSError:
             lines = []
         tail = "\n".join(lines[-20:]).strip()
-        base = f"Pixal3D exited with code {return_code}"
+        base = f"{self._backend_label} exited with code {return_code}"
         return f"{base}:\n{tail}" if tail else base

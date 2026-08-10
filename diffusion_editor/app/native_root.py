@@ -27,17 +27,26 @@ from ..document.layer import Layer
 from ..document.change_event import DocumentChangeKind
 from ..document.commands import (
     AddReconstructionLayerCommand,
+    ClearSelectionCommand,
     PublishReconstructionResultCommand,
+    SelectReconstructionRunCommand,
 )
 from ..document.reconstruction import ReconstructionLayer, ReconstructionStatus
 from ..document.tool import DiffusionTool, InstructTool, LamaTool
 from ..generation.patch_resolver import source_patch_at_center
 from ..generation.types import (
+    RECONSTRUCTION_BACKEND_STAGES,
+    ReconstructionBackend,
+    ReconstructionRunKind,
     ReconstructionStage,
     ReconstructionStageStatus,
 )
 from .application import EditorApplication, ShutdownPhase
-from .canvas_controls import CanvasControlsCoordinator
+from .canvas_controls import (
+    CanvasControlsCoordinator,
+    SelectionControlAction,
+    SelectionControlsIntent,
+)
 from .canvas_status import CanvasStatusCoordinator
 from .editor_commands import EditorCommandCoordinator
 from .generation_panels import GenerationPanelsCoordinator
@@ -313,7 +322,7 @@ class NativeEditorRoot:
                 if callable(register_resource):
                     register_resource(
                         ShutdownPhase.ENGINE_WORKERS,
-                        "pixal3d-reconstruction-engine",
+                        "3d-reconstruction-engine",
                         self.reconstruction_engine.shutdown,
                     )
                 set_handler = getattr(self.view, "set_command_handler", None)
@@ -340,6 +349,11 @@ class NativeEditorRoot:
                 )
                 if callable(set_parameter_handler):
                     set_parameter_handler(self._set_reconstruction_parameter)
+                set_refine_handler = getattr(
+                    self.view, "set_reconstruction_refine_handler", None
+                )
+                if callable(set_refine_handler):
+                    set_refine_handler(self._handle_reconstruction_refine)
             mount_canvas = getattr(self.view, "mount_canvas", None)
             graphics = getattr(composition, "graphics", None)
             if mount_canvas is not None and graphics is not None:
@@ -865,13 +879,18 @@ class NativeEditorRoot:
         *,
         parameters=None,
     ):
-        """Backend entry point for a future reconstruction-refine UI."""
+        """Start a masked refinement from a canvas-sized source and mask."""
         controller = self.reconstruction_controller
         if controller is None or controller.is_busy:
             return None
         if self.application.layer_stack.find_layer_by_id(node.id) is not node:
             raise ValueError("reconstruction node does not belong to the document")
         parent = node.active_run or node.base_run
+        if (
+            parent is not None
+            and parent.backend is not ReconstructionBackend.PIXAL3D
+        ):
+            raise ValueError("masked refinement is not available for TRELLIS.2")
         if parent is None or not parent.checkpoint_path:
             raise ValueError("active reconstruction run has no refine checkpoint")
         if not os.path.isfile(parent.checkpoint_path):
@@ -881,6 +900,7 @@ class NativeEditorRoot:
             mask_image,
             parent.checkpoint_path,
             parameters=parameters,
+            generation_parameters=node.generation_parameters,
         )
         if event.status and event.error is None:
             self._reconstruction_job_node_id = node.id
@@ -890,6 +910,134 @@ class NativeEditorRoot:
         elif event.status:
             self.application.set_status(event.status)
         return event
+
+    def start_reconstruction_texture_refine(
+        self,
+        node: ReconstructionLayer,
+        conditioning_image: Image.Image,
+        mask_image: Image.Image,
+        *,
+        parameters=None,
+    ):
+        controller = self.reconstruction_controller
+        if controller is None or controller.is_busy:
+            return None
+        if self.application.layer_stack.find_layer_by_id(node.id) is not node:
+            raise ValueError("reconstruction node does not belong to the document")
+        parent = node.active_run or node.base_run
+        if (
+            parent is not None
+            and parent.backend is not ReconstructionBackend.PIXAL3D
+        ):
+            raise ValueError("texture refinement is not available for TRELLIS.2")
+        if parent is None or not parent.checkpoint_path:
+            raise ValueError("active run has no shape checkpoint")
+        if not parent.texture_checkpoint_path:
+            raise ValueError("active run has no texture checkpoint")
+        for label, path in (
+            ("shape", parent.checkpoint_path),
+            ("texture", parent.texture_checkpoint_path),
+        ):
+            if not os.path.isfile(path):
+                raise ValueError(f"active run {label} checkpoint is missing")
+        event = controller.start_texture_refine(
+            conditioning_image,
+            mask_image,
+            parent.checkpoint_path,
+            parent.texture_checkpoint_path,
+            parameters=parameters,
+            generation_parameters=node.generation_parameters,
+        )
+        if event.status and event.error is None:
+            self._reconstruction_job_node_id = node.id
+            self._reconstruction_parent_run_id = parent.run_id
+            self._set_reconstruction_status(node, ReconstructionStatus.GENERATING)
+            self.application.set_status(event.status)
+        elif event.status:
+            self.application.set_status(event.status)
+        return event
+
+    def _start_selected_reconstruction_refine(
+            self, node: ReconstructionLayer) -> None:
+        stack = self.application.layer_stack
+        parent = node.active_run or node.base_run
+        if parent is None or not parent.source_path:
+            self.application.set_status(
+                "Cannot refine: the selected version has no source image"
+            )
+            return
+        if not os.path.isfile(parent.source_path):
+            self.application.set_status(
+                "Cannot refine: the selected version source image is missing"
+            )
+            return
+        if stack.selection.is_empty:
+            self.application.set_status(
+                "Paint a refine mask on the image first"
+            )
+            return
+        try:
+            with Image.open(parent.source_path) as opened:
+                source_image = opened.convert("RGBA").copy()
+            if source_image.size != (stack.width, stack.height):
+                raise ValueError(
+                    "source image dimensions no longer match the canvas"
+                )
+            mask_image = Image.fromarray(
+                stack.selection.to_mask().to_uint8(), mode="L"
+            )
+            self._set_reconstruction_mask_painting(False)
+            self.start_reconstruction_refine(
+                node,
+                source_image,
+                mask_image,
+                parameters=node.refine_parameters,
+            )
+            self._refresh_reconstruction_panel(node)
+        except Exception as exc:
+            log.exception("Failed to start masked 3D refinement")
+            self.application.set_status(f"Cannot start 3D refinement: {exc}")
+
+    def _start_selected_reconstruction_texture_refine(
+            self, node: ReconstructionLayer) -> None:
+        stack = self.application.layer_stack
+        parent = node.active_run or node.base_run
+        if parent is None or not parent.source_path:
+            self.application.set_status(
+                "Cannot refine texture: the selected version has no source image"
+            )
+            return
+        if not os.path.isfile(parent.source_path):
+            self.application.set_status(
+                "Cannot refine texture: source image is missing"
+            )
+            return
+        if stack.selection.is_empty:
+            self.application.set_status("Paint a texture refine mask first")
+            return
+        try:
+            with Image.open(parent.source_path) as opened:
+                source_image = opened.convert("RGBA").copy()
+            if source_image.size != (stack.width, stack.height):
+                raise ValueError(
+                    "source image dimensions no longer match the canvas"
+                )
+            mask_image = Image.fromarray(
+                stack.selection.to_mask().to_uint8(), mode="L"
+            )
+            self._set_reconstruction_mask_painting(False)
+            self.start_reconstruction_texture_refine(
+                node,
+                source_image,
+                mask_image,
+                parameters=node.refine_parameters,
+            )
+            self._refresh_reconstruction_panel(node)
+        except Exception as exc:
+            log.exception("Failed to start masked 3D texture refinement")
+            self.application.set_status(
+                f"Cannot start 3D texture refinement: {exc}"
+            )
 
     def _cancel_reconstruction(self) -> None:
         controller = self.reconstruction_controller
@@ -926,12 +1074,12 @@ class NativeEditorRoot:
             artifact = event.stage_event.artifact
             if (
                 artifact is not None
-                and artifact.preview_kind == "mesh"
+                and event.stage_event.stage is node.selected_preview_stage
                 and self.application.layer_stack.active_layer is node
             ):
                 try:
-                    self._ensure_reconstruction_viewport().load_glb(artifact.path)
-                    self._presented_reconstruction_id = node.id
+                    if self._load_reconstruction_artifact(artifact):
+                        self._presented_reconstruction_id = node.id
                 except Exception:
                     log.exception("Failed to display reconstruction stage preview")
             return
@@ -948,8 +1096,7 @@ class NativeEditorRoot:
                 )
                 return
             try:
-                viewport = self._ensure_reconstruction_viewport()
-                vertices, triangles, meshes = viewport.load_glb(
+                vertices, triangles, meshes = self._read_reconstruction_glb_stats(
                     event.result.glb_path
                 )
                 self.application.document.execute(
@@ -962,15 +1109,28 @@ class NativeEditorRoot:
                         source_path=event.result.source_path,
                         conditioning_path=event.result.conditioning_path,
                         checkpoint_path=event.result.checkpoint_path,
+                        texture_checkpoint_path=(
+                            event.result.texture_checkpoint_path
+                        ),
                         run_kind=event.result.kind,
                         parent_run_id=(
                             parent_run_id
-                            if event.result.kind.value == "masked_refine"
+                            if event.result.kind is not ReconstructionRunKind.BASE
                             else None
                         ),
+                        backend=event.result.backend,
                     )
                 )
-                self._presented_reconstruction_id = node.id
+                if (
+                    self.application.layer_stack.active_layer is node
+                    and node.selected_preview_stage
+                    is ReconstructionStage.FINAL_MESH
+                ):
+                    self._ensure_reconstruction_viewport().load_glb(
+                        event.result.glb_path
+                    )
+                    self._presented_reconstruction_id = node.id
+                self._refresh_reconstruction_panel(node)
                 self.application.set_status(
                     "3D model ready: "
                     f"{vertices:,} vertices, {triangles:,} triangles, "
@@ -995,18 +1155,105 @@ class NativeEditorRoot:
                 self._refresh_reconstruction_panel(node)
             self.application.set_status(event.status)
 
+    @staticmethod
+    def _read_reconstruction_glb_stats(path: str) -> tuple[int, int, int]:
+        from ..native_glb import inspect_glb_stats
+
+        return inspect_glb_stats(path)
+
     def _select_reconstruction_stage(self, stage: ReconstructionStage) -> None:
         node = self.application.layer_stack.active_layer
         if not isinstance(node, ReconstructionLayer):
             return
+        node.selected_preview_stage = stage
+        node.preview_stage_pinned = True
         artifact = node.stage_artifacts.get(stage)
         if artifact is not None:
-            node.selected_preview_stage = stage
-            if artifact.preview_kind == "mesh" and os.path.isfile(artifact.path):
-                self._ensure_reconstruction_viewport().load_glb(artifact.path)
+            if self._load_reconstruction_artifact(artifact):
                 self._presented_reconstruction_id = node.id
         else:
             node.target_stage = stage
+        self._refresh_reconstruction_panel(node)
+
+    def _set_reconstruction_mask_painting(self, enabled: bool) -> None:
+        coordinator = self.canvas_controls_coordinator
+        if coordinator is None:
+            return
+        coordinator.handle_selection_intent(SelectionControlsIntent(
+            SelectionControlAction.EDIT_MODE,
+            bool(enabled),
+        ))
+        if enabled:
+            coordinator.handle_selection_intent(SelectionControlsIntent(
+                SelectionControlAction.SHOW,
+                True,
+            ))
+
+    def _handle_reconstruction_refine(self, action: str, value=None) -> None:
+        node = self.application.layer_stack.active_layer
+        controller = self.reconstruction_controller
+        if (
+            not isinstance(node, ReconstructionLayer)
+            or (controller is not None and controller.is_busy)
+        ):
+            return
+        coordinator = self.canvas_controls_coordinator
+        try:
+            if action == "paint":
+                self._set_reconstruction_mask_painting(bool(value))
+            elif action == "erase" and coordinator is not None:
+                coordinator.handle_selection_intent(SelectionControlsIntent(
+                    SelectionControlAction.ERASER, bool(value)
+                ))
+            elif action in {"brush_size", "brush_hardness", "brush_flow"}:
+                if coordinator is None:
+                    return
+                selection_action = {
+                    "brush_size": SelectionControlAction.SIZE,
+                    "brush_hardness": SelectionControlAction.HARDNESS,
+                    "brush_flow": SelectionControlAction.FLOW,
+                }[action]
+                coordinator.handle_selection_intent(SelectionControlsIntent(
+                    selection_action, value
+                ))
+            elif action in {
+                "strength", "steps", "seed", "resize_detail_to_1024"
+            }:
+                normalized = (
+                    int(value)
+                    if action in {"steps", "seed"}
+                    else bool(value)
+                    if action == "resize_detail_to_1024"
+                    else float(value)
+                )
+                node.refine_parameters = replace(
+                    node.refine_parameters, **{action: normalized}
+                )
+            elif action == "clear":
+                self.application.document.execute(ClearSelectionCommand())
+            elif action == "run":
+                self._start_selected_reconstruction_refine(node)
+                return
+            elif action == "run_texture":
+                self._start_selected_reconstruction_texture_refine(node)
+                return
+            elif action == "select_run" and value is not None:
+                self.application.document.execute(
+                    SelectReconstructionRunCommand(node, str(value))
+                )
+                artifact = node.stage_artifacts.get(
+                    node.selected_preview_stage
+                )
+                if artifact is not None and self._load_reconstruction_artifact(
+                    artifact
+                ):
+                    self._presented_reconstruction_id = node.id
+                self.application.set_status("3D reconstruction version selected")
+            else:
+                return
+        except (TypeError, ValueError) as exc:
+            self.application.set_status(f"Invalid refine setting: {exc}")
+            return
         self._refresh_reconstruction_panel(node)
 
     def _set_reconstruction_parameter(self, key: str, value) -> None:
@@ -1021,6 +1268,13 @@ class NativeEditorRoot:
             node.generation_parameters = replace(
                 node.generation_parameters, **{key: value}
             )
+            supported = RECONSTRUCTION_BACKEND_STAGES[
+                node.generation_parameters.backend
+            ]
+            if node.target_stage not in supported:
+                node.target_stage = ReconstructionStage.FINAL_MESH
+            if node.selected_preview_stage not in supported:
+                node.selected_preview_stage = ReconstructionStage.SOURCE_IMAGE
         except (TypeError, ValueError):
             return
         self._refresh_reconstruction_panel(node)
@@ -1042,17 +1296,70 @@ class NativeEditorRoot:
                 node.target_stage,
                 node.selected_preview_stage,
                 busy=busy,
+                backend=node.generation_parameters.backend,
             )
             update_parameters = getattr(
                 self.view, "update_reconstruction_parameters", None
             )
             if callable(update_parameters):
                 update_parameters(node.generation_parameters, busy=busy)
+            update_refine = getattr(
+                self.view, "update_reconstruction_refine", None
+            )
+            if callable(update_refine):
+                parent = node.active_run or node.base_run
+                selected_backend = (
+                    parent.backend
+                    if parent
+                    else node.generation_parameters.backend
+                )
+                refine_supported = (
+                    selected_backend is ReconstructionBackend.PIXAL3D
+                )
+                can_refine = bool(
+                    parent
+                    and parent.backend is ReconstructionBackend.PIXAL3D
+                    and parent.checkpoint_path
+                    and os.path.isfile(parent.checkpoint_path)
+                    and parent.source_path
+                    and os.path.isfile(parent.source_path)
+                )
+                can_texture_refine = bool(
+                    can_refine
+                    and parent
+                    and parent.texture_checkpoint_path
+                    and os.path.isfile(parent.texture_checkpoint_path)
+                )
+                selection = (
+                    self.canvas_controls_coordinator.selection_state
+                    if self.canvas_controls_coordinator is not None
+                    else None
+                )
+                update_refine(
+                    node.refine_parameters,
+                    node.runs,
+                    node.active_run_id,
+                    mask_ready=(
+                        not self.application.layer_stack.selection.is_empty
+                    ),
+                    refine_supported=refine_supported,
+                    can_refine=can_refine,
+                    can_texture_refine=can_texture_refine,
+                    paint_active=bool(selection and selection.edit_mode),
+                    erase_active=bool(selection and selection.eraser),
+                    brush_size=selection.size if selection else 50,
+                    brush_hardness=selection.hardness if selection else 0.4,
+                    brush_flow=selection.flow if selection else 1.0,
+                    busy=busy,
+                )
 
     def _sync_reconstruction_selection(
             self, node: ReconstructionLayer | None) -> None:
         set_context = getattr(self.view, "set_reconstruction_context", None)
         if node is None:
+            coordinator = self.canvas_controls_coordinator
+            if coordinator is not None and coordinator.selection_state.edit_mode:
+                self._set_reconstruction_mask_painting(False)
             if callable(set_context):
                 set_context(False)
             return
@@ -1063,17 +1370,25 @@ class NativeEditorRoot:
         if self._presented_reconstruction_id == node.id:
             return
         artifact = node.stage_artifacts.get(node.selected_preview_stage)
-        if (
-            artifact is not None
-            and artifact.preview_kind == "mesh"
-            and os.path.isfile(artifact.path)
-        ):
-            viewport.load_glb(artifact.path)
+        if artifact is not None and self._load_reconstruction_artifact(artifact):
+            pass
         elif node.glb_path and os.path.isfile(node.glb_path):
             viewport.load_glb(node.glb_path)
         else:
             viewport.clear_model()
         self._presented_reconstruction_id = node.id
+
+    def _load_reconstruction_artifact(self, artifact) -> bool:
+        if not os.path.isfile(artifact.path):
+            return False
+        viewport = self._ensure_reconstruction_viewport()
+        if artifact.preview_kind == "mesh":
+            viewport.load_glb(artifact.path)
+            return True
+        if artifact.preview_kind == "points":
+            viewport.load_point_cloud(artifact.path)
+            return True
+        return False
 
     def _set_reconstruction_status(
             self,

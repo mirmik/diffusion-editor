@@ -17,6 +17,11 @@ from tgfx import (
     CULL_NONE,
     PIXEL_D32F,
     PIXEL_RGBA8,
+    PointCloud,
+    PointCloudDrawParams,
+    PointCloudRenderer,
+    PointCloudShape,
+    PointCloudStyle,
     Tgfx2Context,
     Tgfx2ShaderStage,
     TextureEncoding,
@@ -142,6 +147,11 @@ def _decode_texture(payload: bytes) -> tuple[int, int, np.ndarray]:
         rgba = np.array(image.convert("RGBA"), dtype=np.uint8, order="C", copy=True)
     height, width = rgba.shape[:2]
     return width, height, rgba.reshape(-1).copy()
+
+
+def _should_fit_camera(had_model: bool, requested: bool | None) -> bool:
+    """Fit a first model by default, while preserving an existing comparison view."""
+    return not had_model if requested is None else bool(requested)
 
 
 class _OrbitCamera:
@@ -316,7 +326,7 @@ class _ViewportSurface:
 
 
 class NativeReconstructionViewport:
-    """Displays one generated GLB with orbit, pan and zoom controls."""
+    """Displays a generated mesh or point cloud with orbit, pan and zoom."""
 
     def __init__(
         self,
@@ -332,6 +342,12 @@ class NativeReconstructionViewport:
         self._dirty = True
         self._closed = False
         self._mesh_items: list[_MeshRenderItem] = []
+        self._point_cloud = PointCloud()
+        self._point_cloud_renderer = PointCloudRenderer()
+        self._point_cloud_style = PointCloudStyle()
+        self._point_cloud_style.size_px = 5.0
+        self._point_cloud_style.shape = PointCloudShape.Circle
+        self._point_cloud_draw_params = PointCloudDrawParams()
         self._glb_document = None
         self._color_texture = None
         self._depth_texture = None
@@ -375,6 +391,10 @@ class NativeReconstructionViewport:
         return len(self._mesh_items)
 
     @property
+    def point_count(self) -> int:
+        return int(self._point_cloud.point_count)
+
+    @property
     def light_direction(self) -> tuple[float, float, float]:
         return tuple(map(float, self._light_direction))
 
@@ -387,13 +407,17 @@ class NativeReconstructionViewport:
         self._require_open()
         self._destroy_model_textures()
         self._mesh_items.clear()
+        self._point_cloud.release(self._graphics.context)
         self._glb_document = None
         self.invalidate()
 
-    def load_glb(self, path: str) -> tuple[int, int, int]:
+    def load_glb(
+            self, path: str, *, fit_camera: bool | None = None
+    ) -> tuple[int, int, int]:
         self._require_open()
         from ..native_glb import NativeGLBDocument
 
+        had_model = bool(self._mesh_items) or not self._point_cloud.empty
         source = NativeGLBDocument(path)
         mesh_items = []
         vertices = 0
@@ -432,13 +456,39 @@ class NativeReconstructionViewport:
         if not mesh_items:
             raise RuntimeError("Generated GLB contains no meshes")
         self._destroy_model_textures()
+        self._point_cloud.release(self._graphics.context)
         self._glb_document = source
         self._mesh_items = mesh_items
-        if bounds_min is not None and bounds_max is not None:
+        if (
+            bounds_min is not None
+            and bounds_max is not None
+            and _should_fit_camera(had_model, fit_camera)
+        ):
             self._camera.fit(bounds_min, bounds_max)
             self._light_direction = self._camera.direction_from_target()
         self.invalidate()
         return vertices, indices // 3, len(mesh_items)
+
+    def load_point_cloud(
+            self, path: str, *, fit_camera: bool | None = None
+    ) -> int:
+        self._require_open()
+        from ..native_ply import load_ply_points
+
+        had_model = bool(self._mesh_items) or not self._point_cloud.empty
+        data = load_ply_points(path)
+        if not self._point_cloud.upload_srgb(
+            self._graphics.context, data.positions, data.colors
+        ):
+            raise RuntimeError("Termin failed to upload the reconstruction point cloud")
+        self._destroy_model_textures()
+        self._mesh_items.clear()
+        self._glb_document = None
+        if _should_fit_camera(had_model, fit_camera):
+            self._camera.fit(data.positions.min(axis=0), data.positions.max(axis=0))
+            self._light_direction = self._camera.direction_from_target()
+        self.invalidate()
+        return len(data.positions)
 
     def invalidate(self) -> None:
         if self._closed:
@@ -479,6 +529,16 @@ class NativeReconstructionViewport:
                 ctx.bind_texture_by_name("u_base_color_texture", item.texture)
             self._set_draw_state(mvp, item.color, self._light_direction)
             draw_tc_mesh(ctx, item.mesh)
+        if not self._point_cloud.empty:
+            self._point_cloud_draw_params.view_projection = tuple(
+                np.ascontiguousarray(mvp.T, dtype=np.float32).reshape(-1)
+            )
+            self._point_cloud_renderer.draw(
+                ctx,
+                self._point_cloud,
+                self._point_cloud_style,
+                self._point_cloud_draw_params,
+            )
         ctx.end_pass()
         if opened_frame:
             ctx.end_frame()
@@ -498,6 +558,8 @@ class NativeReconstructionViewport:
             self._graphics.destroy_texture(self._depth_texture)
         self._graphics.device.destroy_shader(self._vertex_shader)
         self._graphics.device.destroy_shader(self._fragment_shader)
+        self._point_cloud.release(self._graphics.context)
+        self._point_cloud_renderer.release(self._graphics.context)
         self._color_texture = None
         self._depth_texture = None
         self._destroy_model_textures()

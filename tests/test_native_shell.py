@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from termin.gui_native import (
+    KeyCode,
     ModifierFlag,
     Rect,
     Size,
@@ -14,6 +15,10 @@ from diffusion_editor.app.native_shell import MENU_COMMANDS, NativeEditorView
 from diffusion_editor.generation.types import (
     RECONSTRUCTION_STAGES,
     ReconstructionParameters,
+    ReconstructionBackend,
+    ReconstructionRefineParameters,
+    ReconstructionRun,
+    ReconstructionRunKind,
     ReconstructionStage,
     ReconstructionStageStatus,
 )
@@ -34,6 +39,7 @@ EXPECTED_COMMANDS = (
     "edit.copy",
     "edit.copy_visible",
     "edit.paste",
+    "edit.clear_selected_pixels",
     "edit.settings",
     "selection.all",
     "selection.background",
@@ -323,6 +329,95 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar():
             not control.widget.enabled
             for control in view.reconstruction_parameter_controls.values()
         )
+        trellis_parameters = ReconstructionParameters(
+            backend=ReconstructionBackend.TRELLIS2,
+        )
+        view.update_reconstruction_parameters(trellis_parameters, busy=False)
+        parameter_controls = view.reconstruction_parameter_controls
+        assert parameter_controls["backend"].selected_index == 1
+        assert parameter_controls["backend"].widget.enabled is True
+        assert parameter_controls[
+            "lr_conditioning_resolution"
+        ].widget.enabled is False
+        assert parameter_controls["manual_fov_degrees"].widget.enabled is False
+        spar3d_parameters = ReconstructionParameters(
+            backend=ReconstructionBackend.SPAR3D,
+            spar3d_guidance_scale=4.5,
+        )
+        view.update_reconstruction_parameters(spar3d_parameters, busy=False)
+        assert parameter_controls["backend"].selected_index == 2
+        assert parameter_controls["spar3d_guidance_scale"].value == 4.5
+        assert parameter_controls["spar3d_guidance_scale"].widget.enabled is True
+        assert parameter_controls["steps"].widget.enabled is False
+        assert parameter_controls["resolution"].widget.enabled is False
+        assert parameter_controls["decimation_target"].widget.enabled is False
+        refine_actions = []
+        view.set_reconstruction_refine_handler(
+            lambda action, value: refine_actions.append((action, value))
+        )
+        view._activate_reconstruction_refine("paint", True)
+        assert refine_actions == [("paint", True)]
+        runs = (
+            ReconstructionRun(
+                "base-run", ReconstructionRunKind.BASE,
+                "/tmp/base.glb", "/tmp/source.png",
+            ),
+            ReconstructionRun(
+                "refined-run", ReconstructionRunKind.MASKED_REFINE,
+                "/tmp/refined.glb", "/tmp/source.png",
+                parent_run_id="base-run",
+            ),
+        )
+        refine_parameters = ReconstructionRefineParameters(
+            strength=0.6, steps=12, seed=456,
+            resize_detail_to_1024=False,
+        )
+        view.update_reconstruction_refine(
+            refine_parameters,
+            runs,
+            "refined-run",
+            mask_ready=True,
+            can_refine=True,
+            can_texture_refine=True,
+            paint_active=True,
+            erase_active=True,
+            brush_size=72,
+            brush_hardness=0.25,
+            brush_flow=0.75,
+        )
+        refine_controls = view.reconstruction_refine_controls
+        assert refine_controls["paint"].checked is True
+        assert refine_controls["erase"].checked is True
+        assert refine_controls["brush_size"].value == 72.0
+        assert refine_controls["strength"].value == pytest.approx(0.6)
+        assert refine_controls["steps"].value == 12.0
+        assert refine_controls["seed"].value == 456.0
+        assert refine_controls["resize_detail_to_1024"].checked is False
+        assert refine_controls["version"].item_count == 2
+        assert refine_controls["version"].item_text(0) == "Base (Pixal3D)"
+        assert refine_controls["version"].item_text(1) == "Refined 1"
+        assert refine_controls["version"].selected_index == 1
+        assert refine_controls["run"].widget.enabled is True
+        assert refine_controls["run_texture"].widget.enabled is True
+        trellis_run = ReconstructionRun(
+            "trellis-run",
+            ReconstructionRunKind.BASE,
+            "/tmp/trellis.glb",
+            "/tmp/source.png",
+            backend=ReconstructionBackend.TRELLIS2,
+        )
+        view.update_reconstruction_refine(
+            refine_parameters,
+            (trellis_run,),
+            trellis_run.run_id,
+            mask_ready=True,
+            refine_supported=False,
+            can_refine=False,
+        )
+        assert refine_controls["paint"].widget.enabled is False
+        assert refine_controls["run"].widget.enabled is False
+        assert refine_controls["version"].widget.enabled is True
+        assert refine_controls["version"].item_text(0) == "Base (TRELLIS.2)"
         statuses = {
             stage: ReconstructionStageStatus.PENDING
             for stage in RECONSTRUCTION_STAGES
@@ -335,10 +430,17 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar():
             {ReconstructionStage.SPARSE_OCCUPANCY: (12, 12)},
             ReconstructionStage.HR_COORDINATES,
             ReconstructionStage.SPARSE_OCCUPANCY,
+            backend=ReconstructionBackend.SPAR3D,
         )
         assert view.reconstruction_stage_checks[
             ReconstructionStage.SPARSE_OCCUPANCY
         ].checked is True
+        assert view.reconstruction_stage_buttons[
+            ReconstructionStage.POINT_CLOUD
+        ].widget.enabled is True
+        assert view.reconstruction_stage_buttons[
+            ReconstructionStage.SPARSE_OCCUPANCY
+        ].widget.enabled is False
         document.layout_roots(Rect(0.0, 0.0, 1000.0, 700.0))
         snapshot = _snapshot_by_id(document)
         host = snapshot["diffusion-editor.canvas-host"]["bounds"]
@@ -454,6 +556,7 @@ def test_native_shortcuts_and_command_state_use_app_owned_handlers():
         {
             "file.save": lambda: activated.append("save"),
             "edit.redo": lambda: activated.append("redo"),
+            "edit.clear_selected_pixels": lambda: activated.append("clear"),
         },
     )
     try:
@@ -469,6 +572,8 @@ def test_native_shortcuts_and_command_state_use_app_owned_handlers():
         assert view.menu_bar.dispatch_shortcut(ord("s"), ctrl)
         assert view.menu_bar.dispatch_shortcut(ord("y"), ctrl)
         assert activated == ["save", "save", "redo"]
+        assert view.menu_bar.dispatch_shortcut(KeyCode.Delete.value, 0)
+        assert activated[-1] == "clear"
 
         view.set_command_handler(
             "selection.all",

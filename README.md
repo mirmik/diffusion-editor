@@ -124,9 +124,11 @@ button or **Layer → New 3D Reconstruction**, then select it and use
 **Generate 3D Model** in its contextual left panel, which replaces the usual
 brush and generation controls. Selecting a raster layer restores those controls
 and the full-width Canvas; selecting a reconstruction restores its left panel
-and Canvas/3D workspace. The reconstruction panel lists the staged Pixal3D
-pipeline, reports sampling progress, and lets a ready stage be previewed or a
-pending stage be selected as the next generation target. Coordinate stages are
+and Canvas/3D workspace. The reconstruction panel can use Pixal3D, TRELLIS.2,
+the optional SPAR3D point-aware backend, or geometry-only Hi3DGen. It reports
+staged sampling progress,
+lets a ready stage be previewed, and lets a pending stage be selected as the
+next generation target. Coordinate stages are
 published as lightweight GLB geometry previews; shape and final stages publish
 mesh previews. Per-reconstruction generation controls cover seed, sampling
 steps, HR resolution, automatic or manual camera FOV, final mesh face budget,
@@ -143,6 +145,12 @@ runs leave a session-local HR shape checkpoint; a same-sized preprocessed
 conditioning image and soft mask can produce a geometry-only child run without
 overwriting its parent. See
 [Pixal3D masked refinement backend](docs/pixal3d-masked-refinement.md).
+TRELLIS.2 currently supports base staged generation and PBR GLB export only;
+see [TRELLIS.2 backend](docs/trellis2-backend.md).
+SPAR3D exposes its editable colored point-cloud stage before final PBR export;
+see [SPAR3D backend](docs/spar3d-backend.md).
+Hi3DGen conditions TRELLIS-style geometry generation on an inferred normal map;
+see [Hi3DGen backend](docs/hi3dgen-backend.md).
 
 For live development automation, enable the local Editor MCP server in
 **Edit → Settings** and restart the editor. Termin's existing MCP/CLI helper

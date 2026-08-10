@@ -12,7 +12,15 @@ from PIL import Image, ImageFilter
 
 from .layer import Layer
 from .reconstruction import ReconstructionLayer, ReconstructionStatus
-from ..generation.types import ReconstructionRun, ReconstructionRunKind
+from ..generation.types import (
+    RECONSTRUCTION_STAGES,
+    ReconstructionBackend,
+    ReconstructionRun,
+    ReconstructionRunKind,
+    ReconstructionStage,
+    ReconstructionStageArtifact,
+    ReconstructionStageStatus,
+)
 from .change_event import DocumentChangeKind
 from .tool import DiffusionTool, InstructTool, Tool
 from .layer_stack import LayerStack
@@ -210,14 +218,30 @@ class PublishReconstructionResultCommand:
     source_path: str = ""
     conditioning_path: str | None = None
     checkpoint_path: str | None = None
+    texture_checkpoint_path: str | None = None
     run_kind: ReconstructionRunKind = ReconstructionRunKind.BASE
     parent_run_id: str | None = None
+    backend: ReconstructionBackend = ReconstructionBackend.PIXAL3D
     run_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     label: str = "Publish 3D Reconstruction"
 
     def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
         if layer_stack.find_layer_by_id(self.layer.id) is not self.layer:
             raise ValueError("reconstruction node does not belong to the layer stack")
+        final_stage = ReconstructionStage.FINAL_MESH
+        final_artifact = ReconstructionStageArtifact(
+            final_stage,
+            str(self.glb_path),
+            "mesh",
+        )
+        stage_statuses = {
+            **self.layer.stage_statuses,
+            final_stage: ReconstructionStageStatus.READY,
+        }
+        stage_artifacts = {
+            **self.layer.stage_artifacts,
+            final_stage: final_artifact,
+        }
         run = ReconstructionRun(
             run_id=self.run_id,
             kind=self.run_kind,
@@ -225,16 +249,33 @@ class PublishReconstructionResultCommand:
             source_path=str(self.source_path),
             conditioning_path=self.conditioning_path,
             checkpoint_path=self.checkpoint_path,
+            texture_checkpoint_path=self.texture_checkpoint_path,
             parent_run_id=self.parent_run_id,
             vertex_count=int(self.vertex_count),
             triangle_count=int(self.triangle_count),
             mesh_count=int(self.mesh_count),
+            backend=self.backend,
+            stage_statuses=tuple(
+                stage_statuses[stage] for stage in RECONSTRUCTION_STAGES
+            ),
+            stage_progress=tuple(
+                self.layer.stage_progress[stage]
+                for stage in RECONSTRUCTION_STAGES
+            ),
+            stage_artifacts=tuple(
+                stage_artifacts[stage]
+                for stage in RECONSTRUCTION_STAGES
+                if stage in stage_artifacts
+            ),
         )
         runs = (
             (run,)
             if self.run_kind is ReconstructionRunKind.BASE
             else (*self.layer.runs, run)
         )
+        selected_stage = self.layer.selected_preview_stage
+        if not self.layer.preview_stage_pinned:
+            selected_stage = final_stage
         return _attribute_delta(
             layer_stack,
             self.layer,
@@ -247,6 +288,70 @@ class PublishReconstructionResultCommand:
                 "mesh_count": int(self.mesh_count),
                 "runs": runs,
                 "active_run_id": run.run_id,
+                "selected_preview_stage": selected_stage,
+                "stage_statuses": stage_statuses,
+                "stage_artifacts": stage_artifacts,
+            },
+        )
+
+
+@dataclass(frozen=True)
+class SelectReconstructionRunCommand:
+    layer: ReconstructionLayer
+    run_id: str
+    label: str = "Select 3D Reconstruction Version"
+
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
+        if layer_stack.find_layer_by_id(self.layer.id) is not self.layer:
+            raise ValueError("reconstruction node does not belong to the layer stack")
+        run = next(
+            (candidate for candidate in self.layer.runs
+             if candidate.run_id == self.run_id),
+            None,
+        )
+        if run is None:
+            raise ValueError("reconstruction run does not belong to the layer")
+        artifacts = {item.stage: item for item in run.stage_artifacts}
+        final_stage = ReconstructionStage.FINAL_MESH
+        artifacts.setdefault(final_stage, ReconstructionStageArtifact(
+            final_stage,
+            run.glb_path,
+            "mesh",
+        ))
+        if len(run.stage_statuses) == len(RECONSTRUCTION_STAGES):
+            statuses = dict(zip(RECONSTRUCTION_STAGES, run.stage_statuses))
+        else:
+            statuses = {
+                stage: (
+                    ReconstructionStageStatus.READY
+                    if stage in artifacts
+                    else ReconstructionStageStatus.PENDING
+                )
+                for stage in RECONSTRUCTION_STAGES
+            }
+        if len(run.stage_progress) == len(RECONSTRUCTION_STAGES):
+            progress = dict(zip(RECONSTRUCTION_STAGES, run.stage_progress))
+        else:
+            progress = {stage: (0, 0) for stage in RECONSTRUCTION_STAGES}
+        selected_stage = self.layer.selected_preview_stage
+        if selected_stage not in artifacts:
+            selected_stage = final_stage
+        return _attribute_delta(
+            layer_stack,
+            self.layer,
+            self.layer,
+            {
+                "active_run_id": run.run_id,
+                "glb_path": run.glb_path,
+                "vertex_count": run.vertex_count,
+                "triangle_count": run.triangle_count,
+                "mesh_count": run.mesh_count,
+                "reconstruction_status": ReconstructionStatus.READY,
+                "selected_preview_stage": selected_stage,
+                "preview_stage_pinned": True,
+                "stage_statuses": statuses,
+                "stage_progress": progress,
+                "stage_artifacts": artifacts,
             },
         )
 
@@ -934,6 +1039,98 @@ class SetLayerSelectionCommand:
         self.apply(layer_stack)
         return _array_delta_after_apply(
             layer_stack, layer_stack.selection.data, before)
+
+
+@dataclass(frozen=True)
+class ClearSelectedPixelsCommand:
+    """Erase the selected canvas region from one raster layer's alpha."""
+
+    layer: Layer
+    label: str = "Clear Selected Pixels"
+
+    def _region(self, layer_stack: LayerStack):
+        if not self.layer.accepts_pixel_edits:
+            return None
+        bbox = layer_stack.selection.bbox()
+        if bbox is None:
+            return None
+        x0 = max(0, self.layer.x, bbox[0])
+        y0 = max(0, self.layer.y, bbox[1])
+        x1 = min(
+            layer_stack.width,
+            self.layer.x + self.layer.width,
+            bbox[2],
+        )
+        y1 = min(
+            layer_stack.height,
+            self.layer.y + self.layer.height,
+            bbox[3],
+        )
+        if x0 >= x1 or y0 >= y1:
+            return None
+        canvas_rect = (x0, y0, x1, y1)
+        local_rect = self.layer.canvas_rect_to_local(canvas_rect)
+        selection = layer_stack.selection.data[y0:y1, x0:x1]
+        return canvas_rect, local_rect, selection
+
+    @staticmethod
+    def _erased_patch(before: np.ndarray, selection: np.ndarray) -> np.ndarray:
+        after = before.copy()
+        alpha = after[:, :, 3].astype(np.float32)
+        after[:, :, 3] = np.clip(
+            alpha * (1.0 - selection),
+            0.0,
+            255.0,
+        ).astype(np.uint8)
+        return after
+
+    def _assign(
+            self,
+            layer_stack: LayerStack,
+            local_rect: tuple[int, int, int, int],
+            canvas_rect: tuple[int, int, int, int],
+            patch: np.ndarray) -> None:
+        x0, y0, x1, y1 = local_rect
+        self.layer.image[y0:y1, x0:x1] = patch
+        layer_stack.mark_layer_dirty(self.layer, canvas_rect)
+        layer_stack.publish_change(
+            DocumentChangeKind.PIXELS,
+            layers=(self.layer,),
+            dirty_rect=local_rect,
+        )
+
+    def apply(self, layer_stack: LayerStack) -> None:
+        region = self._region(layer_stack)
+        if region is None:
+            return
+        canvas_rect, local_rect, selection = region
+        x0, y0, x1, y1 = local_rect
+        before = self.layer.image[y0:y1, x0:x1]
+        after = self._erased_patch(before, selection)
+        if np.array_equal(before, after):
+            return
+        self._assign(layer_stack, local_rect, canvas_rect, after)
+
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
+        region = self._region(layer_stack)
+        if region is None:
+            return None
+        canvas_rect, local_rect, selection = region
+        x0, y0, x1, y1 = local_rect
+        before = self.layer.image[y0:y1, x0:x1].copy()
+        after = self._erased_patch(before, selection)
+        if np.array_equal(before, after):
+            return None
+        self._assign(layer_stack, local_rect, canvas_rect, after)
+        return CommandDelta(
+            undo_fn=lambda: self._assign(
+                layer_stack, local_rect, canvas_rect, before
+            ),
+            redo_fn=lambda: self._assign(
+                layer_stack, local_rect, canvas_rect, after
+            ),
+            size_bytes=before.nbytes + after.nbytes,
+        )
 
 
 @dataclass(frozen=True)

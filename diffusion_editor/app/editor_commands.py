@@ -8,6 +8,7 @@ import numpy as np
 
 from ..document.commands import (
     AddLayerCommand,
+    ClearSelectedPixelsCommand,
     ClearSelectionCommand,
     FlattenLayersCommand,
     InvertSelectionCommand,
@@ -40,6 +41,7 @@ class EditorCommandCoordinator:
             "edit.copy": self.copy,
             "edit.copy_visible": self.copy_visible,
             "edit.paste": self.paste,
+            "edit.clear_selected_pixels": self.clear_selected_pixels,
             "selection.all": self.select_all,
             "selection.background": self.select_background,
             "selection.clear": self.clear_selection,
@@ -70,6 +72,9 @@ class EditorCommandCoordinator:
             "edit.copy_visible": canvas_ready and selection_bbox is not None,
             "edit.paste": (
                 canvas_ready and self._application.clipboard is not None
+            ),
+            "edit.clear_selected_pixels": (
+                active_raster and self._selection_intersects(active)
             ),
             "selection.all": canvas_ready,
             "selection.background": (
@@ -133,6 +138,20 @@ class EditorCommandCoordinator:
 
     def clear_selection(self) -> None:
         self._execute(ClearSelectionCommand(), "Selection cleared")
+
+    def clear_selected_pixels(self) -> None:
+        layer = self._stack.active_layer
+        if (
+            layer is None
+            or not layer.accepts_pixel_edits
+            or not self._selection_intersects(layer)
+        ):
+            self.refresh()
+            return
+        self._execute(
+            ClearSelectedPixelsCommand(layer),
+            "Selected pixels cleared",
+        )
 
     def invert_selection(self) -> None:
         self._execute(InvertSelectionCommand(), "Selection inverted")
@@ -252,6 +271,20 @@ class EditorCommandCoordinator:
         return (
             len(self._stack.all_layers())
             > 1 + len(layer.all_descendants())
+        )
+
+    def _selection_intersects(self, layer) -> bool:
+        bbox = self._stack.selection.bbox()
+        if bbox is None:
+            return False
+        x0 = max(0, layer.x, bbox[0])
+        y0 = max(0, layer.y, bbox[1])
+        x1 = min(self._stack.width, layer.x + layer.width, bbox[2])
+        y1 = min(self._stack.height, layer.y + layer.height, bbox[3])
+        return (
+            x0 < x1
+            and y0 < y1
+            and bool(np.any(self._stack.selection.data[y0:y1, x0:x1]))
         )
 
     def _apply_selection_alpha(

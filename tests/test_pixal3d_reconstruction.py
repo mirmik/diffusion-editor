@@ -66,19 +66,40 @@ parser.add_argument('--decimation-target')
 parser.add_argument('--texture-size')
 parser.add_argument('--manual-fov')
 parser.add_argument('--checkpoint')
+parser.add_argument('--texture-checkpoint')
 parser.add_argument('--refine-checkpoint')
+parser.add_argument('--texture-refine-checkpoint')
 parser.add_argument('--refine-mask')
 parser.add_argument('--refine-strength')
 parser.add_argument('--refine-steps')
 parser.add_argument('--refine-seed')
 parser.add_argument('--refine-rescale-t')
 parser.add_argument('--refine-guidance')
+parser.add_argument('--resize-refine-detail', action='store_true')
 parser.add_argument('--low_vram', action='store_true')
 args = parser.parse_args()
 Path(args.output).with_name('parameters.json').write_text(json.dumps(vars(args)))
+if args.texture_refine_checkpoint:
+    Path(args.output).write_bytes(b'glTF-texture-refined')
+    Path(args.texture_checkpoint).write_bytes(b'npz-texture-refined')
+    with Path(args.events).open('w') as stream:
+        stream.write(json.dumps({
+            'stage': 'texture_flow',
+            'status': 'ready',
+            'progress': int(args.refine_steps),
+            'total': int(args.refine_steps),
+        }) + '\n')
+        stream.write(json.dumps({
+            'stage': 'final_mesh',
+            'status': 'ready',
+            'artifact_path': args.output,
+            'preview_kind': 'mesh',
+        }) + '\n')
+    raise SystemExit(0)
 if args.refine_checkpoint:
     Path(args.output).write_bytes(b'glTF-refined')
     Path(args.checkpoint).write_bytes(b'npz-refined')
+    Path(args.texture_checkpoint).write_bytes(b'npz-texture')
     with Path(args.events).open('w') as stream:
         stream.write(json.dumps({
             'stage': 'hr_shape_flow',
@@ -290,12 +311,64 @@ def test_staged_client_runs_masked_refine_as_separate_artifact(tmp_path):
     assert condition.is_file()
     assert client.checkpoint_path is not None
     assert client.checkpoint_path.read_bytes() == b"npz-refined"
+    assert client.texture_checkpoint_path is not None
+    assert client.texture_checkpoint_path.read_bytes() == b"npz-texture"
     assert captured["refine_checkpoint"] == str(base_checkpoint)
     assert captured["refine_strength"] == "0.6"
     assert captured["refine_steps"] == "8"
     assert captured["refine_seed"] == "321"
+    assert captured["resize_refine_detail"] is True
     assert [event.stage for event in events] == [
         ReconstructionStage.HR_SHAPE_FLOW,
+        ReconstructionStage.FINAL_MESH,
+    ]
+    client.shutdown()
+
+
+def test_staged_client_runs_masked_texture_refine(tmp_path):
+    root = tmp_path / "pixal3d"
+    root.mkdir()
+    runner = tmp_path / "staged.py"
+    runner.write_text(_FAKE_STAGED_RUNNER)
+    model = tmp_path / "model"
+    model.mkdir()
+    shape_checkpoint = tmp_path / "shape.npz"
+    texture_checkpoint = tmp_path / "texture.npz"
+    shape_checkpoint.write_bytes(b"npz-shape")
+    texture_checkpoint.write_bytes(b"npz-texture")
+    client = Pixal3DProcessClient(
+        python=sys.executable,
+        root=root,
+        model_path=model,
+        runner_path=runner,
+        staged=True,
+    )
+    events = []
+
+    output, source = client.refine_texture(
+        Image.new("RGB", (16, 16), "white"),
+        Image.new("L", (16, 16), 255),
+        shape_checkpoint,
+        texture_checkpoint,
+        threading.Event(),
+        parameters=ReconstructionRefineParameters(
+            strength=0.5, steps=6, seed=99,
+            resize_detail_to_1024=False,
+        ),
+        on_event=events.append,
+    )
+
+    captured = json.loads(output.with_name("parameters.json").read_text())
+    assert output.read_bytes() == b"glTF-texture-refined"
+    assert source.is_file()
+    assert client.checkpoint_path == shape_checkpoint
+    assert client.texture_checkpoint_path is not None
+    assert client.texture_checkpoint_path.read_bytes() == b"npz-texture-refined"
+    assert captured["texture_refine_checkpoint"] == str(texture_checkpoint)
+    assert captured["refine_strength"] == "0.5"
+    assert captured["resize_refine_detail"] is False
+    assert [event.stage for event in events] == [
+        ReconstructionStage.TEXTURE_FLOW,
         ReconstructionStage.FINAL_MESH,
     ]
     client.shutdown()
@@ -352,6 +425,38 @@ def test_reconstruction_controller_snapshots_refine_inputs() -> None:
     assert engine.job_id.startswith("reconstruction_refine_")
     assert engine.request.base_checkpoint_path == "/tmp/base.npz"
     assert engine.request.parameters.strength == 0.6
+    assert engine.request.conditioning_image is not condition
+    assert engine.request.mask_image is not mask
+
+
+def test_reconstruction_controller_snapshots_texture_refine_inputs() -> None:
+    class Engine:
+        is_busy = False
+        request = None
+        job_id = None
+
+        def submit_texture_refine_request(self, request, *, job_id=None):
+            self.request = request
+            self.job_id = job_id
+            return True
+
+    engine = Engine()
+    controller = ReconstructionController(engine)
+    condition = Image.new("RGB", (8, 8), "white")
+    mask = Image.new("L", (8, 8), 255)
+
+    event = controller.start_texture_refine(
+        condition,
+        mask,
+        "/tmp/shape.npz",
+        "/tmp/texture.npz",
+        parameters=ReconstructionRefineParameters(strength=0.45, steps=7),
+    )
+
+    assert event.status and "texture" in event.status.lower()
+    assert engine.job_id.startswith("reconstruction_texture_refine_")
+    assert engine.request.shape_checkpoint_path == "/tmp/shape.npz"
+    assert engine.request.texture_checkpoint_path == "/tmp/texture.npz"
     assert engine.request.conditioning_image is not condition
     assert engine.request.mask_image is not mask
 

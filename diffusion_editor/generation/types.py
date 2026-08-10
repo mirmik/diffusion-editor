@@ -16,6 +16,8 @@ Rect = tuple[int, int, int, int]
 
 class ReconstructionStage(str, Enum):
     SOURCE_IMAGE = "source_image"
+    NORMAL_MAP = "normal_map"
+    POINT_CLOUD = "point_cloud"
     SPARSE_OCCUPANCY = "sparse_occupancy"
     LR_SHAPE_FLOW = "lr_shape_flow"
     LR_SHAPE_LATENT = "lr_shape_latent"
@@ -35,6 +37,7 @@ RECONSTRUCTION_STAGES = tuple(ReconstructionStage)
 # that does not exist.
 RECONSTRUCTION_PREVIEW_STAGES = (
     ReconstructionStage.SOURCE_IMAGE,
+    ReconstructionStage.POINT_CLOUD,
     ReconstructionStage.SPARSE_OCCUPANCY,
     ReconstructionStage.LR_SHAPE_LATENT,
     ReconstructionStage.HR_COORDINATES,
@@ -44,6 +47,8 @@ RECONSTRUCTION_PREVIEW_STAGES = (
 
 RECONSTRUCTION_STAGE_LABELS = {
     ReconstructionStage.SOURCE_IMAGE: "Source image",
+    ReconstructionStage.NORMAL_MAP: "Normal map",
+    ReconstructionStage.POINT_CLOUD: "Point cloud",
     ReconstructionStage.SPARSE_OCCUPANCY: "Sparse occupancy",
     ReconstructionStage.LR_SHAPE_FLOW: "LR shape flow",
     ReconstructionStage.LR_SHAPE_LATENT: "LR shape latent",
@@ -67,10 +72,58 @@ class ReconstructionStageStatus(str, Enum):
 class ReconstructionRunKind(str, Enum):
     BASE = "base"
     MASKED_REFINE = "masked_refine"
+    MASKED_TEXTURE_REFINE = "masked_texture_refine"
+
+
+class ReconstructionBackend(str, Enum):
+    PIXAL3D = "pixal3d"
+    TRELLIS2 = "trellis2"
+    SPAR3D = "spar3d"
+    HI3DGEN = "hi3dgen"
+
+
+RECONSTRUCTION_BACKEND_LABELS = {
+    ReconstructionBackend.PIXAL3D: "Pixal3D",
+    ReconstructionBackend.TRELLIS2: "TRELLIS.2",
+    ReconstructionBackend.SPAR3D: "SPAR3D",
+    ReconstructionBackend.HI3DGEN: "Hi3DGen",
+}
+
+
+RECONSTRUCTION_BACKEND_STAGES = {
+    ReconstructionBackend.PIXAL3D: tuple(
+        stage for stage in RECONSTRUCTION_STAGES
+        if stage not in {
+            ReconstructionStage.NORMAL_MAP,
+            ReconstructionStage.POINT_CLOUD,
+        }
+    ),
+    ReconstructionBackend.TRELLIS2: tuple(
+        stage for stage in RECONSTRUCTION_STAGES
+        if stage not in {
+            ReconstructionStage.NORMAL_MAP,
+            ReconstructionStage.POINT_CLOUD,
+        }
+    ),
+    ReconstructionBackend.SPAR3D: (
+        ReconstructionStage.SOURCE_IMAGE,
+        ReconstructionStage.POINT_CLOUD,
+        ReconstructionStage.FINAL_MESH,
+    ),
+    ReconstructionBackend.HI3DGEN: (
+        ReconstructionStage.SOURCE_IMAGE,
+        ReconstructionStage.NORMAL_MAP,
+        ReconstructionStage.SPARSE_OCCUPANCY,
+        ReconstructionStage.HR_SHAPE_FLOW,
+        ReconstructionStage.HR_SHAPE_LATENT,
+        ReconstructionStage.FINAL_MESH,
+    ),
+}
 
 
 @dataclass(frozen=True)
 class ReconstructionParameters:
+    backend: ReconstructionBackend = ReconstructionBackend.PIXAL3D
     seed: int = 42
     steps: int = 12
     resolution: int = 1024
@@ -79,8 +132,16 @@ class ReconstructionParameters:
     decimation_target: int = 200_000
     texture_size: int = 2048
     low_vram: bool = True
+    spar3d_guidance_scale: float = 3.0
+    hi3dgen_slat_steps: int = 6
+    hi3dgen_guidance_scale: float = 3.0
+    hi3dgen_normal_resolution: int = 768
 
     def __post_init__(self) -> None:
+        if not isinstance(self.backend, ReconstructionBackend):
+            object.__setattr__(
+                self, "backend", ReconstructionBackend(str(self.backend))
+            )
         if not 0 <= self.seed <= 2_147_483_647:
             raise ValueError("reconstruction seed must be in [0, 2147483647]")
         if not 1 <= self.steps <= 50:
@@ -95,9 +156,18 @@ class ReconstructionParameters:
             raise ValueError("mesh face target must be in [50000, 1000000]")
         if self.texture_size not in (1024, 2048, 4096):
             raise ValueError("texture size must be 1024, 2048, or 4096")
+        if not 0.0 <= self.spar3d_guidance_scale <= 20.0:
+            raise ValueError("SPAR3D guidance scale must be in [0, 20]")
+        if not 1 <= self.hi3dgen_slat_steps <= 50:
+            raise ValueError("Hi3DGen structured-latent steps must be in [1, 50]")
+        if not 0.0 <= self.hi3dgen_guidance_scale <= 20.0:
+            raise ValueError("Hi3DGen guidance scale must be in [0, 20]")
+        if self.hi3dgen_normal_resolution not in (512, 768, 1024):
+            raise ValueError("Hi3DGen normal resolution must be 512, 768, or 1024")
 
     def to_dict(self) -> dict:
         return {
+            "backend": self.backend.value,
             "seed": self.seed,
             "steps": self.steps,
             "resolution": self.resolution,
@@ -106,6 +176,10 @@ class ReconstructionParameters:
             "decimation_target": self.decimation_target,
             "texture_size": self.texture_size,
             "low_vram": self.low_vram,
+            "spar3d_guidance_scale": self.spar3d_guidance_scale,
+            "hi3dgen_slat_steps": self.hi3dgen_slat_steps,
+            "hi3dgen_guidance_scale": self.hi3dgen_guidance_scale,
+            "hi3dgen_normal_resolution": self.hi3dgen_normal_resolution,
         }
 
     @classmethod
@@ -113,6 +187,9 @@ class ReconstructionParameters:
         if not isinstance(payload, dict):
             return cls()
         return cls(
+            backend=ReconstructionBackend(
+                payload.get("backend", ReconstructionBackend.PIXAL3D.value)
+            ),
             seed=int(payload.get("seed", 42)),
             steps=int(payload.get("steps", 12)),
             resolution=int(payload.get("resolution", 1024)),
@@ -123,6 +200,16 @@ class ReconstructionParameters:
             decimation_target=int(payload.get("decimation_target", 200_000)),
             texture_size=int(payload.get("texture_size", 2048)),
             low_vram=bool(payload.get("low_vram", True)),
+            spar3d_guidance_scale=float(
+                payload.get("spar3d_guidance_scale", 3.0)
+            ),
+            hi3dgen_slat_steps=int(payload.get("hi3dgen_slat_steps", 6)),
+            hi3dgen_guidance_scale=float(
+                payload.get("hi3dgen_guidance_scale", 3.0)
+            ),
+            hi3dgen_normal_resolution=int(
+                payload.get("hi3dgen_normal_resolution", 768)
+            ),
         )
 
 
@@ -133,6 +220,7 @@ class ReconstructionRefineParameters:
     seed: int = 123
     rescale_t: float = 3.0
     guidance_strength: float = 7.5
+    resize_detail_to_1024: bool = True
 
     def __post_init__(self) -> None:
         if not 0.0 < self.strength <= 1.0:
@@ -146,6 +234,31 @@ class ReconstructionRefineParameters:
         if self.guidance_strength < 0.0:
             raise ValueError("refine guidance strength must be non-negative")
 
+    def to_dict(self) -> dict:
+        return {
+            "strength": self.strength,
+            "steps": self.steps,
+            "seed": self.seed,
+            "rescale_t": self.rescale_t,
+            "guidance_strength": self.guidance_strength,
+            "resize_detail_to_1024": self.resize_detail_to_1024,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: object) -> "ReconstructionRefineParameters":
+        if not isinstance(payload, dict):
+            return cls()
+        return cls(
+            strength=float(payload.get("strength", 0.35)),
+            steps=int(payload.get("steps", 8)),
+            seed=int(payload.get("seed", 123)),
+            rescale_t=float(payload.get("rescale_t", 3.0)),
+            guidance_strength=float(payload.get("guidance_strength", 7.5)),
+            resize_detail_to_1024=bool(
+                payload.get("resize_detail_to_1024", True)
+            ),
+        )
+
 
 @dataclass(frozen=True)
 class ReconstructionRun:
@@ -155,10 +268,15 @@ class ReconstructionRun:
     source_path: str
     conditioning_path: str | None = None
     checkpoint_path: str | None = None
+    texture_checkpoint_path: str | None = None
     parent_run_id: str | None = None
     vertex_count: int = 0
     triangle_count: int = 0
     mesh_count: int = 0
+    backend: ReconstructionBackend = ReconstructionBackend.PIXAL3D
+    stage_statuses: tuple[ReconstructionStageStatus, ...] = ()
+    stage_progress: tuple[tuple[int, int], ...] = ()
+    stage_artifacts: tuple["ReconstructionStageArtifact", ...] = ()
 
 
 @dataclass(frozen=True)
@@ -281,6 +399,17 @@ class ReconstructionRefineRequest:
     mask_image: Image.Image
     base_checkpoint_path: str
     parameters: ReconstructionRefineParameters = ReconstructionRefineParameters()
+    generation_parameters: ReconstructionParameters = ReconstructionParameters()
+
+
+@dataclass(frozen=True)
+class ReconstructionTextureRefineRequest:
+    conditioning_image: Image.Image
+    mask_image: Image.Image
+    shape_checkpoint_path: str
+    texture_checkpoint_path: str
+    parameters: ReconstructionRefineParameters = ReconstructionRefineParameters()
+    generation_parameters: ReconstructionParameters = ReconstructionParameters()
 
 
 @dataclass(frozen=True)
@@ -308,6 +437,8 @@ class ReconstructionResult:
     kind: ReconstructionRunKind = ReconstructionRunKind.BASE
     conditioning_path: str | None = None
     checkpoint_path: str | None = None
+    texture_checkpoint_path: str | None = None
+    backend: ReconstructionBackend = ReconstructionBackend.PIXAL3D
 
 
 @dataclass(frozen=True)

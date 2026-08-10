@@ -136,3 +136,32 @@ def test_select_background_command_submits_full_composite_segmentation():
     application.document.redo()
     assert np.all(application.layer_stack.selection.data[:, :2] == 1.0)
     application.close()
+
+
+def test_clear_selected_pixels_command_state_and_undo():
+    application = _application()
+    image = np.full((4, 5, 4), (12, 34, 56, 200), dtype=np.uint8)
+    application.layer_stack.init_from_image(image)
+    commands = EditorCommandCoordinator(application)
+
+    assert application.command_states["edit.clear_selected_pixels"] == (
+        False,
+        False,
+    )
+    commands.handlers["selection.all"]()
+    assert application.command_states["edit.clear_selected_pixels"] == (
+        True,
+        False,
+    )
+
+    commands.handlers["edit.clear_selected_pixels"]()
+
+    assert np.all(application.layer_stack.active_layer.image[:, :, 3] == 0)
+    assert not application.layer_stack.selection.is_empty
+    assert application.status_text == "Selected pixels cleared"
+    commands.handlers["edit.undo"]()
+    np.testing.assert_array_equal(
+        application.layer_stack.active_layer.image,
+        image,
+    )
+    application.close()
