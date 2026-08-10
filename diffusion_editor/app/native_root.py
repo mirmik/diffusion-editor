@@ -1356,6 +1356,8 @@ class NativeEditorRoot:
     def _sync_reconstruction_selection(
             self, node: ReconstructionLayer | None) -> None:
         set_context = getattr(self.view, "set_reconstruction_context", None)
+        if self.canvas is not None:
+            self.canvas.set_selection_as_mask(node is not None)
         if node is None:
             coordinator = self.canvas_controls_coordinator
             if coordinator is not None and coordinator.selection_state.edit_mode:

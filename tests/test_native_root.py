@@ -662,6 +662,7 @@ def test_offscreen_root_creates_selected_reconstruction_object(
         assert node.refine_parameters.strength == 0.65
         assert node.refine_parameters.steps == 12
         assert root.canvas_controls_coordinator.selection_state.edit_mode
+        assert root.canvas.controller.overlay_bridge.selection_as_mask
         root.view._activate_reconstruction_stage(
             ReconstructionStage.HR_COORDINATES
         )
@@ -678,10 +679,12 @@ def test_offscreen_root_creates_selected_reconstruction_object(
         root.tick()
         assert root.view.reconstruction_mode is False
         assert not root.canvas_controls_coordinator.selection_state.edit_mode
+        assert not root.canvas.controller.overlay_bridge.selection_as_mask
 
         application.layer_stack.active_layer = node
         root.tick()
         assert root.view.reconstruction_mode is True
+        assert root.canvas.controller.overlay_bridge.selection_as_mask
 
 
 def test_reconstruction_point_artifact_is_loaded_as_point_cloud(tmp_path) -> None:

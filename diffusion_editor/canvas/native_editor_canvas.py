@@ -110,6 +110,11 @@ class NativeEditorCanvas:
         self._require_open()
         return self.controller.get_composite_below(layer)
 
+    def set_selection_as_mask(self, enabled: bool) -> None:
+        """Render the document selection using the layer-mask visual style."""
+        self._require_open()
+        self.controller.set_selection_as_mask(enabled)
+
     def view_center_image(self) -> tuple[int, int]:
         self._require_open()
         bounds = self.widget.bounds

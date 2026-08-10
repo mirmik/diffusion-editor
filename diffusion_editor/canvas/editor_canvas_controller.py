@@ -225,6 +225,10 @@ class EditorCanvasController:
         self._overlay_bridge.rebuild()
         self._request_repaint()
 
+    def set_selection_as_mask(self, enabled: bool) -> None:
+        if self._overlay_bridge.set_selection_as_mask(enabled):
+            self._request_repaint()
+
     def set_patch_rect_mode(self, on: bool) -> None:
         self._rect_drags.set_patch_rect_mode(on)
         self._set_cursor("crosshair" if on else "default")
