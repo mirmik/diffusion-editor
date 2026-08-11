@@ -9,6 +9,7 @@ from ..generation.types import (
     RECONSTRUCTION_BACKEND_STAGES,
     RECONSTRUCTION_STAGES,
     ReconstructionParameters,
+    ReconstructionLrVariant,
     ReconstructionRefineParameters,
     ReconstructionRun,
     ReconstructionRunKind,
@@ -56,6 +57,9 @@ class ReconstructionLayer(Layer):
         self.intermediate_source_path: str | None = None
         self.intermediate_shape_checkpoint_path: str | None = None
         self.intermediate_texture_checkpoint_path: str | None = None
+        self.lr_variants: tuple[ReconstructionLrVariant, ...] = ()
+        self.accepted_lr_variant_id: str | None = None
+        self.selected_lr_refine_source_id: str | None = None
         self._initialize_stage_state()
 
     @property
@@ -70,6 +74,16 @@ class ReconstructionLayer(Layer):
         return next(
             (run for run in reversed(self.runs)
              if run.kind is ReconstructionRunKind.BASE),
+            None,
+        )
+
+    @property
+    def selected_lr_refine_source(self) -> ReconstructionLrVariant | None:
+        return next(
+            (
+                variant for variant in self.lr_variants
+                if variant.variant_id == self.selected_lr_refine_source_id
+            ),
             None,
         )
 
@@ -168,6 +182,9 @@ class ReconstructionLayer(Layer):
         layer.intermediate_source_path = None
         layer.intermediate_shape_checkpoint_path = None
         layer.intermediate_texture_checkpoint_path = None
+        layer.lr_variants = ()
+        layer.accepted_lr_variant_id = None
+        layer.selected_lr_refine_source_id = None
         try:
             layer.generation_parameters = ReconstructionParameters.from_dict(
                 state.get("generation_parameters")

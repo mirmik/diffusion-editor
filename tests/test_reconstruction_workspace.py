@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import pytest
 
 from diffusion_editor.generation.reconstruction_workspace import (
@@ -12,6 +13,7 @@ from diffusion_editor.generation.reconstruction_workspace import (
 from diffusion_editor.generation.types import (
     RECONSTRUCTION_STAGES,
     ReconstructionParameters,
+    ReconstructionLrVariant,
     ReconstructionRun,
     ReconstructionRunKind,
     ReconstructionStage,
@@ -259,6 +261,66 @@ def test_legacy_projection_exposes_refine_runs_as_stage_local_variants() -> None
     assert workspace.selected_artifact_id is not None
     selected = workspace.artifact(workspace.selected_artifact_id)
     assert selected.path in {"/tmp/refined-hr.glb", "/tmp/refined.glb"}
+
+
+def test_legacy_projection_keeps_base_and_refined_lr_previews_separate() -> None:
+    base_preview = ReconstructionStageArtifact(
+        ReconstructionStage.LR_SHAPE_LATENT,
+        "/tmp/base-lr.glb",
+        "mesh",
+    )
+    refined_preview = ReconstructionStageArtifact(
+        ReconstructionStage.LR_SHAPE_LATENT,
+        "/tmp/refined-lr.glb",
+        "mesh",
+    )
+    base = ReconstructionLrVariant(
+        "lr-base", "Base LR", "/tmp/base-lr.npz", "/tmp/source.png",
+        base_preview,
+    )
+    refined = ReconstructionLrVariant(
+        "lr-refined-1", "Refined LR 1", "/tmp/refined-lr.npz",
+        "/tmp/source.png", refined_preview, parent_variant_id="lr-base",
+    )
+    statuses = {
+        stage: ReconstructionStageStatus.READY
+        for stage in RECONSTRUCTION_STAGES
+    }
+    workspace = build_legacy_workspace(
+        ReconstructionParameters(),
+        statuses,
+        {ReconstructionStage.LR_SHAPE_LATENT: refined_preview},
+        (),
+        None,
+        lr_variants=(base, refined),
+        selected_lr_refine_source_id="lr-base",
+    )
+
+    generated = workspace.operations_for_spec("lr.generate")
+    assert len(generated) == 1
+    generated_artifacts = workspace.artifacts_for_operation(
+        generated[0].operation_id
+    )
+    assert next(
+        item.path for item in generated_artifacts if item.role == "lr_preview"
+    ) == "/tmp/base-lr.glb"
+    base_checkpoint = next(
+        item for item in generated_artifacts if item.role == "lr_checkpoint"
+    )
+    assert json.loads(base_checkpoint.metadata_json)[
+        "selected_refine_source"
+    ] is True
+
+    refined_operations = workspace.operations_for_spec("lr.refine")
+    assert [item.variant_label for item in refined_operations] == [
+        "Refined LR 1"
+    ]
+    refined_artifacts = workspace.artifacts_for_operation(
+        refined_operations[0].operation_id
+    )
+    assert next(
+        item.path for item in refined_artifacts if item.role == "lr_preview"
+    ) == "/tmp/refined-lr.glb"
 
 
 def test_legacy_projection_is_pixal_only() -> None:

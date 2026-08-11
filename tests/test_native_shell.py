@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+import diffusion_editor.app.native_shell as native_shell
 
 from termin.gui_native import (
     KeyCode,
@@ -18,6 +19,7 @@ from diffusion_editor.generation.reconstruction_workspace import (
 from diffusion_editor.generation.types import (
     RECONSTRUCTION_BACKEND_PARAMETER_KEYS,
     RECONSTRUCTION_STAGES,
+    ReconstructionLrVariant,
     ReconstructionParameters,
     ReconstructionBackend,
     ReconstructionRefineParameters,
@@ -264,7 +266,8 @@ def test_native_left_panel_scrolls_preferred_sections_without_overlap():
         tc_ui_document_destroy(document)
 
 
-def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar():
+def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar(
+        monkeypatch):
     document = tc_ui_document_create()
     activated = []
     view = NativeEditorView(
@@ -342,6 +345,26 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar():
             },
             (),
             None,
+            lr_variants=(
+                ReconstructionLrVariant(
+                    "lr-base", "Base LR", "/tmp/base-lr.npz",
+                    "/tmp/source.png",
+                    ReconstructionStageArtifact(
+                        ReconstructionStage.LR_SHAPE_LATENT,
+                        "/tmp/base-lr.glb", "mesh",
+                    ),
+                ),
+                ReconstructionLrVariant(
+                    "lr-refined-1", "Refined LR 1",
+                    "/tmp/refined-lr.npz", "/tmp/source.png",
+                    ReconstructionStageArtifact(
+                        ReconstructionStage.LR_SHAPE_LATENT,
+                        "/tmp/refined-lr.glb", "mesh",
+                    ),
+                    parent_variant_id="lr-base",
+                ),
+            ),
+            selected_lr_refine_source_id="lr-base",
         )
         workspace_parameters = ReconstructionParameters(
             pixal3d_sparse_seed=101,
@@ -360,6 +383,9 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar():
         assert view.reconstruction_workspace_parameter_controls[
             "pixal3d_sparse_seed"
         ].value == 101
+        assert view.reconstruction_workspace_seed_buttons[
+            "pixal3d_sparse_seed"
+        ].widget.enabled is True
         assert view.reconstruction_workspace_variant_combo.item_count == 1
         assert view.reconstruction_workspace_variant_combo.item_text(0) == (
             "Current generation · ready"
@@ -374,6 +400,9 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar():
         workspace_actions = []
         view.set_reconstruction_workspace_handler(
             lambda action, value: workspace_actions.append((action, value))
+        )
+        monkeypatch.setattr(
+            native_shell, "_random_reconstruction_seed", lambda: 987654321
         )
         view._preview_reconstruction_workspace_artifact()
         assert workspace_actions == [(
@@ -393,7 +422,25 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar():
         assert workspace_actions[-1] == (
             "set_operation_parameter", ("pixal3d_sparse_seed", 202)
         )
+        view._randomize_reconstruction_workspace_seed("pixal3d_sparse_seed")
+        assert workspace_actions[-1] == (
+            "set_operation_parameter", ("pixal3d_sparse_seed", 987654321)
+        )
+        assert set(view.reconstruction_workspace_seed_buttons) == {
+            "pixal3d_sparse_seed", "pixal3d_lr_seed",
+            "pixal3d_hr_seed", "pixal3d_texture_seed",
+        }
         view._select_reconstruction_workspace_operation("lr.refine")
+        assert view.reconstruction_workspace_refine_source_row.visible is True
+        assert view.reconstruction_workspace_refine_source_combo.item_count == 2
+        assert view.reconstruction_workspace_refine_source_combo.item_text(
+            0
+        ) == "Base LR"
+        view._change_reconstruction_workspace_refine_source(1)
+        assert workspace_actions[-1] == (
+            "select_refine_source",
+            "legacy:lr-refined-1:lr.refine:lr_checkpoint",
+        )
         assert view.reconstruction_workspace_actions[
             "generate"
         ].widget.enabled is False
@@ -410,6 +457,7 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar():
         assert workspace_refine_actions == [("paint", True)]
         view._select_reconstruction_workspace_operation("sparse.generate")
         assert view.reconstruction_workspace_mask_panel.visible is False
+        assert view.reconstruction_workspace_refine_source_row.visible is False
         view._select_reconstruction_workspace_operation("hr.refine")
         assert view.reconstruction_workspace_mask_panel.visible is True
         view._set_reconstruction_workspace_mode(True)
@@ -448,6 +496,9 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar():
         )
         view._change_reconstruction_parameter("steps", 18.0)
         assert changed_parameters == [("steps", 18)]
+        view._randomize_reconstruction_seed()
+        assert changed_parameters[-1] == ("seed", 987654321)
+        assert view.reconstruction_seed_buttons["seed"].widget.enabled is True
         parameters = ReconstructionParameters(
             seed=123,
             steps=18,
@@ -470,6 +521,7 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar():
             not control.widget.enabled
             for control in view.reconstruction_parameter_controls.values()
         )
+        assert view.reconstruction_seed_buttons["seed"].widget.enabled is False
         trellis_parameters = ReconstructionParameters(
             backend=ReconstructionBackend.TRELLIS2,
         )
@@ -553,6 +605,8 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar():
         )
         view._activate_reconstruction_refine("paint", True)
         assert refine_actions == [("paint", True)]
+        view._randomize_reconstruction_refine_seed()
+        assert refine_actions[-1] == ("seed", 987654321)
         runs = (
             ReconstructionRun(
                 "base-run", ReconstructionRunKind.BASE,
@@ -596,6 +650,7 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar():
         assert refine_controls["version"].selected_index == 1
         assert refine_controls["run"].widget.enabled is True
         assert refine_controls["run_texture"].widget.enabled is True
+        assert refine_controls["seed_random"].widget.enabled is True
         workspace_mask_controls = (
             view.reconstruction_workspace_mask_controls
         )
@@ -611,6 +666,7 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar():
         assert workspace_mask_controls["steps"].value == 12.0
         assert workspace_mask_controls["seed"].value == 456.0
         assert workspace_mask_controls["clear"].widget.enabled is True
+        assert workspace_mask_controls["seed_random"].widget.enabled is True
         view._select_reconstruction_workspace_operation("lr.refine")
         assert view.reconstruction_workspace_actions[
             "refine"

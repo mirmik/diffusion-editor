@@ -27,6 +27,7 @@ from diffusion_editor.generation.reconstruction_workspace import (
 )
 from diffusion_editor.generation.types import (
     ReconstructionBackend,
+    ReconstructionLrVariant,
     ReconstructionParameters,
     ReconstructionRefineParameters,
     ReconstructionRunKind,
@@ -381,6 +382,37 @@ def test_root_refine_entry_point_uses_active_run_checkpoint(tmp_path) -> None:
     assert controller.lr_captured[3] == node.refine_parameters
     assert root._reconstruction_job_source_sha256 == "source-hash"
 
+    refined_checkpoint = tmp_path / "refined-lr.npz"
+    refined_checkpoint.write_bytes(b"refined-lr")
+    base_variant = ReconstructionLrVariant(
+        "lr-base", "Base LR", str(checkpoint), str(source),
+        ReconstructionStageArtifact(
+            ReconstructionStage.LR_SHAPE_LATENT,
+            str(tmp_path / "base-lr.glb"),
+            "mesh",
+        ),
+    )
+    refined_variant = ReconstructionLrVariant(
+        "lr-refined-1", "Refined LR 1", str(refined_checkpoint),
+        str(source),
+        ReconstructionStageArtifact(
+            ReconstructionStage.LR_SHAPE_LATENT,
+            str(tmp_path / "refined-lr.glb"),
+            "mesh",
+        ),
+        parent_variant_id="lr-base",
+    )
+    node.lr_variants = (base_variant, refined_variant)
+    node.selected_lr_refine_source_id = "lr-base"
+    root._start_selected_reconstruction_lr_refine(node)
+    assert controller.lr_captured[2] == str(checkpoint)
+    assert root._reconstruction_lr_parent_variant_id == "lr-base"
+
+    node.selected_lr_refine_source_id = "lr-refined-1"
+    root._start_selected_reconstruction_lr_refine(node)
+    assert controller.lr_captured[2] == str(refined_checkpoint)
+    assert root._reconstruction_lr_parent_variant_id == "lr-refined-1"
+
 
 def test_reconstruction_node_tracks_target_progress_and_preview(tmp_path) -> None:
     node = ReconstructionLayer("Staged")
@@ -603,6 +635,84 @@ def test_partial_pixal3d_result_keeps_refine_checkpoints(tmp_path) -> None:
     assert node.resume_checkpoint_path == str(resume_checkpoint)
     assert node.resume_stage is ReconstructionStage.HR_SHAPE_FLOW
     assert node.reconstruction_status is ReconstructionStatus.READY
+
+
+def test_lr_results_keep_base_and_refined_variants(tmp_path) -> None:
+    stack, _document_service = _document()
+    node = ReconstructionLayer("Workspace")
+    stack.insert_layer(node)
+    source = tmp_path / "source.png"
+    Image.new("RGBA", (10, 8)).save(source)
+    base_checkpoint = tmp_path / "base-lr.npz"
+    base_checkpoint.write_bytes(b"base")
+    refined_checkpoint = tmp_path / "refined-lr.npz"
+    refined_checkpoint.write_bytes(b"refined")
+    base_preview = ReconstructionStageArtifact(
+        ReconstructionStage.LR_SHAPE_LATENT,
+        str(tmp_path / "base-lr.glb"),
+        "mesh",
+    )
+    refined_preview = ReconstructionStageArtifact(
+        ReconstructionStage.LR_SHAPE_LATENT,
+        str(tmp_path / "refined-lr.glb"),
+        "mesh",
+    )
+    results = [
+        ReconstructionResult(
+            base_preview.path,
+            str(source),
+            completed_stage=ReconstructionStage.LR_SHAPE_LATENT,
+            artifacts=(base_preview,),
+            resume_checkpoint_path=str(base_checkpoint),
+        ),
+        ReconstructionResult(
+            refined_preview.path,
+            str(source),
+            completed_stage=ReconstructionStage.LR_SHAPE_LATENT,
+            artifacts=(refined_preview,),
+            kind=ReconstructionRunKind.MASKED_REFINE,
+            resume_checkpoint_path=str(refined_checkpoint),
+        ),
+    ]
+
+    class Application:
+        layer_stack = stack
+
+        def set_status(self, _value):
+            pass
+
+    class Controller:
+        is_busy = False
+
+        def poll(self):
+            return ReconstructionControllerEvent(result=results.pop(0))
+
+    root = NativeEditorRoot.__new__(NativeEditorRoot)
+    root.application = Application()
+    root.reconstruction_controller = Controller()
+    root.view = None
+    root._reconstruction_job_source_sha256 = "source-hash"
+    root._reconstruction_job_parameters = node.generation_parameters
+    root._reconstruction_parent_run_id = None
+    root._reconstruction_lr_parent_variant_id = None
+    root._reconstruction_job_node_id = node.id
+    root._poll_reconstruction()
+
+    assert [item.variant_id for item in node.lr_variants] == ["lr-base"]
+    assert node.selected_lr_refine_source_id == "lr-base"
+    assert node.accepted_lr_variant_id == "lr-base"
+
+    root._reconstruction_job_node_id = node.id
+    root._reconstruction_lr_parent_variant_id = "lr-base"
+    root._poll_reconstruction()
+
+    assert [item.variant_id for item in node.lr_variants] == [
+        "lr-base", "lr-refined-1",
+    ]
+    assert node.lr_variants[1].parent_variant_id == "lr-base"
+    assert node.selected_lr_refine_source_id == "lr-base"
+    assert node.accepted_lr_variant_id == "lr-refined-1"
+    assert node.resume_checkpoint_path == str(refined_checkpoint)
 
 
 def test_workspace_parameter_action_updates_stage_override() -> None:

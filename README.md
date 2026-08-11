@@ -172,8 +172,12 @@ errors, a low-VRAM identity change, or editor shutdown terminates the worker;
 the next request then starts a clean runtime. Custom runner paths retain the
 one-shot subprocess fallback unless persistence is explicitly requested.
 Masked LR refine is connected to the experimental workspace: it consumes an
-accepted LR session checkpoint, publishes a decoded LR mesh preview and writes
-a replacement `lr_shape_latent` checkpoint that ordinary HR resume can consume.
+explicitly selected LR session checkpoint, publishes a decoded LR mesh preview
+and writes a new `lr_shape_latent` checkpoint that ordinary HR resume can
+consume. Base LR and every Refined LR result remain separate session-local
+variants. `Generate LR shape` always exposes Base LR; `Refine LR shape` exposes
+the refined variants and a separate `Refine source` selector, which defaults to
+Base LR. Preview selection does not silently change the next refine source.
 Local-detail operations (upscaled conditioning, isolated local geometry,
 registration, fusion, local texture and transfer) remain disabled until their
 resumable runners and artifact contracts are connected.

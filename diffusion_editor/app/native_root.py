@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from functools import partial
 import hashlib
+import json
 import os
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
@@ -38,6 +39,7 @@ from ..generation.patch_resolver import source_patch_at_center
 from ..generation.types import (
     RECONSTRUCTION_BACKEND_STAGES,
     ReconstructionBackend,
+    ReconstructionLrVariant,
     ReconstructionParameters,
     ReconstructionRunKind,
     ReconstructionStage,
@@ -902,10 +904,15 @@ class NativeEditorRoot:
                 )
             event = controller.start(image, **start_kwargs)
             if event.status:
+                if not can_resume:
+                    node.lr_variants = ()
+                    node.accepted_lr_variant_id = None
+                    node.selected_lr_refine_source_id = None
                 self._reconstruction_job_source_sha256 = source_sha256
                 self._reconstruction_job_parameters = node.generation_parameters
                 self._reconstruction_job_node_id = node.id
                 self._reconstruction_parent_run_id = None
+                self._reconstruction_lr_parent_variant_id = None
                 self._set_reconstruction_status(
                     node, ReconstructionStatus.GENERATING
                 )
@@ -1087,6 +1094,10 @@ class NativeEditorRoot:
         controller = self.reconstruction_controller
         source_path = node.intermediate_source_path
         checkpoint_path = node.resume_checkpoint_path
+        source_variant = node.selected_lr_refine_source
+        if source_variant is not None:
+            source_path = source_variant.source_path
+            checkpoint_path = source_variant.checkpoint_path
         if controller is None or controller.is_busy:
             return
         if node.generation_parameters.backend is not ReconstructionBackend.PIXAL3D:
@@ -1130,6 +1141,9 @@ class NativeEditorRoot:
             if event.status and event.error is None:
                 self._reconstruction_job_node_id = node.id
                 self._reconstruction_parent_run_id = None
+                self._reconstruction_lr_parent_variant_id = (
+                    source_variant.variant_id if source_variant else None
+                )
                 self._reconstruction_job_source_sha256 = (
                     node.resume_source_sha256
                 )
@@ -1247,6 +1261,10 @@ class NativeEditorRoot:
         self._reconstruction_job_node_id = None
         parent_run_id = getattr(self, "_reconstruction_parent_run_id", None)
         self._reconstruction_parent_run_id = None
+        lr_parent_variant_id = getattr(
+            self, "_reconstruction_lr_parent_variant_id", None
+        )
+        self._reconstruction_lr_parent_variant_id = None
         if event.result is not None:
             if event.result.resume_checkpoint_path:
                 node.resume_checkpoint_path = event.result.resume_checkpoint_path
@@ -1267,6 +1285,44 @@ class NativeEditorRoot:
                 node.intermediate_texture_checkpoint_path = (
                     event.result.texture_checkpoint_path
                 )
+            if (
+                    event.result.completed_stage
+                    is ReconstructionStage.LR_SHAPE_LATENT
+                    and event.result.resume_checkpoint_path):
+                preview = next(
+                    (
+                        artifact for artifact in event.result.artifacts
+                        if artifact.stage
+                        is ReconstructionStage.LR_SHAPE_LATENT
+                    ),
+                    None,
+                )
+                if preview is not None:
+                    if event.result.kind is ReconstructionRunKind.BASE:
+                        variant = ReconstructionLrVariant(
+                            "lr-base",
+                            "Base LR",
+                            event.result.resume_checkpoint_path,
+                            event.result.source_path,
+                            preview,
+                        )
+                        node.lr_variants = (variant,)
+                        node.selected_lr_refine_source_id = variant.variant_id
+                    else:
+                        refine_number = 1 + sum(
+                            item.parent_variant_id is not None
+                            for item in node.lr_variants
+                        )
+                        variant = ReconstructionLrVariant(
+                            f"lr-refined-{refine_number}",
+                            f"Refined LR {refine_number}",
+                            event.result.resume_checkpoint_path,
+                            event.result.source_path,
+                            preview,
+                            parent_variant_id=lr_parent_variant_id,
+                        )
+                        node.lr_variants = (*node.lr_variants, variant)
+                    node.accepted_lr_variant_id = variant.variant_id
             if event.result.completed_stage is not ReconstructionStage.FINAL_MESH:
                 self._set_reconstruction_status(node, ReconstructionStatus.READY)
                 self._refresh_reconstruction_panel(node)
@@ -1496,6 +1552,10 @@ class NativeEditorRoot:
                     node.stage_artifacts,
                     node.runs,
                     node.active_run_id,
+                    lr_variants=node.lr_variants,
+                    selected_lr_refine_source_id=(
+                        node.selected_lr_refine_source_id
+                    ),
                 )
                 self._active_reconstruction_workspace = workspace
                 update_workspace(
@@ -1548,17 +1608,24 @@ class NativeEditorRoot:
                             node.intermediate_texture_checkpoint_path
                         )
                     )
+                lr_source = node.selected_lr_refine_source
                 can_lr_refine = bool(
                     node.generation_parameters.backend
                     is ReconstructionBackend.PIXAL3D
-                    and node.resume_stage in {
-                        ReconstructionStage.LR_SHAPE_FLOW,
-                        ReconstructionStage.LR_SHAPE_LATENT,
-                    }
-                    and node.resume_checkpoint_path
-                    and os.path.isfile(node.resume_checkpoint_path)
-                    and node.intermediate_source_path
-                    and os.path.isfile(node.intermediate_source_path)
+                    and (
+                        lr_source is not None
+                        and os.path.isfile(lr_source.checkpoint_path)
+                        and os.path.isfile(lr_source.source_path)
+                        or lr_source is None
+                        and node.resume_stage in {
+                            ReconstructionStage.LR_SHAPE_FLOW,
+                            ReconstructionStage.LR_SHAPE_LATENT,
+                        }
+                        and node.resume_checkpoint_path
+                        and os.path.isfile(node.resume_checkpoint_path)
+                        and node.intermediate_source_path
+                        and os.path.isfile(node.intermediate_source_path)
+                    )
                 )
                 selection = (
                     self.canvas_controls_coordinator.selection_state
@@ -1586,6 +1653,24 @@ class NativeEditorRoot:
 
     def _handle_reconstruction_workspace(
             self, action: str, value=None) -> None:
+        if action == "select_refine_source":
+            node = self.application.layer_stack.active_layer
+            workspace = self._active_reconstruction_workspace
+            if not isinstance(node, ReconstructionLayer) or workspace is None:
+                return
+            try:
+                artifact = workspace.artifact(str(value))
+                metadata = json.loads(artifact.metadata_json)
+                variant_id = str(metadata["lr_variant_id"])
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                return
+            if not any(
+                    item.variant_id == variant_id
+                    for item in node.lr_variants):
+                return
+            node.selected_lr_refine_source_id = variant_id
+            self._refresh_reconstruction_panel(node)
+            return
         if action == "set_operation_parameter":
             node = self.application.layer_stack.active_layer
             controller = self.reconstruction_controller

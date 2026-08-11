@@ -13,6 +13,7 @@ from .types import (
     RECONSTRUCTION_STAGES,
     ReconstructionBackend,
     ReconstructionParameters,
+    ReconstructionLrVariant,
     ReconstructionRun,
     ReconstructionRunKind,
     ReconstructionStage,
@@ -715,6 +716,9 @@ def build_legacy_workspace(
         ],
         runs: Sequence[ReconstructionRun],
         active_run_id: str | None,
+        *,
+        lr_variants: Sequence[ReconstructionLrVariant] = (),
+        selected_lr_refine_source_id: str | None = None,
 ) -> ReconstructionWorkspace | None:
     """Project the working legacy Pixal3D state into an isolated graph.
 
@@ -762,18 +766,29 @@ def build_legacy_workspace(
                 statuses,
                 artifacts,
                 run,
+                None,
             ))
     else:
+        base_lr_variant = next(
+            (item for item in lr_variants if item.parent_variant_id is None),
+            None,
+        )
+        current_artifacts = dict(stage_artifacts)
+        if base_lr_variant is not None:
+            current_artifacts[ReconstructionStage.LR_SHAPE_LATENT] = (
+                base_lr_variant.preview_artifact
+            )
         snapshots = [(
             "current",
             "Current generation",
             ReconstructionRunKind.BASE,
             dict(stage_statuses),
-            dict(stage_artifacts),
+            current_artifacts,
             None,
+            base_lr_variant,
         )]
 
-    for run_id, label, kind, statuses, artifacts, run in snapshots:
+    for run_id, label, kind, statuses, artifacts, run, lr_variant in snapshots:
         operation_specs = {
             ReconstructionRunKind.BASE: _LEGACY_BASE_OPERATIONS,
             ReconstructionRunKind.MASKED_REFINE: _LEGACY_REFINE_OPERATIONS,
@@ -832,6 +847,26 @@ def build_legacy_workspace(
                     )
                     preceding_outputs.append(checkpoint.artifact_id)
                     published_any = True
+            if lr_variant is not None and spec_key == "lr.generate":
+                checkpoint = workspace.publish_artifact(
+                    operation.operation_id,
+                    "lr_checkpoint",
+                    path=lr_variant.checkpoint_path,
+                    artifact_id=(
+                        f"legacy:{run_id}:{spec_key}:lr_checkpoint"
+                    ),
+                    metadata={
+                        "verified_content_hash": False,
+                        "lr_variant_id": lr_variant.variant_id,
+                        "lr_variant_label": lr_variant.label,
+                        "selected_refine_source": (
+                            lr_variant.variant_id
+                            == selected_lr_refine_source_id
+                        ),
+                    },
+                )
+                preceding_outputs.append(checkpoint.artifact_id)
+                published_any = True
             if run is not None and spec_key in {
                     "texture.generate", "texture.refine"}:
                 if run.texture_checkpoint_path:
@@ -854,6 +889,53 @@ def build_legacy_workspace(
             if spec_key == "final.assemble" and run is not None:
                 status = WorkspaceOperationStatus.READY
             workspace.set_operation_status(operation.operation_id, status)
+
+    refined_lr_variants = tuple(
+        item for item in lr_variants if item.parent_variant_id is not None
+    )
+    for variant in refined_lr_variants:
+        operation = workspace.plan_operation(
+            "lr.refine",
+            parameters=parameters.to_dict(),
+            model_identity="legacy:pixal3d",
+            worker_protocol="legacy-stage-events-v1",
+            variant_label=variant.label,
+            operation_id=f"legacy:{variant.variant_id}:lr.refine",
+        )
+        preview = workspace.publish_artifact(
+            operation.operation_id,
+            "lr_preview",
+            path=variant.preview_artifact.path,
+            kind=WorkspaceArtifactKind.MESH,
+            preview_kind=WorkspacePreviewKind.MESH,
+            artifact_id=(
+                f"legacy:{variant.variant_id}:lr.refine:lr_shape_latent"
+            ),
+            metadata={
+                "legacy_stage": ReconstructionStage.LR_SHAPE_LATENT.value,
+                "verified_content_hash": False,
+                "lr_variant_id": variant.variant_id,
+            },
+        )
+        workspace.publish_artifact(
+            operation.operation_id,
+            "lr_checkpoint",
+            path=variant.checkpoint_path,
+            artifact_id=f"legacy:{variant.variant_id}:lr.refine:lr_checkpoint",
+            metadata={
+                "verified_content_hash": False,
+                "lr_variant_id": variant.variant_id,
+                "lr_variant_label": variant.label,
+                "selected_refine_source": (
+                    variant.variant_id == selected_lr_refine_source_id
+                ),
+            },
+        )
+        workspace.set_operation_status(
+            operation.operation_id, WorkspaceOperationStatus.READY
+        )
+        if variant.variant_id == selected_lr_refine_source_id:
+            workspace.select_artifact(preview.artifact_id)
 
     active_prefix = f"legacy:{active_run_id}:" if active_run_id else None
     if active_prefix:

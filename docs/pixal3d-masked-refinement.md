@@ -82,7 +82,15 @@ features exactly, and denormalizes the result again.
 The operation publishes a decoded 512-resolution LR mesh preview and a new
 pickle-free `lr_shape_latent` session checkpoint. Continuing through
 `HR coordinates` uses the normal resume path, so the upsample is derived from
-the refined LR variant rather than from the original latent.
+the most recently completed LR variant rather than from the original latent.
+
+The experimental workspace retains Base LR and each Refined LR result as
+separate session-local variants. The `Generate LR shape` artifact is always the
+unrefined Base LR preview. On `Refine LR shape`, `Refine source` explicitly
+chooses the checkpoint used by the next run and defaults to Base LR; selecting
+another preview does not alter it. This permits several independent refines
+from Base as well as an intentional refine chain from a chosen Refined LR
+variant.
 
 ## Masked texture refinement
 

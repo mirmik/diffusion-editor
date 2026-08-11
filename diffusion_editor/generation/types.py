@@ -637,6 +637,16 @@ class ReconstructionStageArtifact:
 
 
 @dataclass(frozen=True)
+class ReconstructionLrVariant:
+    variant_id: str
+    label: str
+    checkpoint_path: str
+    source_path: str
+    preview_artifact: ReconstructionStageArtifact
+    parent_variant_id: str | None = None
+
+
+@dataclass(frozen=True)
 class ReconstructionStageEvent:
     stage: ReconstructionStage
     status: ReconstructionStageStatus
