@@ -259,6 +259,90 @@ class Pixal3DProcessClient:
             raise RuntimeError("Pixal3D completed without producing a GLB")
         return output_path, source_path
 
+    def refine_lr(
+        self,
+        conditioning_image: Image.Image,
+        mask_image: Image.Image,
+        session_checkpoint_path: str | Path,
+        cancel: threading.Event,
+        *,
+        parameters: ReconstructionRefineParameters | None = None,
+        generation_parameters: ReconstructionParameters | None = None,
+        on_event: Callable[[ReconstructionStageEvent], None] | None = None,
+    ) -> tuple[Path, Path]:
+        """Masked-refine an LR latent and return a resumable LR checkpoint."""
+        self._validate_runtime()
+        if not self._staged:
+            raise RuntimeError("LR refinement requires the staged runner")
+        base_checkpoint = Path(session_checkpoint_path)
+        if not base_checkpoint.is_file():
+            raise RuntimeError(
+                f"LR session checkpoint not found: {base_checkpoint}"
+            )
+        if conditioning_image.size != mask_image.size:
+            raise ValueError("refine mask must match conditioning image dimensions")
+
+        snapshot = parameters or ReconstructionRefineParameters()
+        generation = generation_parameters or ReconstructionParameters()
+        artifact_root = Path(tempfile.mkdtemp(
+            prefix="diffusion-editor-pixal3d-lr-refine-"
+        ))
+        self._artifact_roots.append(artifact_root)
+        source_path = artifact_root / "conditioning.png"
+        mask_path = artifact_root / "mask.png"
+        output_path = artifact_root / "lr-shape-refined.glb"
+        next_session_checkpoint = artifact_root / "resume-checkpoint.npz"
+        events_path = artifact_root / "events.jsonl"
+        log_path = artifact_root / "pixal3d.log"
+        conditioning_image.convert("RGBA").save(source_path, format="PNG")
+        mask_image.convert("L").save(mask_path, format="PNG")
+        self._artifacts = [ReconstructionStageArtifact(
+            ReconstructionStage.SOURCE_IMAGE, str(source_path), "image"
+        )]
+        self._checkpoint_path = None
+        self._texture_checkpoint_path = None
+        self._resume_checkpoint_path = None
+        self._conditioning_path = None
+        command = [
+            str(self._python), str(self._runner_path),
+            "--pixal3d-root", str(self._root),
+            "--image", str(source_path),
+            "--output", str(output_path),
+            "--events", str(events_path),
+            "--model_path", str(self._model_path),
+            "--lr-refine-checkpoint", str(base_checkpoint),
+            "--session-checkpoint", str(next_session_checkpoint),
+            "--refine-mask", str(mask_path),
+            "--refine-strength", str(snapshot.strength),
+            "--refine-steps", str(snapshot.steps),
+            "--refine-seed", str(snapshot.seed),
+            "--refine-rescale-t", str(snapshot.rescale_t),
+            "--refine-guidance", str(snapshot.guidance_strength),
+            "--lr-conditioning-resolution",
+            str(generation.lr_conditioning_resolution),
+            "--resolution", str(generation.resolution),
+        ]
+        if generation.low_vram:
+            command.append("--low_vram")
+        if snapshot.resize_detail_to_1024:
+            command.append("--resize-refine-detail")
+        if self._persistent:
+            self._run_persistent_command(
+                command, events_path, cancel, on_event,
+                low_vram=generation.low_vram,
+            )
+        else:
+            self._run_command(command, log_path, events_path, cancel, on_event)
+        if not output_path.is_file() or output_path.stat().st_size == 0:
+            raise RuntimeError("Pixal3D LR refinement produced no preview")
+        if not next_session_checkpoint.is_file():
+            raise RuntimeError("Pixal3D LR refinement produced no resume checkpoint")
+        self._resume_checkpoint_path = next_session_checkpoint
+        preprocessed = artifact_root / "preprocessed.png"
+        if preprocessed.is_file():
+            self._conditioning_path = preprocessed
+        return output_path, source_path
+
     def refine(
         self,
         conditioning_image: Image.Image,

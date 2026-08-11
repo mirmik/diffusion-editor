@@ -1081,6 +1081,70 @@ class NativeEditorRoot:
             log.exception("Failed to start masked 3D refinement")
             self.application.set_status(f"Cannot start 3D refinement: {exc}")
 
+    def _start_selected_reconstruction_lr_refine(
+            self, node: ReconstructionLayer) -> None:
+        stack = self.application.layer_stack
+        controller = self.reconstruction_controller
+        source_path = node.intermediate_source_path
+        checkpoint_path = node.resume_checkpoint_path
+        if controller is None or controller.is_busy:
+            return
+        if node.generation_parameters.backend is not ReconstructionBackend.PIXAL3D:
+            self.application.set_status("LR refine requires the Pixal3D backend")
+            return
+        if node.resume_stage not in {
+                ReconstructionStage.LR_SHAPE_FLOW,
+                ReconstructionStage.LR_SHAPE_LATENT,
+        }:
+            self.application.set_status(
+                "Generate through LR shape latent before refining LR"
+            )
+            return
+        if not source_path or not os.path.isfile(source_path):
+            self.application.set_status("Cannot refine LR: source image is missing")
+            return
+        if not checkpoint_path or not os.path.isfile(checkpoint_path):
+            self.application.set_status("Cannot refine LR: checkpoint is missing")
+            return
+        if stack.selection.is_empty:
+            self.application.set_status("Paint an LR refine mask first")
+            return
+        try:
+            with Image.open(source_path) as opened:
+                source_image = opened.convert("RGBA").copy()
+            if source_image.size != (stack.width, stack.height):
+                raise ValueError(
+                    "source image dimensions no longer match the canvas"
+                )
+            mask_image = Image.fromarray(
+                stack.selection.to_mask().to_uint8(), mode="L"
+            )
+            self._set_reconstruction_mask_painting(False)
+            event = controller.start_lr_refine(
+                source_image,
+                mask_image,
+                checkpoint_path,
+                parameters=node.refine_parameters,
+                generation_parameters=node.generation_parameters,
+            )
+            if event.status and event.error is None:
+                self._reconstruction_job_node_id = node.id
+                self._reconstruction_parent_run_id = None
+                self._reconstruction_job_source_sha256 = (
+                    node.resume_source_sha256
+                )
+                self._reconstruction_job_parameters = node.generation_parameters
+                self._set_reconstruction_status(
+                    node, ReconstructionStatus.GENERATING
+                )
+                self.application.set_status(event.status)
+            elif event.status:
+                self.application.set_status(event.status)
+            self._refresh_reconstruction_panel(node)
+        except Exception as exc:
+            log.exception("Failed to start masked LR refinement")
+            self.application.set_status(f"Cannot start LR refinement: {exc}")
+
     def _start_selected_reconstruction_texture_refine(
             self, node: ReconstructionLayer) -> None:
         stack = self.application.layer_stack
@@ -1350,6 +1414,9 @@ class NativeEditorRoot:
             elif action == "run":
                 self._start_selected_reconstruction_refine(node)
                 return
+            elif action == "run_lr":
+                self._start_selected_reconstruction_lr_refine(node)
+                return
             elif action == "run_texture":
                 self._start_selected_reconstruction_texture_refine(node)
                 return
@@ -1452,8 +1519,7 @@ class NativeEditorRoot:
                 )
                 if parent is not None:
                     can_refine = bool(
-                        parent
-                        and parent.backend is ReconstructionBackend.PIXAL3D
+                        parent.backend is ReconstructionBackend.PIXAL3D
                         and parent.checkpoint_path
                         and os.path.isfile(parent.checkpoint_path)
                         and parent.source_path
@@ -1482,6 +1548,18 @@ class NativeEditorRoot:
                             node.intermediate_texture_checkpoint_path
                         )
                     )
+                can_lr_refine = bool(
+                    node.generation_parameters.backend
+                    is ReconstructionBackend.PIXAL3D
+                    and node.resume_stage in {
+                        ReconstructionStage.LR_SHAPE_FLOW,
+                        ReconstructionStage.LR_SHAPE_LATENT,
+                    }
+                    and node.resume_checkpoint_path
+                    and os.path.isfile(node.resume_checkpoint_path)
+                    and node.intermediate_source_path
+                    and os.path.isfile(node.intermediate_source_path)
+                )
                 selection = (
                     self.canvas_controls_coordinator.selection_state
                     if self.canvas_controls_coordinator is not None
@@ -1497,6 +1575,7 @@ class NativeEditorRoot:
                     refine_supported=refine_supported,
                     can_refine=can_refine,
                     can_texture_refine=can_texture_refine,
+                    can_lr_refine=can_lr_refine,
                     paint_active=bool(selection and selection.edit_mode),
                     erase_active=bool(selection and selection.eraser),
                     brush_size=selection.size if selection else 50,

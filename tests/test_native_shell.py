@@ -398,7 +398,9 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar():
             "generate"
         ].widget.enabled is False
         assert view.reconstruction_workspace_mask_panel.visible is True
-        assert "not connected yet" in view.reconstruction_workspace_status.text
+        assert view.reconstruction_workspace_actions[
+            "refine"
+        ].widget.enabled is False
         workspace_refine_actions = []
         view.set_reconstruction_refine_handler(
             lambda action, value:
@@ -573,6 +575,7 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar():
             mask_ready=True,
             can_refine=True,
             can_texture_refine=True,
+            can_lr_refine=True,
             paint_active=True,
             erase_active=True,
             brush_size=72,
@@ -608,6 +611,13 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar():
         assert workspace_mask_controls["steps"].value == 12.0
         assert workspace_mask_controls["seed"].value == 456.0
         assert workspace_mask_controls["clear"].widget.enabled is True
+        view._select_reconstruction_workspace_operation("lr.refine")
+        assert view.reconstruction_workspace_actions[
+            "refine"
+        ].widget.enabled is True
+        view._run_reconstruction_workspace_refine()
+        assert refine_actions[-1] == ("run_lr", None)
+        view._select_reconstruction_workspace_operation("hr.refine")
         assert view.reconstruction_workspace_actions[
             "refine"
         ].widget.enabled is True

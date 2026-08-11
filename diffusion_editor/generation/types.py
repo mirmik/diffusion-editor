@@ -611,6 +611,15 @@ class ReconstructionRefineRequest:
 
 
 @dataclass(frozen=True)
+class ReconstructionLrRefineRequest:
+    conditioning_image: Image.Image
+    mask_image: Image.Image
+    session_checkpoint_path: str
+    parameters: ReconstructionRefineParameters = ReconstructionRefineParameters()
+    generation_parameters: ReconstructionParameters = ReconstructionParameters()
+
+
+@dataclass(frozen=True)
 class ReconstructionTextureRefineRequest:
     conditioning_image: Image.Image
     mask_image: Image.Image

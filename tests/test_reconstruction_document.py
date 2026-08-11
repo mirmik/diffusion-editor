@@ -282,6 +282,7 @@ def test_root_refine_entry_point_uses_active_run_checkpoint(tmp_path) -> None:
     class Controller:
         is_busy = False
         captured = None
+        lr_captured = None
         texture_captured = None
 
         def start_refine(
@@ -293,6 +294,16 @@ def test_root_refine_entry_point_uses_active_run_checkpoint(tmp_path) -> None:
                 parameters, generation_parameters,
             )
             return ReconstructionControllerEvent(status="Refining")
+
+        def start_lr_refine(
+            self, image, mask, session_checkpoint_path, *,
+            parameters, generation_parameters,
+        ):
+            self.lr_captured = (
+                image, mask, session_checkpoint_path,
+                parameters, generation_parameters,
+            )
+            return ReconstructionControllerEvent(status="Refining LR")
 
         def start_texture_refine(
             self, image, mask, shape_path, texture_path, *,
@@ -355,6 +366,9 @@ def test_root_refine_entry_point_uses_active_run_checkpoint(tmp_path) -> None:
     node.intermediate_source_path = str(source)
     node.intermediate_shape_checkpoint_path = str(checkpoint)
     node.intermediate_texture_checkpoint_path = str(texture_checkpoint)
+    node.resume_checkpoint_path = str(checkpoint)
+    node.resume_stage = ReconstructionStage.LR_SHAPE_LATENT
+    node.resume_source_sha256 = "source-hash"
     root._start_selected_reconstruction_refine(node)
     assert controller.captured[2] == str(checkpoint)
     assert root._reconstruction_parent_run_id is None
@@ -362,6 +376,10 @@ def test_root_refine_entry_point_uses_active_run_checkpoint(tmp_path) -> None:
     assert controller.texture_captured[2:4] == (
         str(checkpoint), str(texture_checkpoint)
     )
+    root._start_selected_reconstruction_lr_refine(node)
+    assert controller.lr_captured[2] == str(checkpoint)
+    assert controller.lr_captured[3] == node.refine_parameters
+    assert root._reconstruction_job_source_sha256 == "source-hash"
 
 
 def test_reconstruction_node_tracks_target_progress_and_preview(tmp_path) -> None:

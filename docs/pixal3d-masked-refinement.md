@@ -15,7 +15,7 @@ duplicating Pixal3D preprocessing in the editor process.
 Selecting a 3D Reconstruction object exposes a `Masked refinement` section in
 its contextual left panel. The 2D source canvas and 3D viewport remain visible
 side by side. `Paint refine mask` enables the existing soft document selection
-brush and its blue overlay; erasing, brush size, hardness, flow, strength,
+brush and its red overlay; erasing, brush size, hardness, flow, strength,
 steps and seed are adjustable in the same panel. `Refine geometry in mask` and
 `Refine texture in mask` snapshot the source and mask and start asynchronous
 child runs. `Resize masked detail to 1024` is enabled by default and gives the
@@ -68,6 +68,21 @@ After decoding the refined shape latent, the worker continues through a fresh
 `Texture flow`, saves a texture checkpoint, decodes PBR voxels and bakes a
 textured GLB. Geometry refinements may therefore be compared without losing
 the ordinary Pixal3D texture pass.
+
+## Masked LR refinement
+
+The experimental pipeline can refine an accepted `lr_shape_flow` or
+`lr_shape_latent` session checkpoint before HR coordinates are generated. The
+saved LR features are denormalized model output, so the worker first maps them
+back through Pixal3D's shape-latent mean and standard deviation. It projects
+the canvas mask onto the fixed 32³ LR token grid, runs the same partial-noise
+reference trajectory with `shape_slat_flow_model_512`, restores unselected
+features exactly, and denormalizes the result again.
+
+The operation publishes a decoded 512-resolution LR mesh preview and a new
+pickle-free `lr_shape_latent` session checkpoint. Continuing through
+`HR coordinates` uses the normal resume path, so the upsample is derived from
+the refined LR variant rather than from the original latent.
 
 ## Masked texture refinement
 

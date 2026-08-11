@@ -7,10 +7,12 @@ from tcbase import log
 from ..generation.types import (
     RECONSTRUCTION_BACKEND_LABELS,
     ReconstructionBackend,
+    ReconstructionLrRefineRequest,
     ReconstructionRefineRequest,
     ReconstructionRequest,
     ReconstructionResult,
     ReconstructionRunKind,
+    ReconstructionStage,
     ReconstructionStageEvent,
     ReconstructionTextureRefineRequest,
 )
@@ -156,6 +158,56 @@ class ReconstructionEngine:
             job_id=job_id,
             name="pixal3d-masked-refine",
             on_error=lambda _exc: log.exception("Pixal3D refinement failed"),
+        )
+
+    def submit_lr_refine_request(
+        self,
+        request: ReconstructionLrRefineRequest,
+        *,
+        job_id: str | None = None,
+    ) -> bool:
+        def emit(event: ReconstructionStageEvent) -> None:
+            from ..generation.types import EnginePollEvent
+
+            self._tasks.emit(EnginePollEvent(
+                task_type="reconstruction",
+                meta=event,
+                job_id=job_id,
+            ))
+
+        return self._tasks.submit(
+            "reconstruction",
+            lambda cancel: self._run_lr_refine(request, cancel, emit),
+            job_id=job_id,
+            name="pixal3d-lr-masked-refine",
+            on_error=lambda _exc: log.exception("Pixal3D LR refinement failed"),
+        )
+
+    def _run_lr_refine(self, request, cancel, emit) -> ReconstructionResult:
+        preview_path, source_path = self._client.refine_lr(
+            request.conditioning_image,
+            request.mask_image,
+            request.session_checkpoint_path,
+            cancel,
+            parameters=request.parameters,
+            generation_parameters=request.generation_parameters,
+            on_event=emit,
+        )
+        return ReconstructionResult(
+            glb_path=str(preview_path),
+            source_path=str(source_path),
+            completed_stage=ReconstructionStage.LR_SHAPE_LATENT,
+            artifacts=tuple(self._client.artifacts),
+            kind=ReconstructionRunKind.MASKED_REFINE,
+            conditioning_path=(
+                str(self._client.conditioning_path)
+                if self._client.conditioning_path else None
+            ),
+            resume_checkpoint_path=(
+                str(self._client.resume_checkpoint_path)
+                if self._client.resume_checkpoint_path else None
+            ),
+            backend=ReconstructionBackend.PIXAL3D,
         )
 
     def _run_refine(self, request, cancel, emit) -> ReconstructionResult:

@@ -704,6 +704,154 @@ def _preprocess_refine_pair(pipeline, source_image, mask_image):
     return condition, mask
 
 
+def _run_lr_refine(
+    args, reporter, upstream, sp, torch, np, pipeline=None
+) -> None:
+    """Masked-refine a saved LR latent and publish a resumable LR variant."""
+    from PIL import Image
+
+    checkpoint_path = Path(args.lr_refine_checkpoint)
+    with np.load(checkpoint_path, allow_pickle=False) as saved:
+        if int(saved["protocol_version"][0]) != 1:
+            raise ValueError("unsupported Pixal3D LR checkpoint version")
+        expected_model = str(Path(args.model_path).resolve())
+        if str(saved["model_path"].item()) != expected_model:
+            raise ValueError("LR checkpoint belongs to a different model")
+        completed_stage = str(saved["completed_stage"].item())
+        if completed_stage not in {"lr_shape_flow", "lr_shape_latent"}:
+            raise ValueError(
+                "LR refine requires an lr_shape_flow or lr_shape_latent "
+                f"checkpoint, got {completed_stage}"
+            )
+        target_resolution = int(saved["resolution"][0])
+        coords = torch.from_numpy(saved["lr_coords"].copy()).to("cuda")
+        base_feats = torch.from_numpy(saved["lr_feats"].copy()).to(
+            "cuda"
+        ).float()
+        camera = {
+            "camera_angle_x": float(saved["camera_angle_x"][0]),
+            "distance": float(saved["camera_distance"][0]),
+            "mesh_scale": float(saved["mesh_scale"][0]),
+        }
+
+    pipeline = pipeline or upstream.init_pipeline(
+        args.model_path, low_vram=args.low_vram
+    )
+    condition_image, mask_image = _preprocess_refine_pair(
+        pipeline,
+        Image.open(args.image),
+        Image.open(args.refine_mask),
+    )
+    artifact_root = Path(args.output).resolve().parent
+    preprocessed = artifact_root / "preprocessed.png"
+    condition_image.save(preprocessed)
+    mask_image.save(artifact_root / "preprocessed-mask.png")
+    token_mask = _project_mask_to_tokens(mask_image, coords, 512, camera)
+    if not bool((token_mask > 0.0).any()):
+        raise ValueError("LR refine mask does not select any visible 3D tokens")
+
+    conditioner, _grid_override = _lr_conditioner(
+        pipeline, args.lr_conditioning_resolution
+    )
+    cond, geometry_detail = _masked_detail_condition(
+        pipeline,
+        conditioner,
+        condition_image,
+        mask_image,
+        coords,
+        512,
+        camera,
+        token_mask,
+        torch,
+        args.resize_refine_detail,
+    )
+    if geometry_detail is not None:
+        geometry_detail.save(artifact_root / "lr-geometry-detail-1024.png")
+
+    std = torch.tensor(
+        pipeline.shape_slat_normalization["std"], device=base_feats.device
+    )[None]
+    mean = torch.tensor(
+        pipeline.shape_slat_normalization["mean"], device=base_feats.device
+    )[None]
+    base_normalized = (base_feats - mean) / std
+    x0 = sp.SparseTensor(feats=base_normalized, coords=coords)
+    generator = torch.Generator(device="cuda").manual_seed(args.refine_seed)
+    noise = torch.randn(
+        base_normalized.shape,
+        generator=generator,
+        device=base_normalized.device,
+        dtype=base_normalized.dtype,
+    )
+    sampler = pipeline.shape_slat_sampler
+    sigma_min = sampler.sigma_min
+    raw_times = np.linspace(args.refine_strength, 0.0, args.refine_steps + 1)
+    times = (
+        args.refine_rescale_t * raw_times
+        / (1 + (args.refine_rescale_t - 1) * raw_times)
+    )
+
+    def reference_at(value: float):
+        sigma = sigma_min + (1 - sigma_min) * value
+        return (1 - value) * base_normalized + sigma * noise
+
+    sample = x0.replace(reference_at(float(times[0])))
+    flow = pipeline.models["shape_slat_flow_model_512"]
+    if pipeline.low_vram:
+        flow.to(pipeline.device)
+    blend = token_mask[:, None].to(base_normalized.dtype)
+    reporter.emit("lr_shape_flow", "running", total=args.refine_steps)
+    with torch.inference_mode():
+        for index, (current, previous) in enumerate(
+            zip(times[:-1], times[1:]), 1
+        ):
+            out = sampler.sample_once(
+                flow,
+                sample,
+                float(current),
+                float(previous),
+                cond["cond"],
+                neg_cond=cond["neg_cond"],
+                guidance_strength=args.refine_guidance,
+                guidance_rescale=0.5,
+                guidance_interval=(0.6, 1.0),
+            )
+            reference = reference_at(float(previous))
+            sample = out.pred_x_prev.replace(
+                out.pred_x_prev.feats * blend + reference * (1 - blend)
+            )
+            reporter.emit(
+                "lr_shape_flow", "running",
+                progress=index, total=args.refine_steps,
+            )
+    if pipeline.low_vram:
+        flow.cpu()
+    sample = sample.replace(
+        sample.feats * blend + base_normalized * (1 - blend)
+    )
+    reporter.emit(
+        "lr_shape_flow", "ready",
+        progress=args.refine_steps, total=args.refine_steps,
+    )
+
+    refined_lr = sample.replace(sample.feats * std + mean)
+    _save_session_checkpoint(
+        Path(args.session_checkpoint),
+        "lr_shape_latent",
+        {"lr_coords": refined_lr.coords, "lr_feats": refined_lr.feats},
+        target_resolution,
+        camera,
+        preprocessed,
+        args.model_path,
+    )
+    meshes, _ = pipeline.decode_shape_slat(refined_lr, 512)
+    preview = _shape_preview(meshes, Path(args.output))
+    reporter.emit(
+        "lr_shape_latent", "ready",
+        artifact_path=preview, preview_kind="mesh",
+    )
+
+
 def _run_refine(
     args, reporter, upstream, sp, torch, np, o_voxel, pipeline=None
 ) -> None:
@@ -1134,6 +1282,12 @@ def run(args, runtime: Pixal3DRuntime | None = None) -> None:
     from PIL import Image
 
     reporter = StageReporter(Path(args.events))
+    if args.lr_refine_checkpoint:
+        _run_lr_refine(
+            args, reporter, upstream, sp, torch, np,
+            pipeline=runtime.pipeline,
+        )
+        return
     if args.texture_refine_checkpoint:
         _run_texture_refine(
             args, reporter, upstream, sp, torch, np, o_voxel,
@@ -1594,6 +1748,7 @@ def _job_parser() -> argparse.ArgumentParser:
     parser.add_argument("--texture-checkpoint")
     parser.add_argument("--session-checkpoint")
     parser.add_argument("--resume-checkpoint")
+    parser.add_argument("--lr-refine-checkpoint")
     parser.add_argument("--refine-checkpoint")
     parser.add_argument("--texture-refine-checkpoint")
     parser.add_argument("--refine-mask")

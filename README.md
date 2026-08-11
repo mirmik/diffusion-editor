@@ -171,9 +171,12 @@ automatic camera estimation by source content. Cancellation, protocol/runtime
 errors, a low-VRAM identity change, or editor shutdown terminates the worker;
 the next request then starts a clean runtime. Custom runner paths retain the
 one-shot subprocess fallback unless persistence is explicitly requested.
-Planned LR refine and local-detail operations (upscaled conditioning, isolated
-local geometry, registration, fusion, local texture and transfer) remain
-disabled until their resumable runners and artifact contracts are connected.
+Masked LR refine is connected to the experimental workspace: it consumes an
+accepted LR session checkpoint, publishes a decoded LR mesh preview and writes
+a replacement `lr_shape_latent` checkpoint that ordinary HR resume can consume.
+Local-detail operations (upscaled conditioning, isolated local geometry,
+registration, fusion, local texture and transfer) remain disabled until their
+resumable runners and artifact contracts are connected.
 The existing reconstruction panel remains the default during migration.
 See the accepted
 [reconstruction artifact workspace decision](docs/architecture-council/2026-08-11-reconstruction-artifact-workspace.md).

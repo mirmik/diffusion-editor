@@ -15,6 +15,7 @@ from .types import (
     ReconstructionRefineRequest,
     ReconstructionRequest,
     ReconstructionParameters,
+    ReconstructionLrRefineRequest,
     ReconstructionResult,
     ReconstructionStage,
     ReconstructionStageEvent,
@@ -103,6 +104,40 @@ class ReconstructionController:
             return ReconstructionControllerEvent()
         self._active_job_id = job_id
         return ReconstructionControllerEvent(status="Refining 3D geometry with Pixal3D...")
+
+    def start_lr_refine(
+        self,
+        conditioning_image: Image.Image,
+        mask_image: Image.Image,
+        session_checkpoint_path: str,
+        *,
+        parameters: ReconstructionRefineParameters | None = None,
+        generation_parameters: ReconstructionParameters | None = None,
+    ) -> ReconstructionControllerEvent:
+        """Refine the accepted LR latent and produce a resumable checkpoint."""
+        if self.is_busy:
+            return ReconstructionControllerEvent()
+        if conditioning_image.size != mask_image.size:
+            return ReconstructionControllerEvent(
+                error="refine mask dimensions do not match conditioning image",
+                status="Cannot refine LR: mask dimensions do not match",
+            )
+        job_id = f"reconstruction_lr_refine_{uuid.uuid4().hex}"
+        request = ReconstructionLrRefineRequest(
+            conditioning_image=conditioning_image.copy(),
+            mask_image=mask_image.copy(),
+            session_checkpoint_path=str(session_checkpoint_path),
+            parameters=parameters or ReconstructionRefineParameters(),
+            generation_parameters=(
+                generation_parameters or ReconstructionParameters()
+            ),
+        )
+        if not self._engine.submit_lr_refine_request(request, job_id=job_id):
+            return ReconstructionControllerEvent()
+        self._active_job_id = job_id
+        return ReconstructionControllerEvent(
+            status="Refining LR geometry with Pixal3D..."
+        )
 
     def start_texture_refine(
         self,

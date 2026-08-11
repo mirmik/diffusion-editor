@@ -403,6 +403,7 @@ class NativeEditorView:
         self._syncing_reconstruction_workspace = False
         self._reconstruction_workspace_busy = False
         self._reconstruction_workspace_mask_ready = False
+        self._reconstruction_workspace_can_lr_refine = False
         self._reconstruction_workspace_can_refine = False
         self._reconstruction_workspace_can_texture_refine = False
         self._expanded_reconstruction_workspace_groups = {"source"}
@@ -1842,7 +1843,11 @@ class NativeEditorView:
         key = self._selected_reconstruction_workspace_operation
         if self._reconstruction_workspace_busy:
             return
-        if key == "hr.refine" and self._reconstruction_workspace_can_refine:
+        if (
+                key == "lr.refine"
+                and self._reconstruction_workspace_can_lr_refine):
+            self._activate_reconstruction_refine("run_lr")
+        elif key == "hr.refine" and self._reconstruction_workspace_can_refine:
             self._activate_reconstruction_refine("run")
         elif (
                 key == "texture.refine"
@@ -1865,7 +1870,9 @@ class NativeEditorView:
                 self._reconstruction_workspace_mask_ready
                 and not self._reconstruction_workspace_busy
                 and (
-                    operation == "hr.refine"
+                    operation == "lr.refine"
+                    and self._reconstruction_workspace_can_lr_refine
+                    or operation == "hr.refine"
                     and self._reconstruction_workspace_can_refine
                     or operation == "texture.refine"
                     and self._reconstruction_workspace_can_texture_refine
@@ -1873,12 +1880,7 @@ class NativeEditorView:
             )
         status = self.reconstruction_workspace_status
         if status is not None:
-            if operation == "lr.refine":
-                status.text = (
-                    "LR refine execution is not connected yet. "
-                    "Mask and parameters can already be prepared."
-                )
-            elif operation in {"hr.refine", "texture.refine"}:
+            if operation in {"lr.refine", "hr.refine", "texture.refine"}:
                 can_run = bool(refine and refine.widget.enabled)
                 if can_run:
                     status.text = "Ready to refine the selected mask."
@@ -2253,6 +2255,7 @@ class NativeEditorView:
         refine_supported: bool = True,
         can_refine: bool,
         can_texture_refine: bool = False,
+        can_lr_refine: bool = False,
         paint_active: bool = False,
         erase_active: bool = False,
         brush_size: int = 50,
@@ -2348,6 +2351,9 @@ class NativeEditorView:
                     refine_supported and mask_ready and not busy
                 )
             self._reconstruction_workspace_mask_ready = bool(mask_ready)
+            self._reconstruction_workspace_can_lr_refine = bool(
+                refine_supported and can_lr_refine
+            )
             self._reconstruction_workspace_can_refine = bool(
                 refine_supported and can_refine
             )

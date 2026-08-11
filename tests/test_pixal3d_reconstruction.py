@@ -130,6 +130,7 @@ parser.add_argument('--checkpoint')
 parser.add_argument('--texture-checkpoint')
 parser.add_argument('--session-checkpoint')
 parser.add_argument('--resume-checkpoint')
+parser.add_argument('--lr-refine-checkpoint')
 parser.add_argument('--refine-checkpoint')
 parser.add_argument('--texture-refine-checkpoint')
 parser.add_argument('--refine-mask')
@@ -144,6 +145,22 @@ args = parser.parse_args()
 Path(args.output).with_name('parameters.json').write_text(json.dumps(vars(args)))
 if args.session_checkpoint:
     Path(args.session_checkpoint).write_bytes(b'npz-resume')
+if args.lr_refine_checkpoint:
+    Path(args.output).write_bytes(b'glTF-lr-refined')
+    with Path(args.events).open('w') as stream:
+        stream.write(json.dumps({
+            'stage': 'lr_shape_flow',
+            'status': 'ready',
+            'progress': int(args.refine_steps),
+            'total': int(args.refine_steps),
+        }) + '\n')
+        stream.write(json.dumps({
+            'stage': 'lr_shape_latent',
+            'status': 'ready',
+            'artifact_path': args.output,
+            'preview_kind': 'mesh',
+        }) + '\n')
+    raise SystemExit(0)
 if args.texture_refine_checkpoint:
     Path(args.output).write_bytes(b'glTF-texture-refined')
     Path(args.texture_checkpoint).write_bytes(b'npz-texture-refined')
@@ -534,6 +551,55 @@ def test_staged_client_runs_masked_refine_as_separate_artifact(tmp_path):
     client.shutdown()
 
 
+def test_staged_client_runs_masked_lr_refine_to_resume_checkpoint(tmp_path):
+    root = tmp_path / "pixal3d"
+    root.mkdir()
+    runner = tmp_path / "staged.py"
+    runner.write_text(_FAKE_STAGED_RUNNER)
+    model = tmp_path / "model"
+    model.mkdir()
+    base_checkpoint = tmp_path / "lr-session.npz"
+    base_checkpoint.write_bytes(b"npz-lr")
+    client = Pixal3DProcessClient(
+        python=sys.executable,
+        root=root,
+        model_path=model,
+        runner_path=runner,
+        staged=True,
+    )
+    events = []
+
+    output, source = client.refine_lr(
+        Image.new("RGB", (16, 16), "white"),
+        Image.new("L", (16, 16), 255),
+        base_checkpoint,
+        threading.Event(),
+        parameters=ReconstructionRefineParameters(
+            strength=0.55, steps=7, seed=1234
+        ),
+        generation_parameters=ReconstructionParameters(
+            lr_conditioning_resolution=1024,
+            resolution=1536,
+        ),
+        on_event=events.append,
+    )
+
+    captured = json.loads(output.with_name("parameters.json").read_text())
+    assert output.read_bytes() == b"glTF-lr-refined"
+    assert source.is_file()
+    assert client.resume_checkpoint_path is not None
+    assert client.resume_checkpoint_path.read_bytes() == b"npz-resume"
+    assert captured["lr_refine_checkpoint"] == str(base_checkpoint)
+    assert captured["lr_conditioning_resolution"] == "1024"
+    assert captured["resolution"] == "1536"
+    assert captured["refine_strength"] == "0.55"
+    assert [event.stage for event in events] == [
+        ReconstructionStage.LR_SHAPE_FLOW,
+        ReconstructionStage.LR_SHAPE_LATENT,
+    ]
+    client.shutdown()
+
+
 def test_staged_client_runs_masked_texture_refine(tmp_path):
     root = tmp_path / "pixal3d"
     root.mkdir()
@@ -635,6 +701,37 @@ def test_reconstruction_controller_snapshots_refine_inputs() -> None:
     assert engine.job_id.startswith("reconstruction_refine_")
     assert engine.request.base_checkpoint_path == "/tmp/base.npz"
     assert engine.request.parameters.strength == 0.6
+    assert engine.request.conditioning_image is not condition
+    assert engine.request.mask_image is not mask
+
+
+def test_reconstruction_controller_snapshots_lr_refine_inputs() -> None:
+    class Engine:
+        is_busy = False
+        request = None
+        job_id = None
+
+        def submit_lr_refine_request(self, request, *, job_id=None):
+            self.request = request
+            self.job_id = job_id
+            return True
+
+    engine = Engine()
+    controller = ReconstructionController(engine)
+    condition = Image.new("RGB", (8, 8), "white")
+    mask = Image.new("L", (8, 8), 255)
+
+    event = controller.start_lr_refine(
+        condition,
+        mask,
+        "/tmp/lr-session.npz",
+        parameters=ReconstructionRefineParameters(strength=0.4, steps=9),
+    )
+
+    assert event.status and "LR" in event.status
+    assert engine.job_id.startswith("reconstruction_lr_refine_")
+    assert engine.request.session_checkpoint_path == "/tmp/lr-session.npz"
+    assert engine.request.parameters.steps == 9
     assert engine.request.conditioning_image is not condition
     assert engine.request.mask_image is not mask
 
