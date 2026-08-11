@@ -343,10 +343,23 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar():
             (),
             None,
         )
+        workspace_parameters = ReconstructionParameters(
+            pixal3d_sparse_seed=101,
+            pixal3d_sparse_steps=9,
+        )
         view.update_reconstruction_workspace(
-            ReconstructionBackend.PIXAL3D, workspace
+            ReconstructionBackend.PIXAL3D, workspace, workspace_parameters
         )
         view._select_reconstruction_workspace_operation("sparse.generate")
+        assert view.reconstruction_workspace_parameter_rows[
+            "pixal3d_sparse_seed"
+        ].visible is True
+        assert view.reconstruction_workspace_parameter_rows[
+            "pixal3d_lr_seed"
+        ].visible is False
+        assert view.reconstruction_workspace_parameter_controls[
+            "pixal3d_sparse_seed"
+        ].value == 101
         assert view.reconstruction_workspace_variant_combo.item_count == 1
         assert view.reconstruction_workspace_variant_combo.item_text(0) == (
             "Current generation · ready"
@@ -373,6 +386,12 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar():
         view._run_reconstruction_workspace_operation()
         assert workspace_actions[-1] == (
             "generate_to_operation", "sparse.generate"
+        )
+        view._change_reconstruction_workspace_parameter(
+            "pixal3d_sparse_seed", 202
+        )
+        assert workspace_actions[-1] == (
+            "set_operation_parameter", ("pixal3d_sparse_seed", 202)
         )
         view._select_reconstruction_workspace_operation("lr.refine")
         assert view.reconstruction_workspace_actions[

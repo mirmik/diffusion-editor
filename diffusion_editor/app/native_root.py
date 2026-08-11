@@ -38,12 +38,15 @@ from ..generation.patch_resolver import source_patch_at_center
 from ..generation.types import (
     RECONSTRUCTION_BACKEND_STAGES,
     ReconstructionBackend,
+    ReconstructionParameters,
     ReconstructionRunKind,
     ReconstructionStage,
     ReconstructionStageStatus,
+    pixal3d_resume_parameters_compatible,
 )
 from ..generation.reconstruction_workspace import (
     LEGACY_OPERATION_TARGET_STAGES,
+    PIXAL3D_OPERATION_PARAMETER_KEYS,
     WorkspacePreviewKind,
     build_legacy_workspace,
 )
@@ -872,29 +875,10 @@ class NativeEditorRoot:
                 node.generation_parameters.backend
             ]
             resume_stage = node.resume_stage
-            previous_parameters = node.resume_parameters
-            compatible_parameters = bool(
-                previous_parameters is not None
-                and previous_parameters.backend
-                    is node.generation_parameters.backend
-                and previous_parameters.seed == node.generation_parameters.seed
-                and previous_parameters.steps == node.generation_parameters.steps
-                and previous_parameters.manual_fov_degrees
-                    == node.generation_parameters.manual_fov_degrees
-                and (
-                    resume_stage is ReconstructionStage.SPARSE_OCCUPANCY
-                    or previous_parameters.lr_conditioning_resolution
-                        == node.generation_parameters.lr_conditioning_resolution
-                )
-                and (
-                    resume_stage in {
-                        ReconstructionStage.SPARSE_OCCUPANCY,
-                        ReconstructionStage.LR_SHAPE_FLOW,
-                        ReconstructionStage.LR_SHAPE_LATENT,
-                    }
-                    or previous_parameters.resolution
-                        == node.generation_parameters.resolution
-                )
+            compatible_parameters = pixal3d_resume_parameters_compatible(
+                node.resume_parameters,
+                node.generation_parameters,
+                resume_stage,
             )
             can_resume = bool(
                 node.generation_parameters.backend is ReconstructionBackend.PIXAL3D
@@ -1386,6 +1370,7 @@ class NativeEditorRoot:
                 update_workspace(
                     node.generation_parameters.backend,
                     workspace,
+                    node.generation_parameters,
                     busy=busy,
                 )
             update_refine = getattr(
@@ -1440,6 +1425,48 @@ class NativeEditorRoot:
 
     def _handle_reconstruction_workspace(
             self, action: str, value=None) -> None:
+        if action == "set_operation_parameter":
+            node = self.application.layer_stack.active_layer
+            controller = self.reconstruction_controller
+            if (
+                not isinstance(node, ReconstructionLayer)
+                or (controller is not None and controller.is_busy)
+            ):
+                return
+            try:
+                key, parameter_value = value
+                node.generation_parameters = replace(
+                    node.generation_parameters,
+                    **{str(key): parameter_value},
+                )
+            except (TypeError, ValueError):
+                return
+            self._refresh_reconstruction_panel(node)
+            return
+        if action == "reset_operation_parameters":
+            node = self.application.layer_stack.active_layer
+            controller = self.reconstruction_controller
+            if (
+                not isinstance(node, ReconstructionLayer)
+                or (controller is not None and controller.is_busy)
+            ):
+                return
+            keys = PIXAL3D_OPERATION_PARAMETER_KEYS.get(str(value), ())
+            defaults = ReconstructionParameters()
+            replacements = {}
+            for key in keys:
+                if key.startswith("pixal3d_") and key.endswith("_seed"):
+                    replacements[key] = -1
+                elif key.startswith("pixal3d_") and key.endswith("_steps"):
+                    replacements[key] = 0
+                else:
+                    replacements[key] = getattr(defaults, key)
+            if replacements:
+                node.generation_parameters = replace(
+                    node.generation_parameters, **replacements
+                )
+                self._refresh_reconstruction_panel(node)
+            return
         if action == "generate_to_operation":
             node = self.application.layer_stack.active_layer
             controller = self.reconstruction_controller

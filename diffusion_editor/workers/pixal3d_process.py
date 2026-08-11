@@ -171,6 +171,38 @@ class Pixal3DProcessClient:
                 "--checkpoint", str(checkpoint_path),
                 "--texture-checkpoint", str(texture_checkpoint_path),
                 "--session-checkpoint", str(next_resume_checkpoint),
+                "--sparse-seed", str(
+                    parameters.pixal3d_seed_for("sparse")
+                    if parameters else seed
+                ),
+                "--sparse-steps", str(
+                    parameters.pixal3d_steps_for("sparse")
+                    if parameters else steps
+                ),
+                "--lr-seed", str(
+                    parameters.pixal3d_seed_for("lr")
+                    if parameters else seed
+                ),
+                "--lr-steps", str(
+                    parameters.pixal3d_steps_for("lr")
+                    if parameters else steps
+                ),
+                "--hr-seed", str(
+                    parameters.pixal3d_seed_for("hr")
+                    if parameters else seed
+                ),
+                "--hr-steps", str(
+                    parameters.pixal3d_steps_for("hr")
+                    if parameters else steps
+                ),
+                "--texture-seed", str(
+                    parameters.pixal3d_seed_for("texture")
+                    if parameters else seed
+                ),
+                "--texture-steps", str(
+                    parameters.pixal3d_steps_for("texture")
+                    if parameters else steps
+                ),
             ))
             if resume_checkpoint_path is not None:
                 resume_checkpoint = Path(resume_checkpoint_path)

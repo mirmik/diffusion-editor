@@ -195,6 +195,28 @@ def test_legacy_projection_maps_ready_stages_and_preview_artifacts() -> None:
     assert sparse_artifact.preview_kind is WorkspacePreviewKind.MESH
 
 
+def test_legacy_projection_fingerprints_only_operation_parameters() -> None:
+    statuses = {
+        stage: ReconstructionStageStatus.PENDING
+        for stage in RECONSTRUCTION_STAGES
+    }
+    original = build_legacy_workspace(
+        ReconstructionParameters(pixal3d_lr_seed=20),
+        statuses, {}, (), None,
+    )
+    changed = build_legacy_workspace(
+        ReconstructionParameters(pixal3d_lr_seed=21),
+        statuses, {}, (), None,
+    )
+
+    assert original.operations_for_spec("sparse.generate")[0].fingerprint == (
+        changed.operations_for_spec("sparse.generate")[0].fingerprint
+    )
+    assert original.operations_for_spec("lr.generate")[0].fingerprint != (
+        changed.operations_for_spec("lr.generate")[0].fingerprint
+    )
+
+
 def test_legacy_projection_exposes_refine_runs_as_stage_local_variants() -> None:
     ready_statuses = tuple(
         ReconstructionStageStatus.READY for _stage in RECONSTRUCTION_STAGES

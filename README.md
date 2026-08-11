@@ -160,6 +160,11 @@ checkpoint after sparse occupancy, LR latent, HR coordinates, HR latent and
 texture latent; running a later operation resumes from that state while the
 source and upstream generation parameters remain compatible. Changing the
 source or an upstream parameter deliberately starts a fresh prefix.
+The operation inspector exposes only parameters used by the selected Pixal3D
+operation. Sparse, LR shape, HR shape and texture sampling have independent
+seed and step overrides; until edited they inherit the Legacy values. A
+downstream override may change after resume without invalidating an accepted
+upstream checkpoint, while changing a completed phase invalidates that prefix.
 Planned LR refine and local-detail operations (upscaled conditioning, isolated
 local geometry, registration, fusion, local texture and transfer) remain
 disabled until their resumable runners and artifact contracts are connected.

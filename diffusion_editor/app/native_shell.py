@@ -31,6 +31,7 @@ from ..generation.types import (
 )
 from ..generation.reconstruction_workspace import (
     LEGACY_OPERATION_TARGET_STAGES,
+    PIXAL3D_OPERATION_PARAMETER_KEYS,
     PIXAL3D_PIPELINE,
     ReconstructionWorkspace,
     WorkspaceOperationStatus,
@@ -58,6 +59,22 @@ _RECONSTRUCTION_LR_CONDITIONING_RESOLUTIONS = (512, 1024)
 _RECONSTRUCTION_TEXTURE_SIZES = (1024, 2048, 4096)
 _HI3DGEN_NORMAL_RESOLUTIONS = (512, 768, 1024)
 _HUNYUAN3D21_OCTREE_RESOLUTIONS = (96, 192, 256, 384, 512)
+
+_WORKSPACE_PARAMETER_LABELS = {
+    "manual_fov_degrees": "Camera FOV (0 = Auto)",
+    "pixal3d_sparse_seed": "Sparse seed",
+    "pixal3d_sparse_steps": "Sparse steps",
+    "pixal3d_lr_seed": "LR seed",
+    "pixal3d_lr_steps": "LR steps",
+    "lr_conditioning_resolution": "LR conditioning",
+    "resolution": "HR spatial resolution",
+    "pixal3d_hr_seed": "HR seed",
+    "pixal3d_hr_steps": "HR steps",
+    "pixal3d_texture_seed": "Texture seed",
+    "pixal3d_texture_steps": "Texture steps",
+    "decimation_target": "Final mesh faces",
+    "texture_size": "Texture size",
+}
 
 
 def _set_widget_background(widget, color: SrgbColor) -> None:
@@ -364,6 +381,10 @@ class NativeEditorView:
         self.reconstruction_workspace_artifact_combo = None
         self.reconstruction_workspace_status = None
         self.reconstruction_workspace_actions = {}
+        self.reconstruction_workspace_parameter_controls = {}
+        self.reconstruction_workspace_parameter_rows = {}
+        self.reconstruction_workspace_parameter_reset = None
+        self._reconstruction_workspace_parameters = None
         self._reconstruction_workspace_handler = None
         self._reconstruction_workspace_snapshot = None
         self._reconstruction_workspace_operation_ids = []
@@ -1233,6 +1254,113 @@ class NativeEditorView:
         workspace_content.add_preferred_child(inspector_inputs)
         workspace_content.add_preferred_child(inspector_outputs)
 
+        parameter_caption = self._document.create_label(
+            "Operation parameters",
+            "DiffusionEditorReconstructionWorkspaceInspectorTitle",
+        )
+        parameter_caption.stable_id = (
+            "diffusion-editor.reconstruction.workspace.parameters.title"
+        )
+        parameter_hint = self._document.create_label(
+            "Stage overrides inherit Legacy seed/steps until edited.",
+            "DiffusionEditorReconstructionWorkspaceInspectorText",
+        )
+        parameter_hint.stable_id = (
+            "diffusion-editor.reconstruction.workspace.parameters.hint"
+        )
+        workspace_content.add_preferred_child(parameter_caption)
+        workspace_content.add_preferred_child(parameter_hint)
+        workspace_parameter_controls = {}
+        workspace_parameter_rows = {}
+
+        def add_workspace_spin(
+                key, minimum, maximum, step=1, decimals=0) -> None:
+            row = self._document.create_hstack(
+                "DiffusionEditorReconstructionWorkspaceInspectorRow"
+            )
+            row.stable_id = (
+                f"diffusion-editor.reconstruction.workspace.parameter.{key}.row"
+            )
+            row.set_layout_spacing(4.0)
+            label = self._document.create_label(
+                _WORKSPACE_PARAMETER_LABELS[key],
+                "DiffusionEditorReconstructionWorkspaceInspectorText",
+            )
+            control = self._document.create_spin_box(float(minimum))
+            control.widget.stable_id = (
+                f"diffusion-editor.reconstruction.workspace.parameter.{key}"
+            )
+            control.set_range(float(minimum), float(maximum))
+            control.step = float(step)
+            control.decimals = int(decimals)
+            self._connections.append(control.connect_changed(
+                lambda value, key=key:
+                self._change_reconstruction_workspace_parameter(key, value)
+            ))
+            row.add_flex_child(label, 1.0)
+            row.add_fixed_child(control.widget, 108.0)
+            row.visible = False
+            workspace_parameter_controls[key] = control
+            workspace_parameter_rows[key] = row
+            workspace_content.add_preferred_child(row)
+
+        def add_workspace_combo(key, values) -> None:
+            row = self._document.create_hstack(
+                "DiffusionEditorReconstructionWorkspaceInspectorRow"
+            )
+            row.stable_id = (
+                f"diffusion-editor.reconstruction.workspace.parameter.{key}.row"
+            )
+            row.set_layout_spacing(4.0)
+            label = self._document.create_label(
+                _WORKSPACE_PARAMETER_LABELS[key],
+                "DiffusionEditorReconstructionWorkspaceInspectorText",
+            )
+            control = self._document.create_combo_box()
+            control.widget.stable_id = (
+                f"diffusion-editor.reconstruction.workspace.parameter.{key}"
+            )
+            for value in values:
+                control.add_item(str(value))
+            self._connections.append(control.connect_changed(
+                lambda index, *_rest, key=key, values=values:
+                self._change_reconstruction_workspace_parameter(
+                    key, values[index]
+                )
+            ))
+            row.add_flex_child(label, 1.0)
+            row.add_fixed_child(control.widget, 108.0)
+            row.visible = False
+            workspace_parameter_controls[key] = control
+            workspace_parameter_rows[key] = row
+            workspace_content.add_preferred_child(row)
+
+        for phase in ("sparse", "lr", "hr", "texture"):
+            add_workspace_spin(
+                f"pixal3d_{phase}_seed", 0, 2_147_483_647
+            )
+            add_workspace_spin(f"pixal3d_{phase}_steps", 1, 50)
+        add_workspace_spin("manual_fov_degrees", 0, 120, decimals=1)
+        add_workspace_combo(
+            "lr_conditioning_resolution",
+            _RECONSTRUCTION_LR_CONDITIONING_RESOLUTIONS,
+        )
+        add_workspace_combo("resolution", _RECONSTRUCTION_RESOLUTIONS)
+        add_workspace_spin(
+            "decimation_target", 50_000, 1_000_000, step=10_000
+        )
+        add_workspace_combo("texture_size", _RECONSTRUCTION_TEXTURE_SIZES)
+        parameter_reset = self._document.create_button(
+            "Use Legacy Defaults for This Operation"
+        )
+        parameter_reset.widget.stable_id = (
+            "diffusion-editor.reconstruction.workspace.parameters.reset"
+        )
+        self._connections.append(parameter_reset.connect_clicked(
+            self._reset_reconstruction_workspace_parameters
+        ))
+        workspace_content.add_preferred_child(parameter_reset.widget)
+
         variant_row = self._document.create_hstack(
             "DiffusionEditorReconstructionWorkspaceInspectorRow"
         )
@@ -1341,6 +1469,11 @@ class NativeEditorView:
         self.reconstruction_workspace_artifact_combo = artifact_combo
         self.reconstruction_workspace_status = workspace_status
         self.reconstruction_workspace_actions = workspace_actions
+        self.reconstruction_workspace_parameter_controls = (
+            workspace_parameter_controls
+        )
+        self.reconstruction_workspace_parameter_rows = workspace_parameter_rows
+        self.reconstruction_workspace_parameter_reset = parameter_reset
         self.reconstruction_status = status
         self.reconstruction_panel = panel
         self._select_reconstruction_workspace_operation("source.prepare")
@@ -1415,11 +1548,84 @@ class NativeEditorView:
                 f"Outputs: {outputs}"
             )
         self._refresh_reconstruction_workspace_variants()
+        self._refresh_reconstruction_workspace_parameters()
         self._refresh_reconstruction_workspace_actions()
         self._request_repaint()
 
     def set_reconstruction_workspace_handler(self, handler) -> None:
         self._reconstruction_workspace_handler = handler
+
+    def _change_reconstruction_workspace_parameter(
+            self, key: str, value) -> None:
+        if (
+            self._syncing_reconstruction_workspace
+            or self._reconstruction_workspace_handler is None
+        ):
+            return
+        if key == "manual_fov_degrees":
+            value = float(value)
+        else:
+            value = int(round(float(value)))
+        self._reconstruction_workspace_handler(
+            "set_operation_parameter", (key, value)
+        )
+
+    def _reset_reconstruction_workspace_parameters(self) -> None:
+        if (
+            self._reconstruction_workspace_handler is None
+            or self._selected_reconstruction_workspace_operation is None
+        ):
+            return
+        self._reconstruction_workspace_handler(
+            "reset_operation_parameters",
+            self._selected_reconstruction_workspace_operation,
+        )
+
+    def _refresh_reconstruction_workspace_parameters(self) -> None:
+        parameters = self._reconstruction_workspace_parameters
+        operation = self._selected_reconstruction_workspace_operation
+        visible_keys = set(PIXAL3D_OPERATION_PARAMETER_KEYS.get(
+            operation, ()
+        ))
+        for key, row in self.reconstruction_workspace_parameter_rows.items():
+            row.visible = key in visible_keys
+        reset = self.reconstruction_workspace_parameter_reset
+        if reset is not None:
+            reset.widget.visible = bool(visible_keys)
+            reset.widget.enabled = bool(
+                visible_keys and not self._reconstruction_workspace_busy
+            )
+        if parameters is None:
+            return
+        self._syncing_reconstruction_workspace = True
+        try:
+            for key in visible_keys:
+                control = self.reconstruction_workspace_parameter_controls[key]
+                if key.startswith("pixal3d_") and key.endswith("_seed"):
+                    phase = key.removeprefix("pixal3d_").removesuffix("_seed")
+                    control.value = float(parameters.pixal3d_seed_for(phase))
+                elif key.startswith("pixal3d_") and key.endswith("_steps"):
+                    phase = key.removeprefix("pixal3d_").removesuffix("_steps")
+                    control.value = float(parameters.pixal3d_steps_for(phase))
+                elif key == "lr_conditioning_resolution":
+                    control.selected_index = (
+                        _RECONSTRUCTION_LR_CONDITIONING_RESOLUTIONS.index(
+                            parameters.lr_conditioning_resolution
+                        )
+                    )
+                elif key == "resolution":
+                    control.selected_index = _RECONSTRUCTION_RESOLUTIONS.index(
+                        parameters.resolution
+                    )
+                elif key == "texture_size":
+                    control.selected_index = _RECONSTRUCTION_TEXTURE_SIZES.index(
+                        parameters.texture_size
+                    )
+                else:
+                    control.value = float(getattr(parameters, key))
+                control.widget.enabled = not self._reconstruction_workspace_busy
+        finally:
+            self._syncing_reconstruction_workspace = False
 
     def _change_reconstruction_workspace_variant(
             self, index: int, *_rest) -> None:
@@ -1663,12 +1869,14 @@ class NativeEditorView:
             self,
             backend: ReconstructionBackend,
             workspace: ReconstructionWorkspace | None = None,
+            parameters: ReconstructionParameters | None = None,
             *,
             busy: bool = False,
     ) -> None:
         available = backend is ReconstructionBackend.PIXAL3D
         self._reconstruction_workspace_busy = bool(busy)
         self._reconstruction_workspace_snapshot = workspace
+        self._reconstruction_workspace_parameters = parameters
         if self.reconstruction_workspace_open is not None:
             self.reconstruction_workspace_open.widget.enabled = available
         if self.reconstruction_workspace_backend is not None:
@@ -1693,6 +1901,7 @@ class NativeEditorView:
             )
         self._refresh_reconstruction_workspace_operation_buttons()
         self._refresh_reconstruction_workspace_variants()
+        self._refresh_reconstruction_workspace_parameters()
         self._refresh_reconstruction_workspace_actions()
         if not available and self.reconstruction_workspace_mode:
             self._set_reconstruction_workspace_mode(False)

@@ -576,6 +576,41 @@ LEGACY_OPERATION_TARGET_STAGES = {
     "final.assemble": ReconstructionStage.FINAL_MESH,
 }
 
+# Parameters exposed by the experimental inspector for each currently
+# executable Pixal3D operation. Diffusion phases own independent seed/steps;
+# deterministic transform/decode/assembly operations intentionally do not.
+PIXAL3D_OPERATION_PARAMETER_KEYS = {
+    "source.prepare": ("manual_fov_degrees",),
+    "sparse.generate": ("pixal3d_sparse_seed", "pixal3d_sparse_steps"),
+    "lr.generate": (
+        "pixal3d_lr_seed", "pixal3d_lr_steps",
+        "lr_conditioning_resolution",
+    ),
+    "hr.coordinates": ("resolution",),
+    "hr.generate": ("pixal3d_hr_seed", "pixal3d_hr_steps"),
+    "texture.generate": (
+        "pixal3d_texture_seed", "pixal3d_texture_steps",
+    ),
+    "final.assemble": ("decimation_target", "texture_size"),
+}
+
+
+def pixal3d_operation_parameters(
+    parameters: ReconstructionParameters, operation_key: str
+) -> dict[str, object]:
+    """Return only parameters which can affect one Pixal3D operation."""
+    result = {}
+    for key in PIXAL3D_OPERATION_PARAMETER_KEYS.get(operation_key, ()):
+        if key.startswith("pixal3d_") and key.endswith("_seed"):
+            phase = key.removeprefix("pixal3d_").removesuffix("_seed")
+            result[key] = parameters.pixal3d_seed_for(phase)
+        elif key.startswith("pixal3d_") and key.endswith("_steps"):
+            phase = key.removeprefix("pixal3d_").removesuffix("_steps")
+            result[key] = parameters.pixal3d_steps_for(phase)
+        else:
+            result[key] = getattr(parameters, key)
+    return result
+
 
 _LEGACY_BASE_OPERATIONS = (
     ("source.prepare", (ReconstructionStage.SOURCE_IMAGE,)),
@@ -751,7 +786,11 @@ def build_legacy_workspace(
             operation = workspace.plan_operation(
                 spec_key,
                 input_artifact_ids=tuple(preceding_outputs[-4:]),
-                parameters=parameters.to_dict(),
+                parameters=(
+                    pixal3d_operation_parameters(parameters, spec_key)
+                    if spec_key in PIXAL3D_OPERATION_PARAMETER_KEYS
+                    else parameters.to_dict()
+                ),
                 model_identity="legacy:pixal3d",
                 worker_protocol="legacy-stage-events-v1",
                 variant_label=label,

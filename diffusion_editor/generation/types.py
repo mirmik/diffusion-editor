@@ -191,6 +191,16 @@ class ReconstructionParameters:
     decimation_target: int = 200_000
     texture_size: int = 2048
     low_vram: bool = True
+    # Experimental Pixal3D operation overrides. Negative seeds and zero steps
+    # inherit the legacy ``seed`` / ``steps`` values.
+    pixal3d_sparse_seed: int = -1
+    pixal3d_sparse_steps: int = 0
+    pixal3d_lr_seed: int = -1
+    pixal3d_lr_steps: int = 0
+    pixal3d_hr_seed: int = -1
+    pixal3d_hr_steps: int = 0
+    pixal3d_texture_seed: int = -1
+    pixal3d_texture_steps: int = 0
     spar3d_guidance_scale: float = 3.0
     hi3dgen_slat_steps: int = 6
     hi3dgen_guidance_scale: float = 3.0
@@ -214,6 +224,18 @@ class ReconstructionParameters:
             raise ValueError("reconstruction seed must be in [0, 2147483647]")
         if not 1 <= self.steps <= 50:
             raise ValueError("reconstruction steps must be in [1, 50]")
+        for key in (
+            "pixal3d_sparse_seed", "pixal3d_lr_seed", "pixal3d_hr_seed",
+            "pixal3d_texture_seed",
+        ):
+            if not -1 <= getattr(self, key) <= 2_147_483_647:
+                raise ValueError(f"{key} must be -1 or a valid seed")
+        for key in (
+            "pixal3d_sparse_steps", "pixal3d_lr_steps", "pixal3d_hr_steps",
+            "pixal3d_texture_steps",
+        ):
+            if not 0 <= getattr(self, key) <= 50:
+                raise ValueError(f"{key} must be 0 or in [1, 50]")
         if self.resolution not in (1024, 1280, 1536):
             raise ValueError("reconstruction resolution must be 1024, 1280, or 1536")
         if self.lr_conditioning_resolution not in (512, 1024):
@@ -264,6 +286,14 @@ class ReconstructionParameters:
             "decimation_target": self.decimation_target,
             "texture_size": self.texture_size,
             "low_vram": self.low_vram,
+            "pixal3d_sparse_seed": self.pixal3d_sparse_seed,
+            "pixal3d_sparse_steps": self.pixal3d_sparse_steps,
+            "pixal3d_lr_seed": self.pixal3d_lr_seed,
+            "pixal3d_lr_steps": self.pixal3d_lr_steps,
+            "pixal3d_hr_seed": self.pixal3d_hr_seed,
+            "pixal3d_hr_steps": self.pixal3d_hr_steps,
+            "pixal3d_texture_seed": self.pixal3d_texture_seed,
+            "pixal3d_texture_steps": self.pixal3d_texture_steps,
             "spar3d_guidance_scale": self.spar3d_guidance_scale,
             "hi3dgen_slat_steps": self.hi3dgen_slat_steps,
             "hi3dgen_guidance_scale": self.hi3dgen_guidance_scale,
@@ -299,6 +329,18 @@ class ReconstructionParameters:
             decimation_target=int(payload.get("decimation_target", 200_000)),
             texture_size=int(payload.get("texture_size", 2048)),
             low_vram=bool(payload.get("low_vram", True)),
+            pixal3d_sparse_seed=int(payload.get("pixal3d_sparse_seed", -1)),
+            pixal3d_sparse_steps=int(payload.get("pixal3d_sparse_steps", 0)),
+            pixal3d_lr_seed=int(payload.get("pixal3d_lr_seed", -1)),
+            pixal3d_lr_steps=int(payload.get("pixal3d_lr_steps", 0)),
+            pixal3d_hr_seed=int(payload.get("pixal3d_hr_seed", -1)),
+            pixal3d_hr_steps=int(payload.get("pixal3d_hr_steps", 0)),
+            pixal3d_texture_seed=int(
+                payload.get("pixal3d_texture_seed", -1)
+            ),
+            pixal3d_texture_steps=int(
+                payload.get("pixal3d_texture_steps", 0)
+            ),
             spar3d_guidance_scale=float(
                 payload.get("spar3d_guidance_scale", 3.0)
             ),
@@ -331,6 +373,51 @@ class ReconstructionParameters:
             ),
             sam3d_simplify=float(payload.get("sam3d_simplify", 0.95)),
         )
+
+    def pixal3d_seed_for(self, phase: str) -> int:
+        value = int(getattr(self, f"pixal3d_{phase}_seed"))
+        return self.seed if value < 0 else value
+
+    def pixal3d_steps_for(self, phase: str) -> int:
+        value = int(getattr(self, f"pixal3d_{phase}_steps"))
+        return self.steps if value == 0 else value
+
+
+def pixal3d_resume_parameters_compatible(
+    previous: ReconstructionParameters | None,
+    current: ReconstructionParameters,
+    completed_stage: ReconstructionStage | None,
+) -> bool:
+    """Whether a completed Pixal3D prefix is valid for new downstream params."""
+    if previous is None or completed_stage is None:
+        return False
+    if previous.backend is not current.backend:
+        return False
+    if previous.manual_fov_degrees != current.manual_fov_degrees:
+        return False
+    completed_index = RECONSTRUCTION_STAGES.index(completed_stage)
+    phase_stages = {
+        "sparse": ReconstructionStage.SPARSE_OCCUPANCY,
+        "lr": ReconstructionStage.LR_SHAPE_FLOW,
+        "hr": ReconstructionStage.HR_SHAPE_FLOW,
+        "texture": ReconstructionStage.TEXTURE_FLOW,
+    }
+    for phase, stage in phase_stages.items():
+        if completed_index >= RECONSTRUCTION_STAGES.index(stage):
+            if previous.pixal3d_seed_for(phase) != current.pixal3d_seed_for(phase):
+                return False
+            if previous.pixal3d_steps_for(phase) != current.pixal3d_steps_for(phase):
+                return False
+    if completed_index >= RECONSTRUCTION_STAGES.index(
+            ReconstructionStage.LR_SHAPE_FLOW):
+        if (previous.lr_conditioning_resolution
+                != current.lr_conditioning_resolution):
+            return False
+    if completed_index >= RECONSTRUCTION_STAGES.index(
+            ReconstructionStage.HR_COORDINATES):
+        if previous.resolution != current.resolution:
+            return False
+    return True
 
 
 @dataclass(frozen=True)

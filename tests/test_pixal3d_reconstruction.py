@@ -20,6 +20,7 @@ from diffusion_editor.generation.types import (
     ReconstructionRefineParameters,
     ReconstructionStage,
     ReconstructionStageStatus,
+    pixal3d_resume_parameters_compatible,
 )
 
 
@@ -35,6 +36,14 @@ parser.add_argument('--model_path')
 parser.add_argument('--resolution')
 parser.add_argument('--steps')
 parser.add_argument('--seed')
+parser.add_argument('--sparse-seed')
+parser.add_argument('--sparse-steps')
+parser.add_argument('--lr-seed')
+parser.add_argument('--lr-steps')
+parser.add_argument('--hr-seed')
+parser.add_argument('--hr-steps')
+parser.add_argument('--texture-seed')
+parser.add_argument('--texture-steps')
 parser.add_argument('--decimation-target')
 parser.add_argument('--texture-size')
 parser.add_argument('--manual-fov')
@@ -44,6 +53,24 @@ if Path(args.model_path, 'sleep').exists():
     time.sleep(30)
 Path(args.output).write_bytes(b'glTF-fake')
 """
+
+
+def test_pixal3d_resume_compatibility_only_freezes_completed_phases():
+    previous = ReconstructionParameters(
+        pixal3d_sparse_seed=10,
+        pixal3d_lr_seed=20,
+    )
+    changed_lr = ReconstructionParameters(
+        pixal3d_sparse_seed=10,
+        pixal3d_lr_seed=21,
+    )
+
+    assert pixal3d_resume_parameters_compatible(
+        previous, changed_lr, ReconstructionStage.SPARSE_OCCUPANCY
+    )
+    assert not pixal3d_resume_parameters_compatible(
+        previous, changed_lr, ReconstructionStage.LR_SHAPE_LATENT
+    )
 
 
 _FAKE_STAGED_RUNNER = r"""
@@ -62,6 +89,14 @@ parser.add_argument('--resolution')
 parser.add_argument('--lr-conditioning-resolution')
 parser.add_argument('--steps')
 parser.add_argument('--seed')
+parser.add_argument('--sparse-seed')
+parser.add_argument('--sparse-steps')
+parser.add_argument('--lr-seed')
+parser.add_argument('--lr-steps')
+parser.add_argument('--hr-seed')
+parser.add_argument('--hr-steps')
+parser.add_argument('--texture-seed')
+parser.add_argument('--texture-steps')
 parser.add_argument('--decimation-target')
 parser.add_argument('--texture-size')
 parser.add_argument('--manual-fov')
@@ -259,6 +294,14 @@ def test_staged_client_passes_generation_parameter_snapshot(tmp_path):
         decimation_target=350_000,
         texture_size=4096,
         low_vram=False,
+        pixal3d_sparse_seed=11,
+        pixal3d_sparse_steps=3,
+        pixal3d_lr_seed=22,
+        pixal3d_lr_steps=4,
+        pixal3d_hr_seed=33,
+        pixal3d_hr_steps=5,
+        pixal3d_texture_seed=44,
+        pixal3d_texture_steps=6,
     )
 
     output, _source = client.generate(
@@ -277,6 +320,14 @@ def test_staged_client_passes_generation_parameter_snapshot(tmp_path):
     assert captured["decimation_target"] == "350000"
     assert captured["texture_size"] == "4096"
     assert captured["checkpoint"].endswith("shape-checkpoint.npz")
+    assert captured["sparse_seed"] == "11"
+    assert captured["sparse_steps"] == "3"
+    assert captured["lr_seed"] == "22"
+    assert captured["lr_steps"] == "4"
+    assert captured["hr_seed"] == "33"
+    assert captured["hr_steps"] == "5"
+    assert captured["texture_seed"] == "44"
+    assert captured["texture_steps"] == "6"
     assert float(captured["manual_fov"]) == pytest.approx(math.pi / 4)
     assert captured["low_vram"] is False
     client.shutdown()

@@ -525,6 +525,34 @@ def test_workspace_generate_action_routes_to_legacy_stage() -> None:
     assert node.target_stage is ReconstructionStage.LR_SHAPE_LATENT
 
 
+def test_workspace_parameter_action_updates_stage_override() -> None:
+    stack, _document_service = _document()
+    node = ReconstructionLayer("Workspace")
+    stack.insert_layer(node)
+
+    class Application:
+        layer_stack = stack
+
+    class Controller:
+        is_busy = False
+
+    root = NativeEditorRoot.__new__(NativeEditorRoot)
+    root.application = Application()
+    root.reconstruction_controller = Controller()
+    root._refresh_reconstruction_panel = lambda _node: None
+
+    root._handle_reconstruction_workspace(
+        "set_operation_parameter", ("pixal3d_hr_seed", 777)
+    )
+
+    assert node.generation_parameters.pixal3d_hr_seed == 777
+
+    root._handle_reconstruction_workspace(
+        "reset_operation_parameters", "hr.generate"
+    )
+    assert node.generation_parameters.pixal3d_hr_seed == -1
+
+
 def test_reconstruction_start_resumes_pixal3d_prefix(tmp_path) -> None:
     stack, _document_service = _document()
     node = ReconstructionLayer("Workspace")
@@ -534,6 +562,9 @@ def test_reconstruction_start_resumes_pixal3d_prefix(tmp_path) -> None:
     node.resume_checkpoint_path = str(checkpoint)
     node.resume_stage = ReconstructionStage.SPARSE_OCCUPANCY
     node.resume_parameters = node.generation_parameters
+    node.generation_parameters = ReconstructionParameters(
+        pixal3d_lr_seed=999
+    )
     node.resume_source_sha256 = hashlib.sha256(
         Image.fromarray(stack.composite(), mode="RGBA").tobytes()
     ).hexdigest()

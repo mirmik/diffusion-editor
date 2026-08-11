@@ -1153,16 +1153,21 @@ def run(args) -> None:
         del moge
         torch.cuda.empty_cache()
 
-    torch.manual_seed(args.seed)
-    sampler = {
-        "steps": args.steps,
+    base_sampler = {
         "guidance_strength": 7.5,
         "guidance_rescale": 0.5,
         "rescale_t": 3.0,
     }
-    ss_sampler = {**sampler, "guidance_rescale": 0.7, "rescale_t": 5.0}
+    sparse_sampler = {
+        **base_sampler,
+        "steps": args.sparse_steps,
+        "guidance_rescale": 0.7,
+        "rescale_t": 5.0,
+    }
+    lr_sampler = {**base_sampler, "steps": args.lr_steps}
+    hr_sampler = {**base_sampler, "steps": args.hr_steps}
     tex_sampler = {
-        "steps": args.steps,
+        "steps": args.texture_steps,
         "guidance_strength": 1.0,
         "guidance_rescale": 0.0,
         "rescale_t": 3.0,
@@ -1182,17 +1187,23 @@ def run(args) -> None:
     )
 
     if resume_index < STAGES.index("sparse_occupancy"):
-        reporter.emit("sparse_occupancy", "running", total=args.steps)
+        torch.manual_seed(args.sparse_seed)
+        reporter.emit(
+            "sparse_occupancy", "running", total=args.sparse_steps
+        )
         active_flow["stage"] = "sparse_occupancy"
         cond_ss = pipeline.get_proj_cond_ss([image], **camera)
-        coords = pipeline.sample_sparse_structure(cond_ss, 32, 1, ss_sampler)
+        coords = pipeline.sample_sparse_structure(
+            cond_ss, 32, 1, sparse_sampler
+        )
         del cond_ss
         torch.cuda.empty_cache()
         sparse_preview = _occupancy_preview(
             coords, 32, artifact_root / "sparse-occupancy.glb"
         )
         reporter.emit(
-            "sparse_occupancy", "ready", progress=args.steps, total=args.steps,
+            "sparse_occupancy", "ready", progress=args.sparse_steps,
+            total=args.sparse_steps,
             artifact_path=sparse_preview, preview_kind="mesh",
         )
         _save_session_checkpoint(
@@ -1205,7 +1216,8 @@ def run(args) -> None:
         coords = torch.from_numpy(resume_values["sparse_coords"]).to("cuda")
 
     if resume_index < STAGES.index("lr_shape_flow"):
-        reporter.emit("lr_shape_flow", "running", total=args.steps)
+        torch.manual_seed(args.lr_seed)
+        reporter.emit("lr_shape_flow", "running", total=args.lr_steps)
         active_flow["stage"] = "lr_shape_flow"
         lr_conditioner, lr_grid_override = _lr_conditioner(
             pipeline, args.lr_conditioning_resolution
@@ -1218,11 +1230,15 @@ def run(args) -> None:
             **camera,
         )
         lr_slat = pipeline.sample_shape_slat(
-            cond_lr, pipeline.models["shape_slat_flow_model_512"], coords, sampler
+            cond_lr, pipeline.models["shape_slat_flow_model_512"], coords,
+            lr_sampler,
         )
         del cond_lr
         torch.cuda.empty_cache()
-        reporter.emit("lr_shape_flow", "ready", progress=args.steps, total=args.steps)
+        reporter.emit(
+            "lr_shape_flow", "ready", progress=args.lr_steps,
+            total=args.lr_steps,
+        )
         _save_session_checkpoint(
             session_checkpoint, "lr_shape_flow",
             {"lr_coords": lr_slat.coords, "lr_feats": lr_slat.feats},
@@ -1301,7 +1317,8 @@ def run(args) -> None:
         del lr_slat
 
     if resume_index < STAGES.index("hr_shape_flow"):
-        reporter.emit("hr_shape_flow", "running", total=args.steps)
+        torch.manual_seed(args.hr_seed)
+        reporter.emit("hr_shape_flow", "running", total=args.hr_steps)
         active_flow["stage"] = "hr_shape_flow"
         cond_hr = pipeline.get_proj_cond_shape(
             pipeline.image_cond_model_shape_1024,
@@ -1323,7 +1340,7 @@ def run(args) -> None:
             flow.to(pipeline.device)
         hr_slat = pipeline.shape_slat_sampler.sample(
             flow, noise, **cond_hr,
-            **{**pipeline.shape_slat_sampler_params, **sampler},
+            **{**pipeline.shape_slat_sampler_params, **hr_sampler},
             verbose=True,
             tqdm_desc=f"Sampling HR shape SLat ({actual_hr_resolution})",
         ).samples
@@ -1345,7 +1362,10 @@ def run(args) -> None:
         )
         del cond_hr, noise, hr_coords_unique
         torch.cuda.empty_cache()
-        reporter.emit("hr_shape_flow", "ready", progress=args.steps, total=args.steps)
+        reporter.emit(
+            "hr_shape_flow", "ready", progress=args.hr_steps,
+            total=args.hr_steps,
+        )
         if _reached(target, "hr_shape_flow"):
             return
     else:
@@ -1387,7 +1407,8 @@ def run(args) -> None:
         return
 
     if resume_index < STAGES.index("texture_flow"):
-        reporter.emit("texture_flow", "running", total=args.steps)
+        torch.manual_seed(args.texture_seed)
+        reporter.emit("texture_flow", "running", total=args.texture_steps)
         active_flow["stage"] = "texture_flow"
         cond_tex = pipeline.get_proj_cond_shape(
             pipeline.image_cond_model_tex_1024,
@@ -1404,7 +1425,10 @@ def run(args) -> None:
         )
         del cond_tex
         torch.cuda.empty_cache()
-        reporter.emit("texture_flow", "ready", progress=args.steps, total=args.steps)
+        reporter.emit(
+            "texture_flow", "ready", progress=args.texture_steps,
+            total=args.texture_steps,
+        )
         if args.texture_checkpoint:
             _save_texture_checkpoint(
                 Path(args.texture_checkpoint),
@@ -1518,6 +1542,14 @@ def main() -> int:
         default=512,
     )
     parser.add_argument("--steps", type=int, default=12)
+    parser.add_argument("--sparse-seed", type=int)
+    parser.add_argument("--sparse-steps", type=int)
+    parser.add_argument("--lr-seed", type=int)
+    parser.add_argument("--lr-steps", type=int)
+    parser.add_argument("--hr-seed", type=int)
+    parser.add_argument("--hr-steps", type=int)
+    parser.add_argument("--texture-seed", type=int)
+    parser.add_argument("--texture-steps", type=int)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--decimation-target", type=int, default=200_000)
     parser.add_argument("--texture-size", type=int, default=2048)
@@ -1526,6 +1558,11 @@ def main() -> int:
     parser.add_argument("--manual-fov", type=float, default=-1.0)
     parser.add_argument("--low_vram", action="store_true")
     args = parser.parse_args()
+    for phase in ("sparse", "lr", "hr", "texture"):
+        if getattr(args, f"{phase}_seed") is None:
+            setattr(args, f"{phase}_seed", args.seed)
+        if getattr(args, f"{phase}_steps") is None:
+            setattr(args, f"{phase}_steps", args.steps)
     run(args)
     return 0
 
