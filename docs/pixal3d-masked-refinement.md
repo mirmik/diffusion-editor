@@ -96,15 +96,16 @@ LR, HR geometry and texture refinement store independent sampling parameter
 sets. Each operation therefore has its own strength, step count and seed rather
 than inheriting the values last used by another refine phase. Mask painting is
 intentionally shared: paint/erase mode, brush size, hardness, flow and clear
-live in the separate `Mask tools` block and operate on the same canvas mask.
+live in the separate, always-visible `Mask tools` block near the top of the
+workspace and operate on the same canvas mask.
 
-For LR and HR geometry refinement the final flow step has two distinct
-outputs. The unblended network prediction is decoded to
-`*-refine-generated.glb`; the normal result is produced only after its selected
-tokens are merged with the base latent. The workspace exposes the former as
-`Generated before merge`. Selecting an LR or HR refine operation displays it
-in a dedicated auxiliary 3D viewport beside the main working/merged model, so
-both can be inspected at once without resetting the main camera.
+The auxiliary `Refine output · before merge` viewport belongs to the atomic
+enlarged-refine contract: it must show only the independently generated local
+fragment that is subsequently registered and merged into the working model.
+The internal crop, upscale, local sparse/LR/HR generation and registration
+steps are not user-facing graph operations. The legacy full-grid masked-refine
+path deliberately publishes no artifact into this viewport while LR, HR and
+texture buttons are migrated to the atomic local runners.
 
 ## Masked texture refinement
 

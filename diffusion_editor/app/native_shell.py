@@ -79,18 +79,13 @@ _WORKSPACE_PARAMETER_LABELS = {
     "texture_size": "Texture size",
 }
 
-_WORKSPACE_MASK_OPERATION_KEYS = {
-    "lr.refine",
-    "hr.refine",
-    "local.prepare_roi",
-    "texture.refine",
-}
-
 _WORKSPACE_REFINE_PARAMETER_SCOPES = {
     "lr.refine": ("lr", "LR refine parameters"),
     "hr.refine": ("hr", "HR geometry refine parameters"),
     "texture.refine": ("texture", "Texture refine parameters"),
 }
+
+_WORKSPACE_INTERNAL_GROUP_KEYS = {"local"}
 
 
 def _set_widget_background(widget, color: SrgbColor) -> None:
@@ -1230,11 +1225,21 @@ class NativeEditorView:
         workspace_content.add_preferred_child(workspace_notice)
         workspace_content.add_preferred_child(back_to_legacy.widget)
         workspace_content.add_preferred_child(workspace_backend)
+        workspace_common_tools = self._document.create_vstack(
+            "DiffusionEditorReconstructionWorkspaceCommonTools"
+        )
+        workspace_common_tools.stable_id = (
+            "diffusion-editor.reconstruction.workspace.common-tools"
+        )
+        workspace_common_tools.set_layout_spacing(3.0)
+        workspace_content.add_preferred_child(workspace_common_tools)
 
         workspace_group_buttons = {}
         workspace_operation_buttons = {}
         workspace_operation_rows = {}
         for group in PIXAL3D_PIPELINE.groups:
+            if group.key in _WORKSPACE_INTERNAL_GROUP_KEYS:
+                continue
             group_row = self._document.create_hstack(
                 "DiffusionEditorReconstructionWorkspaceGroup"
             )
@@ -1533,8 +1538,8 @@ class NativeEditorView:
         ))
         workspace_mask_controls["clear"] = clear_workspace_mask
         workspace_mask_panel.add_preferred_child(clear_workspace_mask.widget)
-        workspace_mask_panel.visible = False
-        workspace_content.add_preferred_child(workspace_mask_panel)
+        workspace_mask_panel.visible = True
+        workspace_common_tools.add_preferred_child(workspace_mask_panel)
 
         workspace_refine_parameters_panel = self._document.create_vstack(
             "DiffusionEditorReconstructionWorkspaceRefineParameters"
@@ -1897,6 +1902,8 @@ class NativeEditorView:
 
     def _refresh_reconstruction_workspace_groups(self) -> None:
         for group in PIXAL3D_PIPELINE.groups:
+            if group.key in _WORKSPACE_INTERNAL_GROUP_KEYS:
+                continue
             expanded = (
                 group.key in self._expanded_reconstruction_workspace_groups
             )
@@ -1967,10 +1974,6 @@ class NativeEditorView:
             )
         self._refresh_reconstruction_workspace_refine_sources()
         self._refresh_reconstruction_workspace_parameters()
-        if self.reconstruction_workspace_mask_panel is not None:
-            self.reconstruction_workspace_mask_panel.visible = (
-                key in _WORKSPACE_MASK_OPERATION_KEYS
-            )
         self._refresh_reconstruction_workspace_refine_parameters()
         self._refresh_reconstruction_workspace_actions()
         if self._reconstruction_workspace_handler is not None:

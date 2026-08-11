@@ -306,24 +306,13 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar(
         assert view._reconstruction_refine_view_visible is False
         assert view.reconstruction_workspace_mode is False
         assert view.reconstruction_workspace_open.widget.enabled is True
+        assert view.reconstruction_workspace_mask_panel.visible is True
         assert "lr.refine" in view.reconstruction_workspace_operation_buttons
-        assert (
-            "local.upscale"
-            in view.reconstruction_workspace_operation_buttons
+        assert "local.upscale" not in (
+            view.reconstruction_workspace_operation_buttons
         )
-        assert (
-            "local.generate_geometry"
-            in view.reconstruction_workspace_operation_buttons
-        )
-        view._select_reconstruction_workspace_operation("local.upscale")
-        assert view.reconstruction_workspace_operation_rows[
-            "local.upscale"
-        ].visible is True
-        assert view.reconstruction_workspace_inspector_title.text == (
-            "Upscale local conditioning"
-        )
-        assert "SR/upscaled condition" in (
-            view.reconstruction_workspace_inspector_outputs.text
+        assert "local.generate_geometry" not in (
+            view.reconstruction_workspace_operation_buttons
         )
         workspace_statuses = {
             stage: ReconstructionStageStatus.PENDING
@@ -465,7 +454,7 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar(
         view.reconstruction_workspace_mask_controls["paint"].checked = True
         assert workspace_refine_actions == [("paint", True)]
         view._select_reconstruction_workspace_operation("sparse.generate")
-        assert view.reconstruction_workspace_mask_panel.visible is False
+        assert view.reconstruction_workspace_mask_panel.visible is True
         assert view.reconstruction_workspace_refine_source_row.visible is False
         view._select_reconstruction_workspace_operation("hr.refine")
         assert view.reconstruction_workspace_mask_panel.visible is True

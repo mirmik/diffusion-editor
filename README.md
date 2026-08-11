@@ -169,7 +169,8 @@ Masked LR, HR geometry and texture refinement likewise own independent
 strength, step and seed settings (with distinct default seeds and a contextual
 Random button). Their controls follow the selected refine operation. Paint,
 erase, brush size/hardness/flow and mask clearing remain in one separate shared
-`Mask tools` block.
+`Mask tools` block. This block stays visible near the top of the experimental
+workspace regardless of the currently selected pipeline operation.
 The project-owned Pixal3D runner normally stays alive between base and refine
 operations. It loads the pipeline once and caches source preprocessing plus
 automatic camera estimation by source content. Cancellation, protocol/runtime
@@ -183,12 +184,12 @@ consume. Base LR and every Refined LR result remain separate session-local
 variants. `Generate LR shape` always exposes Base LR; `Refine LR shape` exposes
 the refined variants and a separate `Refine source` selector, which defaults to
 Base LR. Preview selection does not silently change the next refine source.
-LR and HR geometry refine also export the last network prediction before the
-mask merge as `Generated before merge`. While either refine operation is
-selected, the editor keeps the working/merged model in the main viewport and
-shows this raw proposal simultaneously in a second viewport. The auxiliary
-view is hidden for unrelated operations and changing its artifact does not
-reset the main camera.
+The auxiliary `Refine output · before merge` viewport is reserved for the
+enlarged local fragment produced by an atomic refine before it is merged into
+the working model. Internal crop/upscale/local-generation/registration stages
+are intentionally hidden from the user-facing graph. Legacy full-grid masked
+refine does not publish a substitute artifact into this view; wiring the
+atomic local runners for LR, HR and texture remains migration work.
 Local-detail operations (upscaled conditioning, isolated local geometry,
 registration, fusion, local texture and transfer) remain disabled until their
 resumable runners and artifact contracts are connected.

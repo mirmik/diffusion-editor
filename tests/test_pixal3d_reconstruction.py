@@ -147,8 +147,6 @@ if args.session_checkpoint:
     Path(args.session_checkpoint).write_bytes(b'npz-resume')
 if args.lr_refine_checkpoint:
     Path(args.output).write_bytes(b'glTF-lr-refined')
-    Path(args.output).with_name('lr-refine-generated.glb').write_bytes(
-        b'glTF-lr-generated')
     with Path(args.events).open('w') as stream:
         stream.write(json.dumps({
             'stage': 'lr_shape_flow',
@@ -182,8 +180,6 @@ if args.texture_refine_checkpoint:
     raise SystemExit(0)
 if args.refine_checkpoint:
     Path(args.output).write_bytes(b'glTF-refined')
-    Path(args.output).with_name('hr-refine-generated.glb').write_bytes(
-        b'glTF-hr-generated')
     Path(args.checkpoint).write_bytes(b'npz-refined')
     Path(args.texture_checkpoint).write_bytes(b'npz-texture')
     with Path(args.events).open('w') as stream:
@@ -543,8 +539,7 @@ def test_staged_client_runs_masked_refine_as_separate_artifact(tmp_path):
     assert client.checkpoint_path.read_bytes() == b"npz-refined"
     assert client.texture_checkpoint_path is not None
     assert client.texture_checkpoint_path.read_bytes() == b"npz-texture"
-    assert client.refine_generated_path is not None
-    assert client.refine_generated_path.read_bytes() == b"glTF-hr-generated"
+    assert client.refine_generated_path is None
     assert captured["refine_checkpoint"] == str(base_checkpoint)
     assert captured["refine_strength"] == "0.6"
     assert captured["refine_steps"] == "8"
@@ -595,8 +590,7 @@ def test_staged_client_runs_masked_lr_refine_to_resume_checkpoint(tmp_path):
     assert source.is_file()
     assert client.resume_checkpoint_path is not None
     assert client.resume_checkpoint_path.read_bytes() == b"npz-resume"
-    assert client.refine_generated_path is not None
-    assert client.refine_generated_path.read_bytes() == b"glTF-lr-generated"
+    assert client.refine_generated_path is None
     assert captured["lr_refine_checkpoint"] == str(base_checkpoint)
     assert captured["lr_conditioning_resolution"] == "1024"
     assert captured["resolution"] == "1536"

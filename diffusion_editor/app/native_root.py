@@ -2006,11 +2006,6 @@ class NativeEditorRoot:
             viewport = self._ensure_reconstruction_refine_viewport()
         except RuntimeError:
             return
-        set_visible = getattr(
-            self.view, "set_reconstruction_refine_view_visible", None
-        )
-        if callable(set_visible):
-            set_visible(True)
         operation = None
         if workspace is not None and operation_id:
             try:
@@ -2036,10 +2031,13 @@ class NativeEditorRoot:
             )
         path = generated.path if generated is not None else None
         if not path or not os.path.isfile(path):
-            if self._presented_refine_artifact_path is not None:
-                viewport.clear_model()
-                self._presented_refine_artifact_path = None
+            self._hide_reconstruction_refine_output()
             return
+        set_visible = getattr(
+            self.view, "set_reconstruction_refine_view_visible", None
+        )
+        if callable(set_visible):
+            set_visible(True)
         if path != self._presented_refine_artifact_path:
             viewport.load_glb(path)
             self._presented_refine_artifact_path = path
