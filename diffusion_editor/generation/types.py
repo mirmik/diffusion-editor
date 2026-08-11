@@ -511,6 +511,7 @@ class ReconstructionRequest:
     image: Image.Image
     parameters: ReconstructionParameters = ReconstructionParameters()
     target_stage: ReconstructionStage = ReconstructionStage.FINAL_MESH
+    resume_checkpoint_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -558,6 +559,7 @@ class ReconstructionResult:
     conditioning_path: str | None = None
     checkpoint_path: str | None = None
     texture_checkpoint_path: str | None = None
+    resume_checkpoint_path: str | None = None
     backend: ReconstructionBackend = ReconstructionBackend.PIXAL3D
 
 

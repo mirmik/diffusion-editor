@@ -49,6 +49,10 @@ class ReconstructionLayer(Layer):
         self.refine_parameters = ReconstructionRefineParameters()
         self.runs: tuple[ReconstructionRun, ...] = ()
         self.active_run_id: str | None = None
+        self.resume_checkpoint_path: str | None = None
+        self.resume_stage: ReconstructionStage | None = None
+        self.resume_source_sha256: str | None = None
+        self.resume_parameters: ReconstructionParameters | None = None
         self._initialize_stage_state()
 
     @property
@@ -87,7 +91,9 @@ class ReconstructionLayer(Layer):
             ReconstructionStage, ReconstructionStageArtifact
         ] = {}
 
-    def begin_staged_generation(self) -> None:
+    def begin_staged_generation(
+        self, resume_from: ReconstructionStage | None = None
+    ) -> None:
         supported = RECONSTRUCTION_BACKEND_STAGES[
             self.generation_parameters.backend
         ]
@@ -95,13 +101,22 @@ class ReconstructionLayer(Layer):
             self.target_stage = ReconstructionStage.FINAL_MESH
         target_index = supported.index(self.target_stage)
         for stage in RECONSTRUCTION_STAGES:
+            if (
+                resume_from is not None
+                and stage in supported
+                and supported.index(stage) <= supported.index(resume_from)
+            ):
+                # Keep accepted previews and progress for the prefix which the
+                # worker is going to restore from its checkpoint.
+                continue
             self.stage_statuses[stage] = (
                 ReconstructionStageStatus.PENDING
                 if stage in supported and supported.index(stage) <= target_index
                 else ReconstructionStageStatus.SKIPPED
             )
             self.stage_progress[stage] = (0, 0)
-        self.stage_artifacts.clear()
+        if resume_from is None:
+            self.stage_artifacts.clear()
 
     def apply_stage_event(self, event: ReconstructionStageEvent) -> None:
         self.stage_statuses[event.stage] = event.status
@@ -143,6 +158,10 @@ class ReconstructionLayer(Layer):
         layer.mesh_count = int(state.get("mesh_count", 0))
         layer.runs = ()
         layer.active_run_id = None
+        layer.resume_checkpoint_path = None
+        layer.resume_stage = None
+        layer.resume_source_sha256 = None
+        layer.resume_parameters = None
         try:
             layer.generation_parameters = ReconstructionParameters.from_dict(
                 state.get("generation_parameters")

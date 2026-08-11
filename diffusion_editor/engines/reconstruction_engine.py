@@ -94,13 +94,20 @@ class ReconstructionEngine:
             ReconstructionBackend.HUNYUAN3D21: self._hunyuan3d21_client,
             ReconstructionBackend.SAM3D_OBJECTS: self._sam3d_objects_client,
         }[request.parameters.backend]
+        generate_kwargs = {
+            "parameters": request.parameters,
+            "target_stage": request.target_stage,
+            "on_event": emit,
+        }
+        if request.parameters.backend is ReconstructionBackend.PIXAL3D:
+            generate_kwargs["resume_checkpoint_path"] = (
+                request.resume_checkpoint_path
+            )
         glb_path, source_path = client.generate(
             request.image,
             request.parameters.seed,
             cancel,
-            parameters=request.parameters,
-            target_stage=request.target_stage,
-            on_event=emit,
+            **generate_kwargs,
         )
         return ReconstructionResult(
             glb_path=str(glb_path),
@@ -119,6 +126,11 @@ class ReconstructionEngine:
             texture_checkpoint_path=(
                 str(client.texture_checkpoint_path)
                 if client.texture_checkpoint_path else None
+            ),
+            resume_checkpoint_path=(
+                str(client.resume_checkpoint_path)
+                if request.parameters.backend is ReconstructionBackend.PIXAL3D
+                and client.resume_checkpoint_path else None
             ),
             backend=request.parameters.backend,
         )

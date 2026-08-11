@@ -68,6 +68,7 @@ class Pixal3DProcessClient:
         self._artifacts: list[ReconstructionStageArtifact] = []
         self._checkpoint_path: Path | None = None
         self._texture_checkpoint_path: Path | None = None
+        self._resume_checkpoint_path: Path | None = None
         self._conditioning_path: Path | None = None
         self._backend_label = "Pixal3D"
         self._environment_overrides: dict[str, str] = {}
@@ -88,6 +89,10 @@ class Pixal3DProcessClient:
     def texture_checkpoint_path(self) -> Path | None:
         return self._texture_checkpoint_path
 
+    @property
+    def resume_checkpoint_path(self) -> Path | None:
+        return self._resume_checkpoint_path
+
     def generate(
         self,
         image: Image.Image,
@@ -96,6 +101,7 @@ class Pixal3DProcessClient:
         *,
         parameters: ReconstructionParameters | None = None,
         target_stage: ReconstructionStage = ReconstructionStage.FINAL_MESH,
+        resume_checkpoint_path: str | Path | None = None,
         on_event: Callable[[ReconstructionStageEvent], None] | None = None,
     ) -> tuple[Path, Path]:
         self._validate_runtime()
@@ -107,8 +113,10 @@ class Pixal3DProcessClient:
         events_path = artifact_root / "events.jsonl"
         checkpoint_path = artifact_root / "shape-checkpoint.npz"
         texture_checkpoint_path = artifact_root / "texture-checkpoint.npz"
+        next_resume_checkpoint = artifact_root / "resume-checkpoint.npz"
         self._checkpoint_path = None
         self._texture_checkpoint_path = None
+        self._resume_checkpoint_path = None
         self._conditioning_path = None
         image.convert("RGBA").save(source_path, format="PNG")
         self._artifacts = [ReconstructionStageArtifact(
@@ -162,7 +170,15 @@ class Pixal3DProcessClient:
                 str(lr_conditioning_resolution),
                 "--checkpoint", str(checkpoint_path),
                 "--texture-checkpoint", str(texture_checkpoint_path),
+                "--session-checkpoint", str(next_resume_checkpoint),
             ))
+            if resume_checkpoint_path is not None:
+                resume_checkpoint = Path(resume_checkpoint_path)
+                if not resume_checkpoint.is_file():
+                    raise RuntimeError(
+                        f"Pixal3D resume checkpoint not found: {resume_checkpoint}"
+                    )
+                command.extend(("--resume-checkpoint", str(resume_checkpoint)))
         elif manual_fov > 0.0:
             command.extend(("--fov", str(manual_fov)))
         if low_vram:
@@ -173,6 +189,8 @@ class Pixal3DProcessClient:
             self._checkpoint_path = checkpoint_path
         if texture_checkpoint_path.is_file():
             self._texture_checkpoint_path = texture_checkpoint_path
+        if next_resume_checkpoint.is_file():
+            self._resume_checkpoint_path = next_resume_checkpoint
         preprocessed = artifact_root / "preprocessed.png"
         if preprocessed.is_file():
             self._conditioning_path = preprocessed

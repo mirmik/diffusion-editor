@@ -46,6 +46,7 @@ class ReconstructionController:
         seed: int | None = None,
         parameters: ReconstructionParameters | None = None,
         target_stage: ReconstructionStage = ReconstructionStage.FINAL_MESH,
+        resume_checkpoint_path: str | None = None,
     ) -> ReconstructionControllerEvent:
         if self.is_busy:
             return ReconstructionControllerEvent()
@@ -57,13 +58,18 @@ class ReconstructionController:
             image=image.copy(),
             parameters=snapshot,
             target_stage=target_stage,
+            resume_checkpoint_path=resume_checkpoint_path,
         )
         if not self._engine.submit_request(request, job_id=job_id):
             return ReconstructionControllerEvent()
         self._active_job_id = job_id
         backend = RECONSTRUCTION_BACKEND_LABELS[snapshot.backend]
         return ReconstructionControllerEvent(
-            status=f"Generating 3D model with {backend}..."
+            status=(
+                f"Resuming 3D generation with {backend}..."
+                if resume_checkpoint_path
+                else f"Generating 3D model with {backend}..."
+            )
         )
 
     def start_refine(

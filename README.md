@@ -155,7 +155,11 @@ Its read-through adapter projects current legacy stage progress, completed run
 variants, checkpoints and preview artifacts into the operation graph without
 writing back to the legacy run. Existing mesh and point artifacts can be
 previewed, and connected base operations can invoke the shared legacy worker
-through the selected milestone; this currently recomputes earlier stages.
+through the selected milestone. Pixal3D writes an atomic, pickle-free session
+checkpoint after sparse occupancy, LR latent, HR coordinates, HR latent and
+texture latent; running a later operation resumes from that state while the
+source and upstream generation parameters remain compatible. Changing the
+source or an upstream parameter deliberately starts a fresh prefix.
 Planned LR refine and local-detail operations (upscaled conditioning, isolated
 local geometry, registration, fusion, local texture and transfer) remain
 disabled until their resumable runners and artifact contracts are connected.

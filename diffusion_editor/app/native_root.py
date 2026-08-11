@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from functools import partial
+import hashlib
 import os
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
@@ -866,14 +867,59 @@ class NativeEditorRoot:
             self._ensure_reconstruction_viewport()
             composite = stack.composite()
             image = Image.fromarray(composite, mode="RGBA")
-            node.begin_staged_generation()
-            self._refresh_reconstruction_panel(node)
-            event = controller.start(
-                image,
-                parameters=node.generation_parameters,
-                target_stage=node.target_stage,
+            source_sha256 = hashlib.sha256(image.tobytes()).hexdigest()
+            supported = RECONSTRUCTION_BACKEND_STAGES[
+                node.generation_parameters.backend
+            ]
+            resume_stage = node.resume_stage
+            previous_parameters = node.resume_parameters
+            compatible_parameters = bool(
+                previous_parameters is not None
+                and previous_parameters.backend
+                    is node.generation_parameters.backend
+                and previous_parameters.seed == node.generation_parameters.seed
+                and previous_parameters.steps == node.generation_parameters.steps
+                and previous_parameters.manual_fov_degrees
+                    == node.generation_parameters.manual_fov_degrees
+                and (
+                    resume_stage is ReconstructionStage.SPARSE_OCCUPANCY
+                    or previous_parameters.lr_conditioning_resolution
+                        == node.generation_parameters.lr_conditioning_resolution
+                )
+                and (
+                    resume_stage in {
+                        ReconstructionStage.SPARSE_OCCUPANCY,
+                        ReconstructionStage.LR_SHAPE_FLOW,
+                        ReconstructionStage.LR_SHAPE_LATENT,
+                    }
+                    or previous_parameters.resolution
+                        == node.generation_parameters.resolution
+                )
             )
+            can_resume = bool(
+                node.generation_parameters.backend is ReconstructionBackend.PIXAL3D
+                and resume_stage in supported
+                and node.target_stage in supported
+                and supported.index(node.target_stage) > supported.index(resume_stage)
+                and node.resume_checkpoint_path
+                and os.path.isfile(node.resume_checkpoint_path)
+                and node.resume_source_sha256 == source_sha256
+                and compatible_parameters
+            )
+            node.begin_staged_generation(resume_stage if can_resume else None)
+            self._refresh_reconstruction_panel(node)
+            start_kwargs = {
+                "parameters": node.generation_parameters,
+                "target_stage": node.target_stage,
+            }
+            if can_resume:
+                start_kwargs["resume_checkpoint_path"] = (
+                    node.resume_checkpoint_path
+                )
+            event = controller.start(image, **start_kwargs)
             if event.status:
+                self._reconstruction_job_source_sha256 = source_sha256
+                self._reconstruction_job_parameters = node.generation_parameters
                 self._reconstruction_job_node_id = node.id
                 self._reconstruction_parent_run_id = None
                 self._set_reconstruction_status(
@@ -1100,6 +1146,15 @@ class NativeEditorRoot:
         parent_run_id = getattr(self, "_reconstruction_parent_run_id", None)
         self._reconstruction_parent_run_id = None
         if event.result is not None:
+            if event.result.resume_checkpoint_path:
+                node.resume_checkpoint_path = event.result.resume_checkpoint_path
+                node.resume_stage = event.result.completed_stage
+                node.resume_source_sha256 = getattr(
+                    self, "_reconstruction_job_source_sha256", None
+                )
+                node.resume_parameters = getattr(
+                    self, "_reconstruction_job_parameters", None
+                )
             if event.result.completed_stage is not ReconstructionStage.FINAL_MESH:
                 self._set_reconstruction_status(node, ReconstructionStatus.READY)
                 self._refresh_reconstruction_panel(node)

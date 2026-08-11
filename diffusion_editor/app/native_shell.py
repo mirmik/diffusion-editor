@@ -1272,7 +1272,7 @@ class NativeEditorView:
         workspace_actions = {}
         for key, label in (
             ("preview", "Preview Artifact"),
-            ("generate", "Run Through Selected · Legacy"),
+            ("generate", "Run / Resume Through Selected"),
             ("refine", "Refine Selected"),
             ("accept", "Accept and Continue"),
         ):
@@ -1292,7 +1292,7 @@ class NativeEditorView:
             workspace_actions[key] = button
             workspace_content.add_preferred_child(button.widget)
         workspace_status = self._document.create_label(
-            "Graph execution is not connected in this first safe slice.",
+            "Base Pixal3D stages resume from the latest compatible checkpoint.",
             "DiffusionEditorReconstructionWorkspaceNotice",
         )
         workspace_status.stable_id = (

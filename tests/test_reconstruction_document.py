@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import numpy as np
 from PIL import Image
 
@@ -522,6 +523,93 @@ def test_workspace_generate_action_routes_to_legacy_stage() -> None:
 
     assert started == [ReconstructionStage.LR_SHAPE_LATENT]
     assert node.target_stage is ReconstructionStage.LR_SHAPE_LATENT
+
+
+def test_reconstruction_start_resumes_pixal3d_prefix(tmp_path) -> None:
+    stack, _document_service = _document()
+    node = ReconstructionLayer("Workspace")
+    stack.insert_layer(node)
+    checkpoint = tmp_path / "resume.npz"
+    checkpoint.write_bytes(b"checkpoint")
+    node.resume_checkpoint_path = str(checkpoint)
+    node.resume_stage = ReconstructionStage.SPARSE_OCCUPANCY
+    node.resume_parameters = node.generation_parameters
+    node.resume_source_sha256 = hashlib.sha256(
+        Image.fromarray(stack.composite(), mode="RGBA").tobytes()
+    ).hexdigest()
+    node.target_stage = ReconstructionStage.LR_SHAPE_LATENT
+    node.stage_statuses[ReconstructionStage.SPARSE_OCCUPANCY] = (
+        ReconstructionStageStatus.READY
+    )
+
+    class Application:
+        layer_stack = stack
+        def set_status(self, _value):
+            pass
+
+    class Controller:
+        is_busy = False
+        calls = []
+        def start(self, image, **kwargs):
+            self.calls.append(kwargs)
+            return ReconstructionControllerEvent(status="Resuming")
+
+    root = NativeEditorRoot.__new__(NativeEditorRoot)
+    root.application = Application()
+    root.reconstruction_controller = Controller()
+    root._ensure_reconstruction_viewport = lambda: None
+    root._refresh_reconstruction_panel = lambda _node: None
+    root._set_reconstruction_status = lambda _node, _status: None
+    root._reconstruction_job_node_id = None
+
+    root._start_reconstruction()
+
+    assert root.reconstruction_controller.calls[0][
+        "resume_checkpoint_path"
+    ] == str(checkpoint)
+    assert node.stage_statuses[ReconstructionStage.SPARSE_OCCUPANCY] is (
+        ReconstructionStageStatus.READY
+    )
+
+
+def test_reconstruction_start_invalidates_resume_after_source_change(
+        tmp_path) -> None:
+    stack, _document_service = _document()
+    node = ReconstructionLayer("Workspace")
+    stack.insert_layer(node)
+    checkpoint = tmp_path / "resume.npz"
+    checkpoint.write_bytes(b"checkpoint")
+    node.resume_checkpoint_path = str(checkpoint)
+    node.resume_stage = ReconstructionStage.SPARSE_OCCUPANCY
+    node.resume_parameters = node.generation_parameters
+    node.resume_source_sha256 = "different-source"
+    node.target_stage = ReconstructionStage.LR_SHAPE_LATENT
+
+    class Application:
+        layer_stack = stack
+        def set_status(self, _value):
+            pass
+
+    class Controller:
+        is_busy = False
+        calls = []
+        def start(self, image, **kwargs):
+            self.calls.append(kwargs)
+            return ReconstructionControllerEvent(status="Fresh")
+
+    root = NativeEditorRoot.__new__(NativeEditorRoot)
+    root.application = Application()
+    root.reconstruction_controller = Controller()
+    root._ensure_reconstruction_viewport = lambda: None
+    root._refresh_reconstruction_panel = lambda _node: None
+    root._set_reconstruction_status = lambda _node, _status: None
+
+    root._start_reconstruction()
+
+    assert "resume_checkpoint_path" not in root.reconstruction_controller.calls[0]
+    assert node.stage_statuses[ReconstructionStage.SPARSE_OCCUPANCY] is (
+        ReconstructionStageStatus.PENDING
+    )
 
 
 def test_workspace_preview_loads_graph_mesh_without_changing_legacy_stage(

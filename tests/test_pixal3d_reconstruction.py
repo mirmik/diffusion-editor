@@ -67,6 +67,8 @@ parser.add_argument('--texture-size')
 parser.add_argument('--manual-fov')
 parser.add_argument('--checkpoint')
 parser.add_argument('--texture-checkpoint')
+parser.add_argument('--session-checkpoint')
+parser.add_argument('--resume-checkpoint')
 parser.add_argument('--refine-checkpoint')
 parser.add_argument('--texture-refine-checkpoint')
 parser.add_argument('--refine-mask')
@@ -79,6 +81,8 @@ parser.add_argument('--resize-refine-detail', action='store_true')
 parser.add_argument('--low_vram', action='store_true')
 args = parser.parse_args()
 Path(args.output).with_name('parameters.json').write_text(json.dumps(vars(args)))
+if args.session_checkpoint:
+    Path(args.session_checkpoint).write_bytes(b'npz-resume')
 if args.texture_refine_checkpoint:
     Path(args.output).write_bytes(b'glTF-texture-refined')
     Path(args.texture_checkpoint).write_bytes(b'npz-texture-refined')
@@ -116,15 +120,16 @@ if args.refine_checkpoint:
     raise SystemExit(0)
 preview = Path(args.output).with_name('sparse.glb')
 preview.write_bytes(b'glTF-preview')
+reported_stage = 'lr_shape_flow' if args.resume_checkpoint else 'sparse_occupancy'
 with Path(args.events).open('w') as stream:
     stream.write(json.dumps({
-        'stage': 'sparse_occupancy',
+        'stage': reported_stage,
         'status': 'running',
         'progress': 1,
         'total': 2,
     }) + '\n')
     stream.write(json.dumps({
-        'stage': 'sparse_occupancy',
+        'stage': reported_stage,
         'status': 'ready',
         'progress': 2,
         'total': 2,
@@ -277,6 +282,48 @@ def test_staged_client_passes_generation_parameter_snapshot(tmp_path):
     client.shutdown()
 
 
+def test_staged_client_passes_previous_session_checkpoint_for_resume(tmp_path):
+    root = tmp_path / "pixal3d"
+    root.mkdir()
+    runner = tmp_path / "staged.py"
+    runner.write_text(_FAKE_STAGED_RUNNER)
+    model = tmp_path / "model"
+    model.mkdir()
+    client = Pixal3DProcessClient(
+        python=sys.executable,
+        root=root,
+        model_path=model,
+        runner_path=runner,
+        staged=True,
+    )
+
+    client.generate(
+        Image.new("RGB", (4, 3)), 7, threading.Event(),
+        target_stage=ReconstructionStage.SPARSE_OCCUPANCY,
+    )
+    previous = client.resume_checkpoint_path
+    assert previous is not None and previous.read_bytes() == b"npz-resume"
+
+    resumed_events = []
+    output, _source = client.generate(
+        Image.new("RGB", (4, 3)), 7, threading.Event(),
+        target_stage=ReconstructionStage.LR_SHAPE_LATENT,
+        resume_checkpoint_path=previous,
+        on_event=resumed_events.append,
+    )
+    captured = json.loads(output.with_name("parameters.json").read_text())
+    assert captured["resume_checkpoint"] == str(previous)
+    assert client.resume_checkpoint_path is not None
+    assert client.resume_checkpoint_path != previous
+    assert ReconstructionStage.SPARSE_OCCUPANCY not in {
+        event.stage for event in resumed_events
+    }
+    assert ReconstructionStage.LR_SHAPE_FLOW in {
+        event.stage for event in resumed_events
+    }
+    client.shutdown()
+
+
 def test_staged_client_runs_masked_refine_as_separate_artifact(tmp_path):
     root = tmp_path / "pixal3d"
     root.mkdir()
@@ -394,6 +441,7 @@ def test_reconstruction_controller_reports_worker_result(tmp_path):
 
     assert event is not None and event.result is not None
     assert event.result.glb_path.endswith("model.glb")
+    assert event.result.resume_checkpoint_path is None
     assert stage_events[0].stage.value == "source_image"
     engine.shutdown()
 

@@ -255,6 +255,77 @@ def _save_shape_checkpoint(
     return path
 
 
+def _save_session_checkpoint(
+    path: Path | None,
+    stage: str,
+    tensors: dict,
+    resolution: int,
+    camera: dict,
+    source_path: Path,
+    model_path: str,
+) -> Path | None:
+    """Persist the smallest state needed to continue after ``stage``.
+
+    Session checkpoints are deliberately pickle-free.  They are separate from
+    the HR refine checkpoint because early stages do not have an HR latent yet.
+    """
+    if path is None:
+        return None
+    import numpy as np
+    import torch
+
+    payload = {
+        "protocol_version": np.asarray([1], dtype=np.int32),
+        "completed_stage": np.asarray(stage),
+        "resolution": np.asarray([resolution], dtype=np.int32),
+        "camera_angle_x": np.asarray(
+            [float(camera["camera_angle_x"])], dtype=np.float64
+        ),
+        "camera_distance": np.asarray(
+            [float(camera["distance"])], dtype=np.float64
+        ),
+        "mesh_scale": np.asarray(
+            [float(camera.get("mesh_scale", 1.0))], dtype=np.float64
+        ),
+        "source_sha256": np.asarray(_file_sha256(source_path)),
+        "model_path": np.asarray(str(Path(model_path).resolve())),
+        "cpu_rng_state": _tensor_numpy(torch.get_rng_state()),
+    }
+    if torch.cuda.is_available():
+        payload["cuda_rng_state"] = _tensor_numpy(torch.cuda.get_rng_state())
+    for name, value in tensors.items():
+        payload[name] = _tensor_numpy(value)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp.npz")
+    np.savez_compressed(temporary, **payload)
+    os.replace(temporary, path)
+    return path
+
+
+def _load_session_checkpoint(path: Path, source_path: Path, model_path: str):
+    """Load and validate an editor-owned continuation checkpoint."""
+    import numpy as np
+
+    with np.load(path, allow_pickle=False) as saved:
+        if int(saved["protocol_version"][0]) != 1:
+            raise ValueError("unsupported Pixal3D resume checkpoint version")
+        stage = str(saved["completed_stage"].item())
+        if stage not in STAGES:
+            raise ValueError(f"invalid Pixal3D resume stage: {stage}")
+        expected_model = str(Path(model_path).resolve())
+        if str(saved["model_path"].item()) != expected_model:
+            raise ValueError("resume checkpoint belongs to a different model")
+        if str(saved["source_sha256"].item()) != _file_sha256(source_path):
+            raise ValueError("source image changed since the resume checkpoint")
+        values = {name: saved[name].copy() for name in saved.files}
+    camera = {
+        "camera_angle_x": float(values["camera_angle_x"][0]),
+        "distance": float(values["camera_distance"][0]),
+        "mesh_scale": float(values["mesh_scale"][0]),
+    }
+    return stage, values, camera
+
+
 def _save_texture_checkpoint(
     path: Path,
     texture_latent,
@@ -1046,7 +1117,17 @@ def run(args) -> None:
     preprocessed = artifact_root / "preprocessed.png"
     image.save(preprocessed)
 
-    if args.manual_fov > 0:
+    resume_stage = None
+    resume_values = None
+    if args.resume_checkpoint:
+        resume_stage, resume_values, camera = _load_session_checkpoint(
+            Path(args.resume_checkpoint), preprocessed, args.model_path
+        )
+        if STAGES.index(resume_stage) >= STAGES.index(target):
+            raise ValueError(
+                f"resume stage {resume_stage} is not before target {target}"
+            )
+    elif args.manual_fov > 0:
         camera_angle_x = float(args.manual_fov)
         grid_point = torch.tensor([-1.0, 0.0, 0.0])
         distance = upstream.distance_from_fov(
@@ -1088,130 +1169,202 @@ def run(args) -> None:
     }
     hr_resolution = int(args.resolution)
 
-    reporter.emit("sparse_occupancy", "running", total=args.steps)
-    active_flow["stage"] = "sparse_occupancy"
-    cond_ss = pipeline.get_proj_cond_ss([image], **camera)
-    coords = pipeline.sample_sparse_structure(cond_ss, 32, 1, ss_sampler)
-    del cond_ss
-    torch.cuda.empty_cache()
-    sparse_preview = _occupancy_preview(
-        coords, 32, artifact_root / "sparse-occupancy.glb"
-    )
-    reporter.emit(
-        "sparse_occupancy", "ready", progress=args.steps, total=args.steps,
-        artifact_path=sparse_preview, preview_kind="mesh",
-    )
-    if _reached(target, "sparse_occupancy"):
-        return
+    if resume_values is not None:
+        torch.set_rng_state(torch.from_numpy(resume_values["cpu_rng_state"]))
+        if "cuda_rng_state" in resume_values:
+            torch.cuda.set_rng_state(torch.from_numpy(
+                resume_values["cuda_rng_state"]
+            ))
 
-    reporter.emit("lr_shape_flow", "running", total=args.steps)
-    active_flow["stage"] = "lr_shape_flow"
-    lr_conditioner, lr_grid_override = _lr_conditioner(
-        pipeline, args.lr_conditioning_resolution
+    resume_index = STAGES.index(resume_stage) if resume_stage else -1
+    session_checkpoint = (
+        Path(args.session_checkpoint) if args.session_checkpoint else None
     )
-    cond_lr = pipeline.get_proj_cond_shape(
-        lr_conditioner,
-        [image],
-        coords,
-        grid_resolution_override=lr_grid_override,
-        **camera,
-    )
-    lr_slat = pipeline.sample_shape_slat(
-        cond_lr, pipeline.models["shape_slat_flow_model_512"], coords, sampler
-    )
-    del cond_lr
-    torch.cuda.empty_cache()
-    reporter.emit("lr_shape_flow", "ready", progress=args.steps, total=args.steps)
-    if _reached(target, "lr_shape_flow"):
-        return
-    lr_meshes, _ = pipeline.decode_shape_slat(lr_slat, 512)
-    lr_preview = _shape_preview(lr_meshes, artifact_root / "lr-shape.glb")
-    reporter.emit(
-        "lr_shape_latent", "ready", artifact_path=lr_preview,
-        preview_kind="mesh",
-    )
-    if _reached(target, "lr_shape_latent"):
-        return
 
-    if pipeline.low_vram:
+    if resume_index < STAGES.index("sparse_occupancy"):
+        reporter.emit("sparse_occupancy", "running", total=args.steps)
+        active_flow["stage"] = "sparse_occupancy"
+        cond_ss = pipeline.get_proj_cond_ss([image], **camera)
+        coords = pipeline.sample_sparse_structure(cond_ss, 32, 1, ss_sampler)
+        del cond_ss
+        torch.cuda.empty_cache()
+        sparse_preview = _occupancy_preview(
+            coords, 32, artifact_root / "sparse-occupancy.glb"
+        )
+        reporter.emit(
+            "sparse_occupancy", "ready", progress=args.steps, total=args.steps,
+            artifact_path=sparse_preview, preview_kind="mesh",
+        )
+        _save_session_checkpoint(
+            session_checkpoint, "sparse_occupancy", {"sparse_coords": coords},
+            hr_resolution, camera, preprocessed, args.model_path,
+        )
+        if _reached(target, "sparse_occupancy"):
+            return
+    elif resume_stage == "sparse_occupancy":
+        coords = torch.from_numpy(resume_values["sparse_coords"]).to("cuda")
+
+    if resume_index < STAGES.index("lr_shape_flow"):
+        reporter.emit("lr_shape_flow", "running", total=args.steps)
+        active_flow["stage"] = "lr_shape_flow"
+        lr_conditioner, lr_grid_override = _lr_conditioner(
+            pipeline, args.lr_conditioning_resolution
+        )
+        cond_lr = pipeline.get_proj_cond_shape(
+            lr_conditioner,
+            [image],
+            coords,
+            grid_resolution_override=lr_grid_override,
+            **camera,
+        )
+        lr_slat = pipeline.sample_shape_slat(
+            cond_lr, pipeline.models["shape_slat_flow_model_512"], coords, sampler
+        )
+        del cond_lr
+        torch.cuda.empty_cache()
+        reporter.emit("lr_shape_flow", "ready", progress=args.steps, total=args.steps)
+        _save_session_checkpoint(
+            session_checkpoint, "lr_shape_flow",
+            {"lr_coords": lr_slat.coords, "lr_feats": lr_slat.feats},
+            hr_resolution, camera, preprocessed, args.model_path,
+        )
+        if _reached(target, "lr_shape_flow"):
+            return
+        lr_meshes, _ = pipeline.decode_shape_slat(lr_slat, 512)
+        lr_preview = _shape_preview(lr_meshes, artifact_root / "lr-shape.glb")
+        reporter.emit(
+            "lr_shape_latent", "ready", artifact_path=lr_preview,
+            preview_kind="mesh",
+        )
+        _save_session_checkpoint(
+            session_checkpoint, "lr_shape_latent",
+            {"lr_coords": lr_slat.coords, "lr_feats": lr_slat.feats},
+            hr_resolution, camera, preprocessed, args.model_path,
+        )
+        if _reached(target, "lr_shape_latent"):
+            return
+    elif resume_index < STAGES.index("hr_coordinates"):
+        lr_slat = sp.SparseTensor(
+            feats=torch.from_numpy(resume_values["lr_feats"]).to("cuda"),
+            coords=torch.from_numpy(resume_values["lr_coords"]).to("cuda"),
+        )
+
+    if resume_index < STAGES.index("hr_coordinates") and pipeline.low_vram:
         pipeline.models["shape_slat_decoder"].to(pipeline.device)
         pipeline.models["shape_slat_decoder"].low_vram = True
-    hr_coords = pipeline.models["shape_slat_decoder"].upsample(
-        lr_slat, upsample_times=4
-    )
-    if pipeline.low_vram:
+    if resume_index < STAGES.index("hr_coordinates"):
+        hr_coords = pipeline.models["shape_slat_decoder"].upsample(
+            lr_slat, upsample_times=4
+        )
+    if resume_index < STAGES.index("hr_coordinates") and pipeline.low_vram:
         pipeline.models["shape_slat_decoder"].cpu()
         pipeline.models["shape_slat_decoder"].low_vram = False
-    actual_hr_resolution = hr_resolution
-    while True:
-        grid_res = actual_hr_resolution // 16
-        quantized = torch.cat((
-            hr_coords[:, :1],
-            ((hr_coords[:, 1:] + 0.5) / 512 * (grid_res - 1)).round().int(),
-        ), dim=1)
-        hr_coords_unique = quantized.unique(dim=0)
-        if len(hr_coords_unique) < args.max_num_tokens or actual_hr_resolution == 1024:
-            break
-        actual_hr_resolution -= 128
-    del lr_meshes, hr_coords, quantized
-    torch.cuda.empty_cache()
-    coords_preview = _point_preview(
-        hr_coords_unique,
-        actual_hr_resolution // 16,
-        artifact_root / "hr-coordinates.glb",
-    )
-    reporter.emit(
-        "hr_coordinates", "ready", artifact_path=coords_preview,
-        preview_kind="mesh",
-    )
-    if _reached(target, "hr_coordinates"):
-        return
-
-    reporter.emit("hr_shape_flow", "running", total=args.steps)
-    active_flow["stage"] = "hr_shape_flow"
-    cond_hr = pipeline.get_proj_cond_shape(
-        pipeline.image_cond_model_shape_1024,
-        [image],
-        hr_coords_unique,
-        grid_resolution_override=actual_hr_resolution // 16,
-        **camera,
-    )
-    noise = sp.SparseTensor(
-        feats=torch.randn(
-            len(hr_coords_unique),
-            pipeline.models["shape_slat_flow_model_1024"].in_channels,
-            device=pipeline.device,
-        ),
-        coords=hr_coords_unique,
-    )
-    flow = pipeline.models["shape_slat_flow_model_1024"]
-    if pipeline.low_vram:
-        flow.to(pipeline.device)
-    hr_slat = pipeline.shape_slat_sampler.sample(
-        flow, noise, **cond_hr,
-        **{**pipeline.shape_slat_sampler_params, **sampler},
-        verbose=True,
-        tqdm_desc=f"Sampling HR shape SLat ({actual_hr_resolution})",
-    ).samples
-    if pipeline.low_vram:
-        flow.cpu()
-    if args.checkpoint:
-        _save_shape_checkpoint(
-            Path(args.checkpoint),
-            hr_slat,
-            actual_hr_resolution,
-            camera,
-            preprocessed,
-            args.model_path,
+    if resume_index < STAGES.index("hr_coordinates"):
+        actual_hr_resolution = hr_resolution
+        while True:
+            grid_res = actual_hr_resolution // 16
+            quantized = torch.cat((
+                hr_coords[:, :1],
+                ((hr_coords[:, 1:] + 0.5) / 512 * (grid_res - 1)).round().int(),
+            ), dim=1)
+            hr_coords_unique = quantized.unique(dim=0)
+            if (len(hr_coords_unique) < args.max_num_tokens
+                    or actual_hr_resolution == 1024):
+                break
+            actual_hr_resolution -= 128
+        del hr_coords, quantized
+        torch.cuda.empty_cache()
+        coords_preview = _point_preview(
+            hr_coords_unique,
+            actual_hr_resolution // 16,
+            artifact_root / "hr-coordinates.glb",
         )
+        reporter.emit(
+            "hr_coordinates", "ready", artifact_path=coords_preview,
+            preview_kind="mesh",
+        )
+        _save_session_checkpoint(
+            session_checkpoint, "hr_coordinates",
+            {"hr_coords": hr_coords_unique}, actual_hr_resolution,
+            camera, preprocessed, args.model_path,
+        )
+        if _reached(target, "hr_coordinates"):
+            return
+    else:
+        actual_hr_resolution = int(resume_values["resolution"][0])
+        hr_coords_unique = torch.from_numpy(
+            resume_values["hr_coords"]
+        ).to("cuda")
+    if "lr_meshes" in locals():
+        del lr_meshes
+    if "lr_slat" in locals():
+        del lr_slat
+
+    if resume_index < STAGES.index("hr_shape_flow"):
+        reporter.emit("hr_shape_flow", "running", total=args.steps)
+        active_flow["stage"] = "hr_shape_flow"
+        cond_hr = pipeline.get_proj_cond_shape(
+            pipeline.image_cond_model_shape_1024,
+            [image],
+            hr_coords_unique,
+            grid_resolution_override=actual_hr_resolution // 16,
+            **camera,
+        )
+        noise = sp.SparseTensor(
+            feats=torch.randn(
+                len(hr_coords_unique),
+                pipeline.models["shape_slat_flow_model_1024"].in_channels,
+                device=pipeline.device,
+            ),
+            coords=hr_coords_unique,
+        )
+        flow = pipeline.models["shape_slat_flow_model_1024"]
+        if pipeline.low_vram:
+            flow.to(pipeline.device)
+        hr_slat = pipeline.shape_slat_sampler.sample(
+            flow, noise, **cond_hr,
+            **{**pipeline.shape_slat_sampler_params, **sampler},
+            verbose=True,
+            tqdm_desc=f"Sampling HR shape SLat ({actual_hr_resolution})",
+        ).samples
+        if pipeline.low_vram:
+            flow.cpu()
+        if args.checkpoint:
+            _save_shape_checkpoint(
+                Path(args.checkpoint),
+                hr_slat,
+                actual_hr_resolution,
+                camera,
+                preprocessed,
+                args.model_path,
+            )
+        _save_session_checkpoint(
+            session_checkpoint, "hr_shape_flow",
+            {"hr_coords": hr_slat.coords, "hr_normalized_feats": hr_slat.feats},
+            actual_hr_resolution, camera, preprocessed, args.model_path,
+        )
+        del cond_hr, noise, hr_coords_unique
+        torch.cuda.empty_cache()
+        reporter.emit("hr_shape_flow", "ready", progress=args.steps, total=args.steps)
+        if _reached(target, "hr_shape_flow"):
+            return
+    else:
+        hr_slat = sp.SparseTensor(
+            feats=torch.from_numpy(
+                resume_values["hr_normalized_feats"]
+            ).to("cuda"),
+            coords=torch.from_numpy(resume_values["hr_coords"]).to("cuda"),
+        )
+        if args.checkpoint:
+            _save_shape_checkpoint(
+                Path(args.checkpoint), hr_slat, actual_hr_resolution,
+                camera, preprocessed, args.model_path,
+            )
     std = torch.tensor(pipeline.shape_slat_normalization["std"])[None].to(hr_slat.device)
     mean = torch.tensor(pipeline.shape_slat_normalization["mean"])[None].to(hr_slat.device)
     shape_slat = hr_slat * std + mean
-    del cond_hr, noise, hr_slat, hr_coords_unique, lr_slat
+    del hr_slat
     torch.cuda.empty_cache()
-    reporter.emit("hr_shape_flow", "ready", progress=args.steps, total=args.steps)
-    if _reached(target, "hr_shape_flow"):
-        return
     shape_meshes, shape_subs = pipeline.decode_shape_slat(
         shape_slat, actual_hr_resolution
     )
@@ -1222,42 +1375,75 @@ def run(args) -> None:
         "hr_shape_latent", "ready", artifact_path=shape_preview,
         preview_kind="mesh",
     )
+    _save_session_checkpoint(
+        session_checkpoint, "hr_shape_latent",
+        {
+            "hr_coords": shape_slat.coords,
+            "hr_normalized_feats": (shape_slat.feats - mean) / std,
+        },
+        actual_hr_resolution, camera, preprocessed, args.model_path,
+    )
     if _reached(target, "hr_shape_latent"):
         return
 
-    reporter.emit("texture_flow", "running", total=args.steps)
-    active_flow["stage"] = "texture_flow"
-    cond_tex = pipeline.get_proj_cond_shape(
-        pipeline.image_cond_model_tex_1024,
-        [image],
-        shape_slat.coords,
-        grid_resolution_override=actual_hr_resolution // 16,
-        **camera,
-    )
-    tex_slat = pipeline.sample_tex_slat(
-        cond_tex,
-        pipeline.models["tex_slat_flow_model_1024"],
-        shape_slat,
-        tex_sampler,
-    )
-    del cond_tex
-    torch.cuda.empty_cache()
-    reporter.emit("texture_flow", "ready", progress=args.steps, total=args.steps)
-    if args.texture_checkpoint:
-        _save_texture_checkpoint(
-            Path(args.texture_checkpoint),
-            tex_slat,
-            pipeline,
-            actual_hr_resolution,
-            camera,
-            preprocessed,
-            args.model_path,
+    if resume_index < STAGES.index("texture_flow"):
+        reporter.emit("texture_flow", "running", total=args.steps)
+        active_flow["stage"] = "texture_flow"
+        cond_tex = pipeline.get_proj_cond_shape(
+            pipeline.image_cond_model_tex_1024,
+            [image],
+            shape_slat.coords,
+            grid_resolution_override=actual_hr_resolution // 16,
+            **camera,
         )
-    if _reached(target, "texture_flow"):
-        return
-    reporter.emit("texture_latent", "ready")
-    if _reached(target, "texture_latent"):
-        return
+        tex_slat = pipeline.sample_tex_slat(
+            cond_tex,
+            pipeline.models["tex_slat_flow_model_1024"],
+            shape_slat,
+            tex_sampler,
+        )
+        del cond_tex
+        torch.cuda.empty_cache()
+        reporter.emit("texture_flow", "ready", progress=args.steps, total=args.steps)
+        if args.texture_checkpoint:
+            _save_texture_checkpoint(
+                Path(args.texture_checkpoint),
+                tex_slat,
+                pipeline,
+                actual_hr_resolution,
+                camera,
+                preprocessed,
+                args.model_path,
+            )
+        texture_resume_tensors = {
+            "hr_coords": shape_slat.coords,
+            "hr_normalized_feats": (shape_slat.feats - mean) / std,
+            "texture_coords": tex_slat.coords,
+            "texture_feats": tex_slat.feats,
+        }
+        _save_session_checkpoint(
+            session_checkpoint, "texture_flow", texture_resume_tensors,
+            actual_hr_resolution, camera, preprocessed, args.model_path,
+        )
+        if _reached(target, "texture_flow"):
+            return
+        reporter.emit("texture_latent", "ready")
+        _save_session_checkpoint(
+            session_checkpoint, "texture_latent", texture_resume_tensors,
+            actual_hr_resolution, camera, preprocessed, args.model_path,
+        )
+        if _reached(target, "texture_latent"):
+            return
+    else:
+        tex_slat = sp.SparseTensor(
+            feats=torch.from_numpy(resume_values["texture_feats"]).to("cuda"),
+            coords=torch.from_numpy(resume_values["texture_coords"]).to("cuda"),
+        )
+        if args.texture_checkpoint:
+            _save_texture_checkpoint(
+                Path(args.texture_checkpoint), tex_slat, pipeline,
+                actual_hr_resolution, camera, preprocessed, args.model_path,
+            )
 
     tex_voxels = pipeline.decode_tex_slat(tex_slat, shape_subs)
     meshes = []
@@ -1311,6 +1497,8 @@ def main() -> int:
     parser.add_argument("--events", required=True)
     parser.add_argument("--checkpoint")
     parser.add_argument("--texture-checkpoint")
+    parser.add_argument("--session-checkpoint")
+    parser.add_argument("--resume-checkpoint")
     parser.add_argument("--refine-checkpoint")
     parser.add_argument("--texture-refine-checkpoint")
     parser.add_argument("--refine-mask")
