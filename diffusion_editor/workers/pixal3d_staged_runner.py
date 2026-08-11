@@ -801,6 +801,7 @@ def _run_lr_refine(
         flow.to(pipeline.device)
     blend = token_mask[:, None].to(base_normalized.dtype)
     reporter.emit("lr_shape_flow", "running", total=args.refine_steps)
+    refine_proposal = None
     with torch.inference_mode():
         for index, (current, previous) in enumerate(
             zip(times[:-1], times[1:]), 1
@@ -816,6 +817,7 @@ def _run_lr_refine(
                 guidance_rescale=0.5,
                 guidance_interval=(0.6, 1.0),
             )
+            refine_proposal = out.pred_x_prev
             reference = reference_at(float(previous))
             sample = out.pred_x_prev.replace(
                 out.pred_x_prev.feats * blend + reference * (1 - blend)
@@ -835,6 +837,15 @@ def _run_lr_refine(
     )
 
     refined_lr = sample.replace(sample.feats * std + mean)
+    if refine_proposal is not None:
+        proposal_lr = refine_proposal.replace(
+            refine_proposal.feats * std + mean
+        )
+        proposal_meshes, _ = pipeline.decode_shape_slat(proposal_lr, 512)
+        _shape_preview(
+            proposal_meshes,
+            artifact_root / "lr-refine-generated.glb",
+        )
     _save_session_checkpoint(
         Path(args.session_checkpoint),
         "lr_shape_latent",
@@ -931,6 +942,7 @@ def _run_refine(
         flow.to(pipeline.device)
     blend = token_mask[:, None].to(base_feats.dtype)
     reporter.emit("hr_shape_flow", "running", total=args.refine_steps)
+    refine_proposal = None
     with torch.inference_mode():
         for index, (current, previous) in enumerate(
             zip(times[:-1], times[1:]), 1
@@ -946,6 +958,7 @@ def _run_refine(
                 guidance_rescale=0.5,
                 guidance_interval=(0.6, 1.0),
             )
+            refine_proposal = out.pred_x_prev
             reference = reference_at(float(previous))
             sample = out.pred_x_prev.replace(
                 out.pred_x_prev.feats * blend + reference * (1 - blend)
@@ -977,6 +990,17 @@ def _run_refine(
     mean = torch.tensor(
         pipeline.shape_slat_normalization["mean"], device=sample.device
     )[None]
+    if refine_proposal is not None:
+        proposal_slat = refine_proposal.replace(
+            refine_proposal.feats * std + mean
+        )
+        proposal_meshes, _ = pipeline.decode_shape_slat(
+            proposal_slat, resolution
+        )
+        _shape_preview(
+            proposal_meshes,
+            artifact_root / "hr-refine-generated.glb",
+        )
     shape_slat = sample.replace(sample.feats * std + mean)
     meshes, subdivisions = pipeline.decode_shape_slat(shape_slat, resolution)
     shape_preview = _shape_preview(

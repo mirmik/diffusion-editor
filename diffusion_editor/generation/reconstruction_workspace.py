@@ -383,6 +383,8 @@ PIXAL3D_PIPELINE = BackendPipelineDefinition(
                 _port("lr_latent", "Refined LR latent", WorkspaceArtifactKind.LATENT),
                 _port("lr_preview", "Decoded refined LR preview",
                       WorkspaceArtifactKind.MESH, WorkspacePreviewKind.MESH),
+                _port("refine_generated_mesh", "Generated before merge",
+                      WorkspaceArtifactKind.MESH, WorkspacePreviewKind.MESH),
                 _port("lr_mask_projection", "LR mask projection",
                       WorkspaceArtifactKind.MASK, WorkspacePreviewKind.IMAGE),
             ),
@@ -419,6 +421,8 @@ PIXAL3D_PIPELINE = BackendPipelineDefinition(
                       WorkspaceArtifactKind.CHECKPOINT),
                 _port("hr_mesh", "Refined HR mesh", WorkspaceArtifactKind.MESH,
                       WorkspacePreviewKind.MESH),
+                _port("refine_generated_mesh", "Generated before merge",
+                      WorkspaceArtifactKind.MESH, WorkspacePreviewKind.MESH),
                 _port("hr_mask_projection", "HR mask projection",
                       WorkspaceArtifactKind.MASK, WorkspacePreviewKind.IMAGE),
             ),
@@ -847,6 +851,21 @@ def build_legacy_workspace(
                     )
                     preceding_outputs.append(checkpoint.artifact_id)
                     published_any = True
+                if spec_key == "hr.refine" and run.refine_generated_path:
+                    generated = workspace.publish_artifact(
+                        operation.operation_id,
+                        "refine_generated_mesh",
+                        path=run.refine_generated_path,
+                        kind=WorkspaceArtifactKind.MESH,
+                        preview_kind=WorkspacePreviewKind.MESH,
+                        artifact_id=(
+                            f"legacy:{run_id}:{spec_key}:"
+                            "refine_generated_mesh"
+                        ),
+                        metadata={"verified_content_hash": False},
+                    )
+                    preceding_outputs.append(generated.artifact_id)
+                    published_any = True
             if lr_variant is not None and spec_key == "lr.generate":
                 checkpoint = workspace.publish_artifact(
                     operation.operation_id,
@@ -931,6 +950,22 @@ def build_legacy_workspace(
                 ),
             },
         )
+        if variant.refine_generated_path:
+            workspace.publish_artifact(
+                operation.operation_id,
+                "refine_generated_mesh",
+                path=variant.refine_generated_path,
+                kind=WorkspaceArtifactKind.MESH,
+                preview_kind=WorkspacePreviewKind.MESH,
+                artifact_id=(
+                    f"legacy:{variant.variant_id}:lr.refine:"
+                    "refine_generated_mesh"
+                ),
+                metadata={
+                    "verified_content_hash": False,
+                    "lr_variant_id": variant.variant_id,
+                },
+            )
         workspace.set_operation_status(
             operation.operation_id, WorkspaceOperationStatus.READY
         )

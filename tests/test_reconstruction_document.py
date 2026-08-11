@@ -24,12 +24,14 @@ from diffusion_editor.generation.reconstruction_controller import (
 from diffusion_editor.generation.reconstruction_workspace import (
     PIXAL3D_PIPELINE,
     ReconstructionWorkspace,
+    build_legacy_workspace,
 )
 from diffusion_editor.generation.types import (
     ReconstructionBackend,
     ReconstructionLrVariant,
     ReconstructionParameters,
     ReconstructionRefineParameters,
+    ReconstructionRun,
     ReconstructionRunKind,
     ReconstructionResult,
     ReconstructionStage,
@@ -662,6 +664,8 @@ def test_lr_results_keep_base_and_refined_variants(tmp_path) -> None:
     base_checkpoint.write_bytes(b"base")
     refined_checkpoint = tmp_path / "refined-lr.npz"
     refined_checkpoint.write_bytes(b"refined")
+    generated_preview = tmp_path / "lr-generated.glb"
+    generated_preview.write_bytes(b"generated")
     base_preview = ReconstructionStageArtifact(
         ReconstructionStage.LR_SHAPE_LATENT,
         str(tmp_path / "base-lr.glb"),
@@ -687,6 +691,7 @@ def test_lr_results_keep_base_and_refined_variants(tmp_path) -> None:
             artifacts=(refined_preview,),
             kind=ReconstructionRunKind.MASKED_REFINE,
             resume_checkpoint_path=str(refined_checkpoint),
+            refine_generated_path=str(generated_preview),
         ),
     ]
 
@@ -725,6 +730,7 @@ def test_lr_results_keep_base_and_refined_variants(tmp_path) -> None:
         "lr-base", "lr-refined-1",
     ]
     assert node.lr_variants[1].parent_variant_id == "lr-base"
+    assert node.lr_variants[1].refine_generated_path == str(generated_preview)
     assert node.selected_lr_refine_source_id == "lr-base"
     assert node.accepted_lr_variant_id == "lr-refined-1"
     assert node.resume_checkpoint_path == str(refined_checkpoint)
@@ -896,3 +902,58 @@ def test_workspace_preview_loads_graph_mesh_without_changing_legacy_stage(
     assert loaded == [str(mesh_path)]
     assert workspace.selected_artifact_id == artifact.artifact_id
     assert node.selected_preview_stage is ReconstructionStage.SPARSE_OCCUPANCY
+
+
+def test_refine_generated_artifact_uses_separate_viewport(tmp_path) -> None:
+    generated = tmp_path / "refine-generated.glb"
+    generated.write_bytes(b"glTF")
+    run = ReconstructionRun(
+        "refined",
+        ReconstructionRunKind.MASKED_REFINE,
+        str(tmp_path / "merged.glb"),
+        str(tmp_path / "source.png"),
+        refine_generated_path=str(generated),
+    )
+    workspace = build_legacy_workspace(
+        ReconstructionParameters(), {}, {}, (run,), "refined"
+    )
+    operation = workspace.operations_for_spec("hr.refine")[0]
+
+    class View:
+        reconstruction_workspace_mode = True
+        visibility = []
+
+        def set_reconstruction_refine_view_visible(self, visible):
+            self.visibility.append(visible)
+
+    class Viewport:
+        loaded = []
+        clear_count = 0
+
+        def load_glb(self, path):
+            self.loaded.append(path)
+
+        def clear_model(self):
+            self.clear_count += 1
+
+    root = NativeEditorRoot.__new__(NativeEditorRoot)
+    root.view = View()
+    root.reconstruction_refine_viewport = Viewport()
+    root._presented_refine_artifact_path = None
+    root._ensure_reconstruction_refine_viewport = (
+        lambda: root.reconstruction_refine_viewport
+    )
+
+    root._sync_reconstruction_refine_output(
+        workspace, "hr.refine", operation.operation_id
+    )
+    root._sync_reconstruction_refine_output(
+        workspace, "hr.refine", operation.operation_id
+    )
+
+    assert root.view.visibility == [True, True]
+    assert root.reconstruction_refine_viewport.loaded == [str(generated)]
+
+    root._sync_reconstruction_refine_output(workspace, "hr.generate")
+    assert root.view.visibility[-1] is False
+    assert root.reconstruction_refine_viewport.clear_count == 1

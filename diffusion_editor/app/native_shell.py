@@ -367,6 +367,16 @@ class NativeEditorView:
         self.canvas_host.add_preferred_child(self.canvas_placeholder)
         self.canvas_view = None
         self.reconstruction_viewport = None
+        self.reconstruction_refine_viewport = None
+        self.reconstruction_views_splitter = None
+        self.reconstruction_refine_view_container = None
+        self._reconstruction_refine_view_visible = False
+        self._reconstruction_primary_view_parking = document.create_vstack(
+            "DiffusionEditorReconstructionPrimaryViewParking"
+        )
+        self._reconstruction_outer_view_parking = document.create_vstack(
+            "DiffusionEditorReconstructionOuterViewParking"
+        )
         self.canvas_reconstruction_splitter = None
         self.reconstruction_toolbar_model = None
         self.reconstruction_toolbar = None
@@ -702,11 +712,18 @@ class NativeEditorView:
         set_shading_mode = getattr(viewport_view, "set_shading_mode", None)
 
         def activate_shading(index, *_rest):
-            if (
-                callable(set_shading_mode)
-                and 0 <= index < len(RECONSTRUCTION_SHADING_MODES)
-            ):
-                set_shading_mode(RECONSTRUCTION_SHADING_MODES[index])
+            if not 0 <= index < len(RECONSTRUCTION_SHADING_MODES):
+                return
+            mode = RECONSTRUCTION_SHADING_MODES[index]
+            if callable(set_shading_mode):
+                set_shading_mode(mode)
+            refine_set_shading = getattr(
+                self.reconstruction_refine_viewport,
+                "set_shading_mode",
+                None,
+            )
+            if callable(refine_set_shading):
+                refine_set_shading(mode)
 
         self._connections.append(shading_combo.connect_changed(
             activate_shading
@@ -1809,6 +1826,68 @@ class NativeEditorView:
         self._select_reconstruction_workspace_operation("source.prepare")
         self._request_repaint()
 
+    def mount_reconstruction_refine_viewport(self, viewport_view) -> None:
+        self._require_open()
+        if self.reconstruction_viewport is None:
+            raise RuntimeError("primary reconstruction viewport is not mounted")
+        if self.reconstruction_refine_viewport is not None:
+            raise RuntimeError("refine viewport is already mounted")
+        container = self._document.create_vstack(
+            "DiffusionEditorReconstructionRefineView"
+        )
+        container.stable_id = (
+            "diffusion-editor.reconstruction.refine-view"
+        )
+        title = self._document.create_label(
+            "Refine output · before merge",
+            "DiffusionEditorReconstructionWorkspaceInspectorTitle",
+        )
+        title.stable_id = (
+            "diffusion-editor.reconstruction.refine-view.title"
+        )
+        container.add_preferred_child(title)
+        container.add_flex_child(viewport_view.widget, 1.0)
+        splitter = self._document.create_splitter(
+            True,
+            "DiffusionEditorReconstructionViewsSplitter",
+        )
+        splitter.widget.stable_id = (
+            "diffusion-editor.reconstruction.views-splitter"
+        )
+        splitter.set_first(self._reconstruction_primary_view_parking)
+        splitter.set_second(container)
+        splitter.set_split_fraction(0.62)
+        splitter.set_min_extents(260.0, 220.0)
+        self.reconstruction_refine_viewport = viewport_view
+        self.reconstruction_views_splitter = splitter
+        self.reconstruction_refine_view_container = container
+        if self.reconstruction_shading_combo is not None:
+            index = self.reconstruction_shading_combo.selected_index
+            if 0 <= index < len(RECONSTRUCTION_SHADING_MODES):
+                viewport_view.set_shading_mode(
+                    RECONSTRUCTION_SHADING_MODES[index]
+                )
+        self._request_repaint()
+
+    def set_reconstruction_refine_view_visible(self, visible: bool) -> None:
+        visible = bool(visible)
+        outer = self.canvas_reconstruction_splitter
+        inner = self.reconstruction_views_splitter
+        primary = self.reconstruction_viewport
+        if (
+                outer is None or inner is None or primary is None
+                or visible == self._reconstruction_refine_view_visible):
+            return
+        if visible:
+            outer.set_second(self._reconstruction_outer_view_parking)
+            inner.set_first(primary.widget)
+            outer.set_second(inner.widget)
+        else:
+            inner.set_first(self._reconstruction_primary_view_parking)
+            outer.set_second(primary.widget)
+        self._reconstruction_refine_view_visible = visible
+        self._request_repaint()
+
     def _toggle_reconstruction_workspace_group(self, key: str) -> None:
         if key in self._expanded_reconstruction_workspace_groups:
             self._expanded_reconstruction_workspace_groups.remove(key)
@@ -1849,6 +1928,10 @@ class NativeEditorView:
             )
             if active is not None:
                 self.main_splitter.set_first(active.widget)
+        if self._reconstruction_workspace_handler is not None:
+            self._reconstruction_workspace_handler(
+                "set_workspace_mode", enabled
+            )
         self._request_repaint()
 
     def _select_reconstruction_workspace_operation(self, key: str) -> None:
@@ -1890,6 +1973,8 @@ class NativeEditorView:
             )
         self._refresh_reconstruction_workspace_refine_parameters()
         self._refresh_reconstruction_workspace_actions()
+        if self._reconstruction_workspace_handler is not None:
+            self._reconstruction_workspace_handler("select_operation", key)
         self._request_repaint()
 
     def set_reconstruction_workspace_handler(self, handler) -> None:
@@ -2042,6 +2127,11 @@ class NativeEditorView:
         else:
             self._selected_reconstruction_workspace_operation_id = None
         self._refresh_reconstruction_workspace_artifacts()
+        if self._reconstruction_workspace_handler is not None:
+            self._reconstruction_workspace_handler(
+                "select_operation_variant",
+                self._selected_reconstruction_workspace_operation_id,
+            )
 
     def _change_reconstruction_workspace_artifact(
             self, index: int, *_rest) -> None:

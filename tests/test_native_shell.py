@@ -292,9 +292,18 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar(
     viewport = document.create_vstack("TestReconstructionViewport")
     viewport.stable_id = "test.reconstruction-viewport"
     mounted_viewport = MountedView(viewport)
+    refine_viewport = document.create_vstack("TestRefineViewport")
+    refine_viewport.stable_id = "test.refine-viewport"
+    mounted_refine_viewport = MountedView(refine_viewport)
     try:
         view.mount_canvas(MountedView(canvas))
         view.mount_reconstruction_viewport(mounted_viewport)
+        view.mount_reconstruction_refine_viewport(mounted_refine_viewport)
+        assert view._reconstruction_refine_view_visible is False
+        view.set_reconstruction_refine_view_visible(True)
+        assert view._reconstruction_refine_view_visible is True
+        view.set_reconstruction_refine_view_visible(False)
+        assert view._reconstruction_refine_view_visible is False
         assert view.reconstruction_workspace_mode is False
         assert view.reconstruction_workspace_open.widget.enabled is True
         assert "lr.refine" in view.reconstruction_workspace_operation_buttons
@@ -486,6 +495,7 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar(
         ] == ["Flat", "Smooth", "Unlit", "Normals", "Wireframe"]
         view.reconstruction_shading_combo.selected_index = 1
         assert mounted_viewport.shading_modes == ["smooth"]
+        assert mounted_refine_viewport.shading_modes == ["flat", "smooth"]
         selected_stages = []
         view.set_reconstruction_stage_handler(selected_stages.append)
         view._activate_reconstruction_stage(ReconstructionStage.HR_COORDINATES)

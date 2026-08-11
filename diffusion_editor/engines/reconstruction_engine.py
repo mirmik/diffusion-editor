@@ -208,6 +208,10 @@ class ReconstructionEngine:
                 if self._client.resume_checkpoint_path else None
             ),
             backend=ReconstructionBackend.PIXAL3D,
+            refine_generated_path=(
+                str(self._client.refine_generated_path)
+                if self._client.refine_generated_path else None
+            ),
         )
 
     def _run_refine(self, request, cancel, emit) -> ReconstructionResult:
@@ -236,6 +240,10 @@ class ReconstructionEngine:
             texture_checkpoint_path=(
                 str(self._client.texture_checkpoint_path)
                 if self._client.texture_checkpoint_path else None
+            ),
+            refine_generated_path=(
+                str(self._client.refine_generated_path)
+                if self._client.refine_generated_path else None
             ),
             backend=ReconstructionBackend.PIXAL3D,
         )

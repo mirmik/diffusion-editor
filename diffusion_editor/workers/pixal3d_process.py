@@ -90,6 +90,7 @@ class Pixal3DProcessClient:
         self._texture_checkpoint_path: Path | None = None
         self._resume_checkpoint_path: Path | None = None
         self._conditioning_path: Path | None = None
+        self._refine_generated_path: Path | None = None
         self._backend_label = "Pixal3D"
         self._environment_overrides: dict[str, str] = {}
 
@@ -112,6 +113,10 @@ class Pixal3DProcessClient:
     @property
     def resume_checkpoint_path(self) -> Path | None:
         return self._resume_checkpoint_path
+
+    @property
+    def refine_generated_path(self) -> Path | None:
+        return self._refine_generated_path
 
     def generate(
         self,
@@ -138,6 +143,7 @@ class Pixal3DProcessClient:
         self._texture_checkpoint_path = None
         self._resume_checkpoint_path = None
         self._conditioning_path = None
+        self._refine_generated_path = None
         image.convert("RGBA").save(source_path, format="PNG")
         self._artifacts = [ReconstructionStageArtifact(
             ReconstructionStage.SOURCE_IMAGE,
@@ -303,6 +309,7 @@ class Pixal3DProcessClient:
         self._texture_checkpoint_path = None
         self._resume_checkpoint_path = None
         self._conditioning_path = None
+        self._refine_generated_path = None
         command = [
             str(self._python), str(self._runner_path),
             "--pixal3d-root", str(self._root),
@@ -341,6 +348,9 @@ class Pixal3DProcessClient:
         preprocessed = artifact_root / "preprocessed.png"
         if preprocessed.is_file():
             self._conditioning_path = preprocessed
+        refine_generated = artifact_root / "lr-refine-generated.glb"
+        if refine_generated.is_file():
+            self._refine_generated_path = refine_generated
         return output_path, source_path
 
     def refine(
@@ -386,6 +396,7 @@ class Pixal3DProcessClient:
         self._checkpoint_path = None
         self._texture_checkpoint_path = None
         self._conditioning_path = None
+        self._refine_generated_path = None
         command = [
             str(self._python), str(self._runner_path),
             "--pixal3d-root", str(self._root),
@@ -431,6 +442,9 @@ class Pixal3DProcessClient:
         preprocessed = artifact_root / "preprocessed.png"
         if preprocessed.is_file():
             self._conditioning_path = preprocessed
+        refine_generated = artifact_root / "hr-refine-generated.glb"
+        if refine_generated.is_file():
+            self._refine_generated_path = refine_generated
         return output_path, condition_path
 
     def refine_texture(
@@ -479,6 +493,7 @@ class Pixal3DProcessClient:
         self._checkpoint_path = shape_checkpoint
         self._texture_checkpoint_path = None
         self._conditioning_path = None
+        self._refine_generated_path = None
         command = [
             str(self._python), str(self._runner_path),
             "--pixal3d-root", str(self._root),

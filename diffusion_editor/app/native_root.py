@@ -308,6 +308,8 @@ class NativeEditorRoot:
         self.reconstruction_engine = None
         self.reconstruction_controller = None
         self.reconstruction_viewport = None
+        self.reconstruction_refine_viewport = None
+        self._presented_refine_artifact_path: str | None = None
         self._reconstruction_job_node_id: str | None = None
         self._reconstruction_parent_run_id: str | None = None
         self._presented_reconstruction_id: str | None = None
@@ -697,6 +699,9 @@ class NativeEditorRoot:
             if self.reconstruction_viewport is not None:
                 self.reconstruction_viewport.clear_model()
             self._presented_reconstruction_id = None
+        if any(isinstance(removed, ReconstructionLayer)
+               for removed in removed_layers):
+            self._hide_reconstruction_refine_output()
         for removed in removed_layers:
             self.application.invalidate_generation_jobs_for_layer(
                 removed.id,
@@ -795,6 +800,8 @@ class NativeEditorRoot:
         self._refresh_commands()
         if self.reconstruction_viewport is not None:
             self.reconstruction_viewport.render_if_dirty()
+        if self.reconstruction_refine_viewport is not None:
+            self.reconstruction_refine_viewport.render_if_dirty()
         rendered = bool(self.composition.render_frame())
         return NativeTickResult(
             dispatched=stats.executed,
@@ -1324,6 +1331,9 @@ class NativeEditorRoot:
                             event.result.source_path,
                             preview,
                             parent_variant_id=lr_parent_variant_id,
+                            refine_generated_path=(
+                                event.result.refine_generated_path
+                            ),
                         )
                         node.lr_variants = (*node.lr_variants, variant)
                     node.accepted_lr_variant_id = variant.variant_id
@@ -1359,6 +1369,9 @@ class NativeEditorRoot:
                             else None
                         ),
                         backend=event.result.backend,
+                        refine_generated_path=(
+                            event.result.refine_generated_path
+                        ),
                     )
                 )
                 if (
@@ -1599,6 +1612,19 @@ class NativeEditorRoot:
                     node.generation_parameters,
                     busy=busy,
                 )
+                self._sync_reconstruction_refine_output(
+                    workspace,
+                    getattr(
+                        self.view,
+                        "_selected_reconstruction_workspace_operation",
+                        None,
+                    ),
+                    getattr(
+                        self.view,
+                        "_selected_reconstruction_workspace_operation_id",
+                        None,
+                    ),
+                )
             update_refine = getattr(
                 self.view, "update_reconstruction_refine", None
             )
@@ -1690,6 +1716,45 @@ class NativeEditorRoot:
 
     def _handle_reconstruction_workspace(
             self, action: str, value=None) -> None:
+        if action == "set_workspace_mode":
+            if not value:
+                self._hide_reconstruction_refine_output()
+            else:
+                self._sync_reconstruction_refine_output(
+                    self._active_reconstruction_workspace,
+                    getattr(
+                        self.view,
+                        "_selected_reconstruction_workspace_operation",
+                        None,
+                    ),
+                    getattr(
+                        self.view,
+                        "_selected_reconstruction_workspace_operation_id",
+                        None,
+                    ),
+                )
+            return
+        if action in {"select_operation", "select_operation_variant"}:
+            operation_key = getattr(
+                self.view,
+                "_selected_reconstruction_workspace_operation",
+                None,
+            )
+            operation_id = (
+                str(value)
+                if action == "select_operation_variant" and value
+                else getattr(
+                    self.view,
+                    "_selected_reconstruction_workspace_operation_id",
+                    None,
+                )
+            )
+            self._sync_reconstruction_refine_output(
+                self._active_reconstruction_workspace,
+                operation_key,
+                operation_id,
+            )
+            return
         if action == "select_refine_source":
             node = self.application.layer_stack.active_layer
             workspace = self._active_reconstruction_workspace
@@ -1886,6 +1951,98 @@ class NativeEditorRoot:
                 viewport.close,
             )
         return viewport
+
+    def _ensure_reconstruction_refine_viewport(
+            self) -> NativeReconstructionViewport:
+        existing = getattr(self, "reconstruction_refine_viewport", None)
+        if existing is not None:
+            return existing
+        self._ensure_reconstruction_viewport()
+        graphics = getattr(self.composition, "graphics", None)
+        mount = getattr(
+            self.view, "mount_reconstruction_refine_viewport", None
+        )
+        if graphics is None or not callable(mount):
+            raise RuntimeError("native refine viewport is unavailable")
+        viewport = NativeReconstructionViewport(
+            self.composition.document,
+            graphics_owner=graphics,
+            request_repaint=self.composition.request_repaint,
+        )
+        mount(viewport)
+        self.reconstruction_refine_viewport = viewport
+        register_resource = getattr(
+            self.application, "register_shutdown_resource", None
+        )
+        if callable(register_resource):
+            register_resource(
+                ShutdownPhase.GPU_RESOURCES,
+                "native-reconstruction-refine-viewport",
+                viewport.close,
+            )
+        return viewport
+
+    def _hide_reconstruction_refine_output(self) -> None:
+        set_visible = getattr(
+            getattr(self, "view", None),
+            "set_reconstruction_refine_view_visible",
+            None,
+        )
+        if callable(set_visible):
+            set_visible(False)
+        self._presented_refine_artifact_path = None
+        viewport = getattr(self, "reconstruction_refine_viewport", None)
+        if viewport is not None:
+            viewport.clear_model()
+
+    def _sync_reconstruction_refine_output(
+            self, workspace, operation_key, operation_id=None) -> None:
+        if (
+                not getattr(self.view, "reconstruction_workspace_mode", False)
+                or operation_key not in {"lr.refine", "hr.refine"}):
+            self._hide_reconstruction_refine_output()
+            return
+        try:
+            viewport = self._ensure_reconstruction_refine_viewport()
+        except RuntimeError:
+            return
+        set_visible = getattr(
+            self.view, "set_reconstruction_refine_view_visible", None
+        )
+        if callable(set_visible):
+            set_visible(True)
+        operation = None
+        if workspace is not None and operation_id:
+            try:
+                candidate = workspace.operation(str(operation_id))
+                if candidate.spec_key == operation_key:
+                    operation = candidate
+            except KeyError:
+                pass
+        if operation is None and workspace is not None:
+            operations = workspace.operations_for_spec(operation_key)
+            operation = operations[-1] if operations else None
+        generated = None
+        if operation is not None:
+            generated = next(
+                (
+                    artifact
+                    for artifact in workspace.artifacts_for_operation(
+                        operation.operation_id
+                    )
+                    if artifact.role == "refine_generated_mesh"
+                ),
+                None,
+            )
+        path = generated.path if generated is not None else None
+        if not path or not os.path.isfile(path):
+            if self._presented_refine_artifact_path is not None:
+                viewport.clear_model()
+                self._presented_refine_artifact_path = None
+            return
+        if path != self._presented_refine_artifact_path:
+            viewport.load_glb(path)
+            self._presented_refine_artifact_path = path
 
     def _on_snapshot_applied(self) -> None:
         if self.canvas_edit_coordinator is not None:

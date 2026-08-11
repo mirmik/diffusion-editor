@@ -183,6 +183,12 @@ consume. Base LR and every Refined LR result remain separate session-local
 variants. `Generate LR shape` always exposes Base LR; `Refine LR shape` exposes
 the refined variants and a separate `Refine source` selector, which defaults to
 Base LR. Preview selection does not silently change the next refine source.
+LR and HR geometry refine also export the last network prediction before the
+mask merge as `Generated before merge`. While either refine operation is
+selected, the editor keeps the working/merged model in the main viewport and
+shows this raw proposal simultaneously in a second viewport. The auxiliary
+view is hidden for unrelated operations and changing its artifact does not
+reset the main camera.
 Local-detail operations (upscaled conditioning, isolated local geometry,
 registration, fusion, local texture and transfer) remain disabled until their
 resumable runners and artifact contracts are connected.

@@ -484,6 +484,7 @@ class ReconstructionRun:
     stage_statuses: tuple[ReconstructionStageStatus, ...] = ()
     stage_progress: tuple[tuple[int, int], ...] = ()
     stage_artifacts: tuple["ReconstructionStageArtifact", ...] = ()
+    refine_generated_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -644,6 +645,7 @@ class ReconstructionLrVariant:
     source_path: str
     preview_artifact: ReconstructionStageArtifact
     parent_variant_id: str | None = None
+    refine_generated_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -667,6 +669,7 @@ class ReconstructionResult:
     texture_checkpoint_path: str | None = None
     resume_checkpoint_path: str | None = None
     backend: ReconstructionBackend = ReconstructionBackend.PIXAL3D
+    refine_generated_path: str | None = None
 
 
 @dataclass(frozen=True)

@@ -222,6 +222,7 @@ class PublishReconstructionResultCommand:
     run_kind: ReconstructionRunKind = ReconstructionRunKind.BASE
     parent_run_id: str | None = None
     backend: ReconstructionBackend = ReconstructionBackend.PIXAL3D
+    refine_generated_path: str | None = None
     run_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     label: str = "Publish 3D Reconstruction"
 
@@ -267,6 +268,7 @@ class PublishReconstructionResultCommand:
                 for stage in RECONSTRUCTION_STAGES
                 if stage in stage_artifacts
             ),
+            refine_generated_path=self.refine_generated_path,
         )
         runs = (
             (run,)

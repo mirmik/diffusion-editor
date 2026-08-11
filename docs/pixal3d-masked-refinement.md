@@ -98,6 +98,14 @@ than inheriting the values last used by another refine phase. Mask painting is
 intentionally shared: paint/erase mode, brush size, hardness, flow and clear
 live in the separate `Mask tools` block and operate on the same canvas mask.
 
+For LR and HR geometry refinement the final flow step has two distinct
+outputs. The unblended network prediction is decoded to
+`*-refine-generated.glb`; the normal result is produced only after its selected
+tokens are merged with the base latent. The workspace exposes the former as
+`Generated before merge`. Selecting an LR or HR refine operation displays it
+in a dedicated auxiliary 3D viewport beside the main working/merged model, so
+both can be inspected at once without resetting the main camera.
+
 ## Masked texture refinement
 
 Every completed textured run owns two independent checkpoints:

@@ -245,6 +245,7 @@ def test_legacy_projection_exposes_refine_runs_as_stage_local_variants() -> None
             "/tmp/refined-hr.glb",
             "mesh",
         ),),
+        refine_generated_path="/tmp/refined-generated.glb",
     )
     workspace = build_legacy_workspace(
         ReconstructionParameters(), {}, {}, (base, refined), "refined"
@@ -261,6 +262,14 @@ def test_legacy_projection_exposes_refine_runs_as_stage_local_variants() -> None
     assert workspace.selected_artifact_id is not None
     selected = workspace.artifact(workspace.selected_artifact_id)
     assert selected.path in {"/tmp/refined-hr.glb", "/tmp/refined.glb"}
+    refined_operation = workspace.operations_for_spec("hr.refine")[0]
+    generated = next(
+        item for item in workspace.artifacts_for_operation(
+            refined_operation.operation_id
+        )
+        if item.role == "refine_generated_mesh"
+    )
+    assert generated.path == "/tmp/refined-generated.glb"
 
 
 def test_legacy_projection_keeps_base_and_refined_lr_previews_separate() -> None:
@@ -281,6 +290,7 @@ def test_legacy_projection_keeps_base_and_refined_lr_previews_separate() -> None
     refined = ReconstructionLrVariant(
         "lr-refined-1", "Refined LR 1", "/tmp/refined-lr.npz",
         "/tmp/source.png", refined_preview, parent_variant_id="lr-base",
+        refine_generated_path="/tmp/lr-generated.glb",
     )
     statuses = {
         stage: ReconstructionStageStatus.READY
@@ -321,6 +331,10 @@ def test_legacy_projection_keeps_base_and_refined_lr_previews_separate() -> None
     assert next(
         item.path for item in refined_artifacts if item.role == "lr_preview"
     ) == "/tmp/refined-lr.glb"
+    assert next(
+        item.path for item in refined_artifacts
+        if item.role == "refine_generated_mesh"
+    ) == "/tmp/lr-generated.glb"
 
 
 def test_legacy_projection_is_pixal_only() -> None:
