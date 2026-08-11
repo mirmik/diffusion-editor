@@ -5,6 +5,7 @@ from diffusion_editor.generation.local_detail_geometry import (
     LocalDetailTransform,
     fit_local_detail_transform,
     local_roi_bounds,
+    merge_local_lr_latent,
     overlap_face_masks,
     project_pixal_points,
     sample_mask_bilinear,
@@ -97,3 +98,52 @@ def test_transform_methods_preserve_float32_arrays():
     points = np.zeros((2, 3), dtype=np.float32)
 
     assert transform.apply(points).dtype == np.float32
+
+
+def test_merge_local_lr_latent_replaces_core_and_keeps_exterior():
+    base_coords = np.asarray((
+        (0, 0, 0, 0),
+        (0, 1, 1, 1),
+        (0, 3, 3, 3),
+    ), dtype=np.int32)
+    base_feats = np.asarray(((1.0,), (2.0,), (3.0,)), dtype=np.float32)
+    local_coords = np.asarray((
+        (0, 0, 0, 0),
+        (0, 3, 3, 3),
+    ), dtype=np.int32)
+    local_feats = np.asarray(((10.0,), (20.0,)), dtype=np.float32)
+
+    coords, feats = merge_local_lr_latent(
+        base_coords,
+        base_feats,
+        local_coords,
+        local_feats,
+        LocalDetailTransform(1.0 / 3.0, (0.0, 0.0, 0.0)),
+        np.asarray(((-0.5, -0.5, -0.5), (0.5, 0.5, 0.5))),
+        grid_resolution=4,
+        base_inner_radius=0.7,
+        local_outer_radius=1.2,
+    )
+
+    result = {tuple(coord): float(feat[0]) for coord, feat in zip(coords, feats)}
+    assert result[(0, 0, 0, 0)] == 1.0
+    assert result[(0, 1, 1, 1)] == 10.0
+    assert result[(0, 2, 2, 2)] == 20.0
+    assert result[(0, 3, 3, 3)] == 3.0
+
+
+def test_merge_local_lr_latent_averages_collapsed_tokens():
+    coords, feats = merge_local_lr_latent(
+        np.asarray(((0, 0, 0, 0),), dtype=np.int32),
+        np.asarray(((1.0, 2.0),), dtype=np.float32),
+        np.asarray(((0, 0, 0, 0), (0, 1, 1, 1)), dtype=np.int32),
+        np.asarray(((4.0, 6.0), (8.0, 10.0)), dtype=np.float32),
+        LocalDetailTransform(0.01, (0.5, 0.5, 0.5)),
+        np.asarray(((0.45, 0.45, 0.45), (0.55, 0.55, 0.55))),
+        grid_resolution=4,
+        base_inner_radius=0.5,
+        local_outer_radius=1.2,
+    )
+
+    assert coords.tolist() == [[0, 0, 0, 0], [0, 3, 3, 3]]
+    assert feats[1].tolist() == pytest.approx([6.0, 8.0])

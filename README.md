@@ -177,19 +177,20 @@ automatic camera estimation by source content. Cancellation, protocol/runtime
 errors, a low-VRAM identity change, or editor shutdown terminates the worker;
 the next request then starts a clean runtime. Custom runner paths retain the
 one-shot subprocess fallback unless persistence is explicitly requested.
-Masked LR refine is connected to the experimental workspace: it consumes an
-explicitly selected LR session checkpoint, publishes a decoded LR mesh preview
-and writes a new `lr_shape_latent` checkpoint that ordinary HR resume can
-consume. Base LR and every Refined LR result remain separate session-local
+Masked LR refine is connected to the experimental workspace as one atomic
+enlarged operation. It consumes an explicitly selected LR session checkpoint,
+generates the masked crop independently with the complete LR grid, registers
+that local result, publishes it in `Refine output · before merge`, and blends a
+compressed copy into a new `lr_shape_latent` checkpoint that ordinary HR resume
+can consume. Base LR and every Refined LR result remain separate session-local
 variants. `Generate LR shape` always exposes Base LR; `Refine LR shape` exposes
 the refined variants and a separate `Refine source` selector, which defaults to
 Base LR. Preview selection does not silently change the next refine source.
-The auxiliary `Refine output · before merge` viewport is reserved for the
-enlarged local fragment produced by an atomic refine before it is merged into
-the working model. Internal crop/upscale/local-generation/registration stages
-are intentionally hidden from the user-facing graph. Legacy full-grid masked
-refine does not publish a substitute artifact into this view; wiring the
-atomic local runners for LR, HR and texture remains migration work.
+The auxiliary viewport never substitutes a full-model proposal for the local
+fragment. Internal crop/local-camera/sparse/LR-generation/registration stages
+are intentionally hidden from the user-facing graph. HR and texture still use
+their legacy fixed-grid paths and publish no before-merge artifact while their
+atomic local runners are pending.
 Local-detail operations (upscaled conditioning, isolated local geometry,
 registration, fusion, local texture and transfer) remain disabled until their
 resumable runners and artifact contracts are connected.

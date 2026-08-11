@@ -276,7 +276,7 @@ class Pixal3DProcessClient:
         generation_parameters: ReconstructionParameters | None = None,
         on_event: Callable[[ReconstructionStageEvent], None] | None = None,
     ) -> tuple[Path, Path]:
-        """Masked-refine an LR latent and return a resumable LR checkpoint."""
+        """Generate, register and merge an enlarged local LR checkpoint."""
         self._validate_runtime()
         if not self._staged:
             raise RuntimeError("LR refinement requires the staged runner")

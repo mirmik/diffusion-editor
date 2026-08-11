@@ -147,6 +147,9 @@ if args.session_checkpoint:
     Path(args.session_checkpoint).write_bytes(b'npz-resume')
 if args.lr_refine_checkpoint:
     Path(args.output).write_bytes(b'glTF-lr-refined')
+    Path(args.output).with_name('lr-refine-generated.glb').write_bytes(
+        b'glTF-lr-local'
+    )
     with Path(args.events).open('w') as stream:
         stream.write(json.dumps({
             'stage': 'lr_shape_flow',
@@ -590,7 +593,8 @@ def test_staged_client_runs_masked_lr_refine_to_resume_checkpoint(tmp_path):
     assert source.is_file()
     assert client.resume_checkpoint_path is not None
     assert client.resume_checkpoint_path.read_bytes() == b"npz-resume"
-    assert client.refine_generated_path is None
+    assert client.refine_generated_path is not None
+    assert client.refine_generated_path.read_bytes() == b"glTF-lr-local"
     assert captured["lr_refine_checkpoint"] == str(base_checkpoint)
     assert captured["lr_conditioning_resolution"] == "1024"
     assert captured["resolution"] == "1536"

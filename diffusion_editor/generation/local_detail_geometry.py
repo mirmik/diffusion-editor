@@ -193,3 +193,114 @@ def overlap_face_masks(
     base_radius = radii_for(base_vertices, base_faces)
     local_radius = radii_for(local_vertices, local_faces)
     return base_radius >= base_inner_radius, local_radius <= local_outer_radius
+
+
+def merge_local_lr_latent(
+        base_coords: np.ndarray,
+        base_feats: np.ndarray,
+        local_coords: np.ndarray,
+        local_feats: np.ndarray,
+        transform: LocalDetailTransform,
+        target_bounds: np.ndarray,
+        *,
+        grid_resolution: int = 32,
+        base_inner_radius: float = 0.72,
+        local_outer_radius: float = 1.08,
+        blend_strength: float = 1.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compress a full-grid local LR latent into a global LR checkpoint.
+
+    Pixal3D LR coordinates live on the sparse 32³ grid while decoded geometry
+    lives in the canonical ``[-0.5, 0.5]`` cube.  The registered local latent
+    is transformed through that canonical space, quantized back onto the base
+    grid and blended through an ellipsoidal overlap collar.
+    """
+    base_xyz = np.asarray(base_coords)
+    local_xyz = np.asarray(local_coords)
+    base_values = np.asarray(base_feats)
+    local_values = np.asarray(local_feats)
+    bounds = np.asarray(target_bounds, dtype=np.float64)
+    if base_xyz.ndim != 2 or base_xyz.shape[1] != 4:
+        raise ValueError("base_coords must have shape [N, 4]")
+    if local_xyz.ndim != 2 or local_xyz.shape[1] != 4:
+        raise ValueError("local_coords must have shape [N, 4]")
+    if base_values.ndim != 2 or len(base_values) != len(base_xyz):
+        raise ValueError("base_feats must have shape [N, C]")
+    if (
+            local_values.ndim != 2
+            or len(local_values) != len(local_xyz)
+            or local_values.shape[1] != base_values.shape[1]
+    ):
+        raise ValueError("local_feats must match base feature width")
+    if bounds.shape != (2, 3) or np.any(bounds[1] <= bounds[0]):
+        raise ValueError("target_bounds must have shape [2, 3]")
+    if grid_resolution < 2:
+        raise ValueError("grid_resolution must be at least two")
+    if not 0.0 < base_inner_radius < local_outer_radius:
+        raise ValueError("overlap radii must be positive and ordered")
+    if not 0.0 < blend_strength <= 1.0:
+        raise ValueError("blend_strength must be in (0, 1]")
+
+    denominator = float(grid_resolution - 1)
+    center = bounds.mean(axis=0)
+    radii = np.maximum((bounds[1] - bounds[0]) * 0.5, 1e-8)
+    base_points = base_xyz[:, 1:].astype(np.float64) / denominator - 0.5
+    local_points = local_xyz[:, 1:].astype(np.float64) / denominator - 0.5
+    registered = transform.apply(local_points)
+    base_radius = np.linalg.norm((base_points - center) / radii, axis=1)
+    local_radius = np.linalg.norm((registered - center) / radii, axis=1)
+    mapped = np.rint((registered + 0.5) * denominator).astype(np.int64)
+
+    # Keep the base outside the replacement core.  Ordered dictionaries are
+    # unnecessary here: sorting the final integer coordinates makes checkpoint
+    # output deterministic across NumPy versions.
+    values: dict[tuple[int, int, int, int], tuple[np.ndarray, float]] = {}
+    for coord, feat, radius in zip(base_xyz, base_values, base_radius):
+        if radius >= base_inner_radius:
+            values[tuple(map(int, coord))] = (
+                np.asarray(feat, dtype=np.float64).copy(), 0.0
+            )
+
+    # Several local tokens can collapse onto one global token.  Accumulate
+    # their features before applying the collar blend.
+    accumulated: dict[tuple[int, int, int, int], tuple[np.ndarray, int, float]] = {}
+    for batch, xyz, feat, radius in zip(
+            local_xyz[:, 0], mapped, local_values, local_radius):
+        if not (np.all((xyz >= 0) & (xyz < grid_resolution))
+                and radius <= local_outer_radius):
+            continue
+        key = (int(batch), int(xyz[0]), int(xyz[1]), int(xyz[2]))
+        if key in accumulated:
+            total, count, nearest_radius = accumulated[key]
+            accumulated[key] = (total + feat, count + 1,
+                                 min(nearest_radius, float(radius)))
+        else:
+            accumulated[key] = (
+                np.asarray(feat, dtype=np.float64).copy(), 1, float(radius)
+            )
+
+    collar_width = local_outer_radius - base_inner_radius
+    for key, (total, count, radius) in accumulated.items():
+        local_feat = total / count
+        collar = np.clip(
+            (local_outer_radius - radius) / collar_width, 0.0, 1.0
+        )
+        local_weight = float(collar * blend_strength)
+        if key in values:
+            base_feat, _ = values[key]
+            values[key] = (
+                base_feat * (1.0 - local_weight)
+                + local_feat * local_weight,
+                local_weight,
+            )
+        elif local_weight > 0.0:
+            values[key] = (local_feat, local_weight)
+
+    if not values:
+        raise ValueError("local LR merge produced an empty sparse latent")
+    ordered = sorted(values)
+    merged_coords = np.asarray(ordered, dtype=base_xyz.dtype)
+    merged_feats = np.stack([values[key][0] for key in ordered]).astype(
+        base_values.dtype, copy=False
+    )
+    return merged_coords, merged_feats

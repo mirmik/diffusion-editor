@@ -707,8 +707,16 @@ def _preprocess_refine_pair(pipeline, source_image, mask_image):
 def _run_lr_refine(
     args, reporter, upstream, sp, torch, np, pipeline=None
 ) -> None:
-    """Masked-refine a saved LR latent and publish a resumable LR variant."""
+    """Generate an enlarged local LR shape and merge it into a resumable LR."""
     from PIL import Image
+    import trimesh
+    from diffusion_editor.generation.local_detail_geometry import (
+        fit_local_detail_transform,
+        local_roi_bounds,
+        merge_local_lr_latent,
+        project_pixal_points,
+        sample_mask_bilinear,
+    )
 
     checkpoint_path = Path(args.lr_refine_checkpoint)
     with np.load(checkpoint_path, allow_pickle=False) as saved:
@@ -746,95 +754,123 @@ def _run_lr_refine(
     preprocessed = artifact_root / "preprocessed.png"
     condition_image.save(preprocessed)
     mask_image.save(artifact_root / "preprocessed-mask.png")
-    token_mask = _project_mask_to_tokens(mask_image, coords, 512, camera)
-    if not bool((token_mask > 0.0).any()):
-        raise ValueError("LR refine mask does not select any visible 3D tokens")
+    base_lr = sp.SparseTensor(feats=base_feats, coords=coords)
+    base_meshes, _ = pipeline.decode_shape_slat(base_lr, 512)
+    base_mesh = base_meshes[0]
+    base_vertices = _tensor_numpy(base_mesh.vertices).astype(
+        np.float32, copy=False
+    )
+    pixels, _depth, valid = project_pixal_points(
+        base_vertices,
+        camera_angle_x=camera["camera_angle_x"],
+        distance=camera["distance"],
+        mesh_scale=camera.get("mesh_scale", 1.0),
+        image_size=mask_image.size,
+    )
+    weights = sample_mask_bilinear(np.asarray(mask_image), pixels)
+    weights[~valid] = 0.0
+    bounds = local_roi_bounds(
+        base_vertices, weights, threshold=0.05, quantile=0.01, padding=0.15
+    )
 
-    conditioner, _grid_override = _lr_conditioner(
+    crop_box = _detail_crop_box(mask_image)
+    detail_rgb = condition_image.crop(crop_box).convert("RGB")
+    detail_mask = mask_image.crop(crop_box).convert("L")
+    detail_source = detail_rgb.convert("RGBA")
+    detail_source.putalpha(detail_mask)
+    detail_source.save(artifact_root / "lr-local-source.png")
+    local_image = pipeline.preprocess_image(detail_source)
+    local_image.save(artifact_root / "lr-local-condition.png")
+    local_camera_input = artifact_root / "lr-local-camera-input.png"
+    local_image.save(local_camera_input)
+    moge = upstream.load_moge_model(device="cuda")
+    local_camera = upstream.get_camera_params_wild_moge(
+        str(local_camera_input), moge, device="cuda"
+    )
+    moge.cpu()
+    del moge
+    torch.cuda.empty_cache()
+
+    sampler_parameters = {
+        "steps": args.refine_steps,
+        "guidance_strength": args.refine_guidance,
+        "guidance_rescale": 0.5,
+        "rescale_t": args.refine_rescale_t,
+    }
+    sparse_parameters = {
+        **sampler_parameters,
+        "guidance_rescale": 0.7,
+        "rescale_t": 5.0,
+    }
+    torch.manual_seed(args.refine_seed)
+    sparse_condition = pipeline.get_proj_cond_ss(
+        [local_image], **local_camera
+    )
+    local_coords = pipeline.sample_sparse_structure(
+        sparse_condition, 32, 1, sparse_parameters
+    )
+    del sparse_condition
+    torch.cuda.empty_cache()
+
+    conditioner, grid_override = _lr_conditioner(
         pipeline, args.lr_conditioning_resolution
     )
-    cond, geometry_detail = _masked_detail_condition(
-        pipeline,
+    local_condition = pipeline.get_proj_cond_shape(
         conditioner,
-        condition_image,
-        mask_image,
-        coords,
-        512,
-        camera,
-        token_mask,
-        torch,
-        args.resize_refine_detail,
+        [local_image],
+        local_coords,
+        grid_resolution_override=grid_override,
+        **local_camera,
     )
-    if geometry_detail is not None:
-        geometry_detail.save(artifact_root / "lr-geometry-detail-1024.png")
-
-    std = torch.tensor(
-        pipeline.shape_slat_normalization["std"], device=base_feats.device
-    )[None]
-    mean = torch.tensor(
-        pipeline.shape_slat_normalization["mean"], device=base_feats.device
-    )[None]
-    base_normalized = (base_feats - mean) / std
-    x0 = sp.SparseTensor(feats=base_normalized, coords=coords)
-    generator = torch.Generator(device="cuda").manual_seed(args.refine_seed)
-    noise = torch.randn(
-        base_normalized.shape,
-        generator=generator,
-        device=base_normalized.device,
-        dtype=base_normalized.dtype,
-    )
-    sampler = pipeline.shape_slat_sampler
-    sigma_min = sampler.sigma_min
-    raw_times = np.linspace(args.refine_strength, 0.0, args.refine_steps + 1)
-    times = (
-        args.refine_rescale_t * raw_times
-        / (1 + (args.refine_rescale_t - 1) * raw_times)
-    )
-
-    def reference_at(value: float):
-        sigma = sigma_min + (1 - sigma_min) * value
-        return (1 - value) * base_normalized + sigma * noise
-
-    sample = x0.replace(reference_at(float(times[0])))
-    flow = pipeline.models["shape_slat_flow_model_512"]
-    if pipeline.low_vram:
-        flow.to(pipeline.device)
-    blend = token_mask[:, None].to(base_normalized.dtype)
     reporter.emit("lr_shape_flow", "running", total=args.refine_steps)
-    with torch.inference_mode():
-        for index, (current, previous) in enumerate(
-            zip(times[:-1], times[1:]), 1
-        ):
-            out = sampler.sample_once(
-                flow,
-                sample,
-                float(current),
-                float(previous),
-                cond["cond"],
-                neg_cond=cond["neg_cond"],
-                guidance_strength=args.refine_guidance,
-                guidance_rescale=0.5,
-                guidance_interval=(0.6, 1.0),
-            )
-            reference = reference_at(float(previous))
-            sample = out.pred_x_prev.replace(
-                out.pred_x_prev.feats * blend + reference * (1 - blend)
-            )
-            reporter.emit(
-                "lr_shape_flow", "running",
-                progress=index, total=args.refine_steps,
-            )
-    if pipeline.low_vram:
-        flow.cpu()
-    sample = sample.replace(
-        sample.feats * blend + base_normalized * (1 - blend)
+    local_lr = pipeline.sample_shape_slat(
+        local_condition,
+        pipeline.models["shape_slat_flow_model_512"],
+        local_coords,
+        sampler_parameters,
     )
+    del local_condition
+    torch.cuda.empty_cache()
     reporter.emit(
         "lr_shape_flow", "ready",
         progress=args.refine_steps, total=args.refine_steps,
     )
 
-    refined_lr = sample.replace(sample.feats * std + mean)
+    local_meshes, _ = pipeline.decode_shape_slat(local_lr, 512)
+    local_mesh = local_meshes[0]
+    local_vertices = _tensor_numpy(local_mesh.vertices).astype(
+        np.float32, copy=False
+    )
+    registration = fit_local_detail_transform(
+        local_vertices, bounds, quantile=0.01
+    )
+    registered_vertices = registration.apply(local_vertices).astype(
+        np.float32, copy=False
+    )
+    generated_path = artifact_root / "lr-refine-generated.glb"
+    generated = trimesh.Trimesh(
+        vertices=registered_vertices,
+        faces=_tensor_numpy(local_mesh.faces).astype(np.int64, copy=False),
+        process=False,
+    )
+    generated.remove_unreferenced_vertices()
+    generated.apply_transform(_preview_transform())
+    generated.export(generated_path)
+
+    merged_coords, merged_feats = merge_local_lr_latent(
+        _tensor_numpy(coords),
+        _tensor_numpy(base_feats),
+        _tensor_numpy(local_lr.coords),
+        _tensor_numpy(local_lr.feats),
+        registration,
+        bounds,
+        grid_resolution=32,
+        blend_strength=args.refine_strength,
+    )
+    refined_lr = sp.SparseTensor(
+        feats=torch.from_numpy(merged_feats).to("cuda"),
+        coords=torch.from_numpy(merged_coords).to("cuda"),
+    )
     _save_session_checkpoint(
         Path(args.session_checkpoint),
         "lr_shape_latent",
@@ -843,6 +879,25 @@ def _run_lr_refine(
         camera,
         preprocessed,
         args.model_path,
+    )
+    (artifact_root / "lr-local-refine.json").write_text(
+        json.dumps({
+            "protocol": 1,
+            "crop_box": list(crop_box),
+            "roi_bounds": bounds.tolist(),
+            "registration": {
+                "scale": registration.scale,
+                "translation": list(registration.translation),
+            },
+            "base_tokens": int(len(coords)),
+            "local_tokens": int(len(local_lr.coords)),
+            "merged_tokens": int(len(refined_lr.coords)),
+            "artifacts": {
+                "generated_before_merge": generated_path.name,
+                "merged_preview": Path(args.output).name,
+            },
+        }, indent=2),
+        encoding="utf-8",
     )
     meshes, _ = pipeline.decode_shape_slat(refined_lr, 512)
     preview = _shape_preview(meshes, Path(args.output))
