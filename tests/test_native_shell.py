@@ -622,10 +622,19 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar(
             strength=0.6, steps=12, seed=456,
             resize_detail_to_1024=False,
         )
+        lr_refine_parameters = ReconstructionRefineParameters(
+            strength=0.5, steps=13, seed=457,
+        )
+        texture_refine_parameters = ReconstructionRefineParameters(
+            strength=0.7, steps=14, seed=458,
+            resize_detail_to_1024=True,
+        )
         view.update_reconstruction_refine(
             refine_parameters,
             runs,
             "refined-run",
+            lr_parameters=lr_refine_parameters,
+            texture_parameters=texture_refine_parameters,
             mask_ready=True,
             can_refine=True,
             can_texture_refine=True,
@@ -659,32 +668,57 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar(
         assert workspace_mask_controls["brush_size"].value == 72.0
         assert workspace_mask_controls["brush_hardness"].value == 0.25
         assert workspace_mask_controls["brush_flow"].value == 0.75
-        assert workspace_mask_controls[
-            "resize_detail_to_1024"
-        ].checked is False
-        assert workspace_mask_controls["strength"].value == pytest.approx(0.6)
-        assert workspace_mask_controls["steps"].value == 12.0
-        assert workspace_mask_controls["seed"].value == 456.0
         assert workspace_mask_controls["clear"].widget.enabled is True
-        assert workspace_mask_controls["seed_random"].widget.enabled is True
+        assert set(workspace_mask_controls) == {
+            "paint", "erase", "brush_size", "brush_hardness",
+            "brush_flow", "clear",
+        }
         view._select_reconstruction_workspace_operation("lr.refine")
+        workspace_refine_controls = (
+            view.reconstruction_workspace_refine_parameter_controls
+        )
+        assert view.reconstruction_workspace_refine_parameters_title.text == (
+            "LR refine parameters"
+        )
+        assert workspace_refine_controls["strength"].value == pytest.approx(
+            0.5
+        )
+        assert workspace_refine_controls["steps"].value == 13.0
+        assert workspace_refine_controls["seed"].value == 457.0
+        assert view.reconstruction_workspace_refine_parameter_rows[
+            "resize_detail_to_1024"
+        ].visible is False
+        view._change_reconstruction_workspace_refine_parameter("steps", 17)
+        assert refine_actions[-1] == ("lr_steps", 17)
+        view._randomize_reconstruction_workspace_refine_seed()
+        assert refine_actions[-1] == ("lr_seed", 987654321)
         assert view.reconstruction_workspace_actions[
             "refine"
         ].widget.enabled is True
         view._run_reconstruction_workspace_refine()
         assert refine_actions[-1] == ("run_lr", None)
         view._select_reconstruction_workspace_operation("hr.refine")
+        assert workspace_refine_controls["steps"].value == 12.0
+        assert workspace_refine_controls["seed"].value == 456.0
+        assert view.reconstruction_workspace_refine_parameter_rows[
+            "resize_detail_to_1024"
+        ].visible is True
         assert view.reconstruction_workspace_actions[
             "refine"
         ].widget.enabled is True
         view._run_reconstruction_workspace_refine()
         assert refine_actions[-1] == ("run", None)
         view._select_reconstruction_workspace_operation("texture.refine")
+        assert workspace_refine_controls["steps"].value == 14.0
+        assert workspace_refine_controls["seed"].value == 458.0
+        assert workspace_refine_controls[
+            "resize_detail_to_1024"
+        ].checked is True
         assert view.reconstruction_workspace_actions[
             "refine"
         ].widget.enabled is True
         view._run_reconstruction_workspace_refine()
-        assert refine_actions[-1] == ("run_texture", None)
+        assert refine_actions[-1] == ("run_texture_workspace", None)
         assert view.reconstruction_refine_title.visible is True
         assert view.reconstruction_refine_panel.visible is True
         assert view.reconstruction_versions_panel.visible is True

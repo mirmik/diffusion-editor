@@ -100,6 +100,13 @@ def test_reconstruction_result_is_bound_to_its_node_and_roundtrips(tmp_path) -> 
         guidance_strength=6.0,
         resize_detail_to_1024=False,
     )
+    node.lr_refine_parameters = ReconstructionRefineParameters(
+        strength=0.45, steps=9, seed=457,
+    )
+    node.texture_refine_parameters = ReconstructionRefineParameters(
+        strength=0.65, steps=13, seed=458,
+        resize_detail_to_1024=False,
+    )
     glb_path = tmp_path / "character.glb"
     glb_path.write_bytes(b"glTF")
 
@@ -129,6 +136,11 @@ def test_reconstruction_result_is_bound_to_its_node_and_roundtrips(tmp_path) -> 
     assert restored.generation_parameters == node.generation_parameters
     assert restored.generation_parameters.backend is ReconstructionBackend.TRELLIS2
     assert restored.refine_parameters == node.refine_parameters
+    assert restored.lr_refine_parameters == node.lr_refine_parameters
+    assert (
+        restored.texture_refine_parameters
+        == node.texture_refine_parameters
+    )
     assert len(restored.runs) == 1
     assert restored.active_run is restored.base_run
     assert restored.target_stage is ReconstructionStage.FINAL_MESH
@@ -373,13 +385,16 @@ def test_root_refine_entry_point_uses_active_run_checkpoint(tmp_path) -> None:
     root._start_selected_reconstruction_refine(node)
     assert controller.captured[2] == str(checkpoint)
     assert root._reconstruction_parent_run_id is None
-    root._start_selected_reconstruction_texture_refine(node)
+    root._start_selected_reconstruction_texture_refine(
+        node, parameters=node.texture_refine_parameters
+    )
     assert controller.texture_captured[2:4] == (
         str(checkpoint), str(texture_checkpoint)
     )
+    assert controller.texture_captured[4] == node.texture_refine_parameters
     root._start_selected_reconstruction_lr_refine(node)
     assert controller.lr_captured[2] == str(checkpoint)
-    assert controller.lr_captured[3] == node.refine_parameters
+    assert controller.lr_captured[3] == node.lr_refine_parameters
     assert root._reconstruction_job_source_sha256 == "source-hash"
 
     refined_checkpoint = tmp_path / "refined-lr.npz"

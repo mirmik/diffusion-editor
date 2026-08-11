@@ -86,6 +86,12 @@ _WORKSPACE_MASK_OPERATION_KEYS = {
     "texture.refine",
 }
 
+_WORKSPACE_REFINE_PARAMETER_SCOPES = {
+    "lr.refine": ("lr", "LR refine parameters"),
+    "hr.refine": ("hr", "HR geometry refine parameters"),
+    "texture.refine": ("texture", "Texture refine parameters"),
+}
+
 
 def _set_widget_background(widget, color: SrgbColor) -> None:
     style_override = widget.style_override
@@ -404,6 +410,11 @@ class NativeEditorView:
         self.reconstruction_workspace_seed_buttons = {}
         self.reconstruction_workspace_mask_panel = None
         self.reconstruction_workspace_mask_controls = {}
+        self.reconstruction_workspace_refine_parameters_panel = None
+        self.reconstruction_workspace_refine_parameters_title = None
+        self.reconstruction_workspace_refine_parameter_controls = {}
+        self.reconstruction_workspace_refine_parameter_rows = {}
+        self._reconstruction_workspace_refine_parameters = {}
         self._reconstruction_workspace_parameters = None
         self._reconstruction_workspace_handler = None
         self._reconstruction_workspace_snapshot = None
@@ -1430,7 +1441,7 @@ class NativeEditorView:
         )
         workspace_mask_panel.set_layout_spacing(3.0)
         mask_caption = self._document.create_label(
-            "Refine mask",
+            "Mask tools",
             "DiffusionEditorReconstructionWorkspaceInspectorTitle",
         )
         mask_caption.stable_id = (
@@ -1485,40 +1496,6 @@ class NativeEditorView:
             workspace_mask_controls[key] = control
             workspace_mask_panel.add_preferred_child(control.widget)
 
-        def add_workspace_mask_spin(key, label, value, minimum, maximum):
-            row = self._document.create_hstack(
-                "DiffusionEditorReconstructionWorkspaceInspectorRow"
-            )
-            row.set_layout_spacing(4.0)
-            caption = self._document.create_label(
-                label, "DiffusionEditorReconstructionWorkspaceInspectorText"
-            )
-            control = self._document.create_spin_box(float(value))
-            control.widget.stable_id = (
-                f"diffusion-editor.reconstruction.workspace.mask.{key}"
-            )
-            control.set_range(float(minimum), float(maximum))
-            control.step = 1.0
-            control.decimals = 0
-            self._connections.append(control.connect_changed(
-                lambda value, key=key:
-                self._activate_reconstruction_refine(key, value)
-            ))
-            row.add_flex_child(caption, 1.0)
-            row.add_fixed_child(control.widget, 108.0)
-            if key == "seed":
-                random_button = self._document.create_button("Random")
-                random_button.widget.stable_id = (
-                    "diffusion-editor.reconstruction.workspace.mask.seed.random"
-                )
-                self._connections.append(random_button.connect_clicked(
-                    self._randomize_reconstruction_refine_seed
-                ))
-                workspace_mask_controls["seed_random"] = random_button
-                row.add_fixed_child(random_button.widget, 68.0)
-            workspace_mask_controls[key] = control
-            workspace_mask_panel.add_preferred_child(row)
-
         add_workspace_mask_checkbox("paint", "Paint refine mask")
         add_workspace_mask_checkbox("erase", "Erase mask")
         add_workspace_mask_slider("brush_size", "Brush size", 50, 1, 500, 1)
@@ -1527,20 +1504,6 @@ class NativeEditorView:
         )
         add_workspace_mask_slider(
             "brush_flow", "Flow", 1.0, 0, 1, 0.05, 2
-        )
-        add_workspace_mask_checkbox(
-            "resize_detail_to_1024", "Resize masked detail to 1024"
-        )
-        add_workspace_mask_slider(
-            "strength", "Strength", refine_defaults.strength,
-            0.05, 1.0, 0.05, 2,
-        )
-        add_workspace_mask_spin(
-            "steps", "Refine steps", refine_defaults.steps, 1, 50
-        )
-        add_workspace_mask_spin(
-            "seed", "Refine seed", refine_defaults.seed,
-            0, _MAX_RECONSTRUCTION_SEED
         )
         clear_workspace_mask = self._document.create_button(
             "Clear refine mask"
@@ -1555,6 +1518,132 @@ class NativeEditorView:
         workspace_mask_panel.add_preferred_child(clear_workspace_mask.widget)
         workspace_mask_panel.visible = False
         workspace_content.add_preferred_child(workspace_mask_panel)
+
+        workspace_refine_parameters_panel = self._document.create_vstack(
+            "DiffusionEditorReconstructionWorkspaceRefineParameters"
+        )
+        workspace_refine_parameters_panel.stable_id = (
+            "diffusion-editor.reconstruction.workspace.refine-parameters"
+        )
+        workspace_refine_parameters_panel.set_layout_spacing(3.0)
+        workspace_refine_parameters_title = self._document.create_label(
+            "Refine parameters",
+            "DiffusionEditorReconstructionWorkspaceInspectorTitle",
+        )
+        workspace_refine_parameters_panel.add_preferred_child(
+            workspace_refine_parameters_title
+        )
+        workspace_refine_parameter_controls = {}
+        workspace_refine_parameter_rows = {}
+
+        def add_workspace_refine_checkbox(key, label, checked=False):
+            row = self._document.create_hstack(
+                "DiffusionEditorReconstructionWorkspaceInspectorRow"
+            )
+            row.set_layout_spacing(4.0)
+            control = self._document.create_checkbox(checked)
+            control.widget.stable_id = (
+                "diffusion-editor.reconstruction.workspace.refine."
+                f"{key}"
+            )
+            caption = self._document.create_label(
+                label, "DiffusionEditorReconstructionWorkspaceInspectorText"
+            )
+            self._connections.append(control.connect_changed(
+                lambda value, key=key:
+                self._change_reconstruction_workspace_refine_parameter(
+                    key, bool(value)
+                )
+            ))
+            row.add_preferred_child(control.widget)
+            row.add_flex_child(caption, 1.0)
+            workspace_refine_parameter_controls[key] = control
+            workspace_refine_parameter_rows[key] = row
+            workspace_refine_parameters_panel.add_preferred_child(row)
+
+        def add_workspace_refine_slider(
+                key, label, value, minimum, maximum, step, decimals=0):
+            control = self._document.create_slider_edit(float(value))
+            control.widget.stable_id = (
+                "diffusion-editor.reconstruction.workspace.refine."
+                f"{key}"
+            )
+            control.label = label
+            control.set_range(float(minimum), float(maximum))
+            control.set_step(float(step))
+            control.set_decimals(int(decimals))
+            self._connections.append(control.connect_changed(
+                lambda value, key=key:
+                self._change_reconstruction_workspace_refine_parameter(
+                    key, value
+                )
+            ))
+            workspace_refine_parameter_controls[key] = control
+            workspace_refine_parameter_rows[key] = control.widget
+            workspace_refine_parameters_panel.add_preferred_child(
+                control.widget
+            )
+
+        def add_workspace_refine_spin(key, label, value, minimum, maximum):
+            row = self._document.create_hstack(
+                "DiffusionEditorReconstructionWorkspaceInspectorRow"
+            )
+            row.set_layout_spacing(4.0)
+            caption = self._document.create_label(
+                label, "DiffusionEditorReconstructionWorkspaceInspectorText"
+            )
+            control = self._document.create_spin_box(float(value))
+            control.widget.stable_id = (
+                "diffusion-editor.reconstruction.workspace.refine."
+                f"{key}"
+            )
+            control.set_range(float(minimum), float(maximum))
+            control.step = 1.0
+            control.decimals = 0
+            self._connections.append(control.connect_changed(
+                lambda value, key=key:
+                self._change_reconstruction_workspace_refine_parameter(
+                    key, value
+                )
+            ))
+            row.add_flex_child(caption, 1.0)
+            row.add_fixed_child(control.widget, 108.0)
+            if key == "seed":
+                random_button = self._document.create_button("Random")
+                random_button.widget.stable_id = (
+                    "diffusion-editor.reconstruction.workspace.refine."
+                    "seed.random"
+                )
+                self._connections.append(random_button.connect_clicked(
+                    self._randomize_reconstruction_workspace_refine_seed
+                ))
+                workspace_refine_parameter_controls["seed_random"] = (
+                    random_button
+                )
+                row.add_fixed_child(random_button.widget, 68.0)
+            workspace_refine_parameter_controls[key] = control
+            workspace_refine_parameter_rows[key] = row
+            workspace_refine_parameters_panel.add_preferred_child(row)
+
+        add_workspace_refine_checkbox(
+            "resize_detail_to_1024", "Resize masked detail to 1024",
+            refine_defaults.resize_detail_to_1024,
+        )
+        add_workspace_refine_slider(
+            "strength", "Strength", refine_defaults.strength,
+            0.05, 1.0, 0.05, 2,
+        )
+        add_workspace_refine_spin(
+            "steps", "Refine steps", refine_defaults.steps, 1, 50
+        )
+        add_workspace_refine_spin(
+            "seed", "Refine seed", refine_defaults.seed,
+            0, _MAX_RECONSTRUCTION_SEED,
+        )
+        workspace_refine_parameters_panel.visible = False
+        workspace_content.add_preferred_child(
+            workspace_refine_parameters_panel
+        )
 
         variant_row = self._document.create_hstack(
             "DiffusionEditorReconstructionWorkspaceInspectorRow"
@@ -1703,6 +1792,18 @@ class NativeEditorView:
         self.reconstruction_workspace_parameter_reset = parameter_reset
         self.reconstruction_workspace_mask_panel = workspace_mask_panel
         self.reconstruction_workspace_mask_controls = workspace_mask_controls
+        self.reconstruction_workspace_refine_parameters_panel = (
+            workspace_refine_parameters_panel
+        )
+        self.reconstruction_workspace_refine_parameters_title = (
+            workspace_refine_parameters_title
+        )
+        self.reconstruction_workspace_refine_parameter_controls = (
+            workspace_refine_parameter_controls
+        )
+        self.reconstruction_workspace_refine_parameter_rows = (
+            workspace_refine_parameter_rows
+        )
         self.reconstruction_status = status
         self.reconstruction_panel = panel
         self._select_reconstruction_workspace_operation("source.prepare")
@@ -1787,6 +1888,7 @@ class NativeEditorView:
             self.reconstruction_workspace_mask_panel.visible = (
                 key in _WORKSPACE_MASK_OPERATION_KEYS
             )
+        self._refresh_reconstruction_workspace_refine_parameters()
         self._refresh_reconstruction_workspace_actions()
         self._request_repaint()
 
@@ -1807,6 +1909,64 @@ class NativeEditorView:
         self._reconstruction_workspace_handler(
             "set_operation_parameter", (key, value)
         )
+
+    def _change_reconstruction_workspace_refine_parameter(
+            self, key: str, value) -> None:
+        if self._syncing_reconstruction_refine:
+            return
+        scope = _WORKSPACE_REFINE_PARAMETER_SCOPES.get(
+            self._selected_reconstruction_workspace_operation
+        )
+        if scope is None:
+            return
+        self._activate_reconstruction_refine(f"{scope[0]}_{key}", value)
+
+    def _refresh_reconstruction_workspace_refine_parameters(self) -> None:
+        panel = self.reconstruction_workspace_refine_parameters_panel
+        operation = self._selected_reconstruction_workspace_operation
+        scope = _WORKSPACE_REFINE_PARAMETER_SCOPES.get(operation)
+        if panel is None:
+            return
+        panel.visible = scope is not None
+        if scope is None:
+            return
+        if self.reconstruction_workspace_refine_parameters_title is not None:
+            self.reconstruction_workspace_refine_parameters_title.text = (
+                scope[1]
+            )
+        resize_row = self.reconstruction_workspace_refine_parameter_rows.get(
+            "resize_detail_to_1024"
+        )
+        if resize_row is not None:
+            resize_row.visible = operation != "lr.refine"
+        parameters = self._reconstruction_workspace_refine_parameters.get(
+            operation
+        )
+        if parameters is None:
+            return
+        controls = self.reconstruction_workspace_refine_parameter_controls
+        self._syncing_reconstruction_refine = True
+        try:
+            controls["resize_detail_to_1024"].checked = (
+                parameters.resize_detail_to_1024
+            )
+            controls["strength"].value = parameters.strength
+            controls["steps"].value = float(parameters.steps)
+            controls["seed"].value = float(parameters.seed)
+            for key in (
+                    "resize_detail_to_1024", "strength", "steps", "seed"):
+                controls[key].widget.enabled = bool(
+                    not self._reconstruction_workspace_busy
+                    and (key != "resize_detail_to_1024"
+                         or operation != "lr.refine")
+                )
+            seed_random = controls.get("seed_random")
+            if seed_random is not None:
+                seed_random.widget.enabled = (
+                    not self._reconstruction_workspace_busy
+                )
+        finally:
+            self._syncing_reconstruction_refine = False
 
     def _reset_reconstruction_workspace_parameters(self) -> None:
         if (
@@ -1964,7 +2124,7 @@ class NativeEditorView:
         elif (
                 key == "texture.refine"
                 and self._reconstruction_workspace_can_texture_refine):
-            self._activate_reconstruction_refine("run_texture")
+            self._activate_reconstruction_refine("run_texture_workspace")
 
     def _refresh_reconstruction_workspace_actions(self) -> None:
         generate = self.reconstruction_workspace_actions.get("generate")
@@ -2291,6 +2451,11 @@ class NativeEditorView:
             "seed", _random_reconstruction_seed()
         )
 
+    def _randomize_reconstruction_workspace_refine_seed(self) -> None:
+        self._change_reconstruction_workspace_refine_parameter(
+            "seed", _random_reconstruction_seed()
+        )
+
     def _change_reconstruction_parameter(self, key: str, value) -> None:
         if (
             self._syncing_reconstruction_parameters
@@ -2428,6 +2593,8 @@ class NativeEditorView:
         runs,
         active_run_id,
         *,
+        lr_parameters: ReconstructionRefineParameters | None = None,
+        texture_parameters: ReconstructionRefineParameters | None = None,
         mask_ready: bool,
         refine_supported: bool = True,
         can_refine: bool,
@@ -2513,16 +2680,9 @@ class NativeEditorView:
                 workspace_controls["brush_size"].value = float(brush_size)
                 workspace_controls["brush_hardness"].value = brush_hardness
                 workspace_controls["brush_flow"].value = brush_flow
-                workspace_controls["resize_detail_to_1024"].checked = (
-                    parameters.resize_detail_to_1024
-                )
-                workspace_controls["strength"].value = parameters.strength
-                workspace_controls["steps"].value = float(parameters.steps)
-                workspace_controls["seed"].value = float(parameters.seed)
                 for key in (
                     "paint", "erase", "brush_size",
                     "brush_hardness", "brush_flow",
-                    "resize_detail_to_1024", "strength", "steps", "seed",
                 ):
                     workspace_controls[key].widget.enabled = (
                         refine_supported and not busy
@@ -2530,9 +2690,11 @@ class NativeEditorView:
                 workspace_controls["clear"].widget.enabled = (
                     refine_supported and mask_ready and not busy
                 )
-                seed_random = workspace_controls.get("seed_random")
-                if seed_random is not None:
-                    seed_random.widget.enabled = refine_supported and not busy
+            self._reconstruction_workspace_refine_parameters = {
+                "lr.refine": lr_parameters or parameters,
+                "hr.refine": parameters,
+                "texture.refine": texture_parameters or parameters,
+            }
             self._reconstruction_workspace_mask_ready = bool(mask_ready)
             self._reconstruction_workspace_can_lr_refine = bool(
                 refine_supported and can_lr_refine
@@ -2545,6 +2707,7 @@ class NativeEditorView:
             )
         finally:
             self._syncing_reconstruction_refine = False
+        self._refresh_reconstruction_workspace_refine_parameters()
         self._refresh_reconstruction_workspace_actions()
         self._request_repaint()
 

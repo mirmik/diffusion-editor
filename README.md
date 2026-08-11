@@ -165,6 +165,11 @@ operation. Sparse, LR shape, HR shape and texture sampling have independent
 seed and step overrides; until edited they inherit the Legacy values. A
 downstream override may change after resume without invalidating an accepted
 upstream checkpoint, while changing a completed phase invalidates that prefix.
+Masked LR, HR geometry and texture refinement likewise own independent
+strength, step and seed settings (with distinct default seeds and a contextual
+Random button). Their controls follow the selected refine operation. Paint,
+erase, brush size/hardness/flow and mask clearing remain in one separate shared
+`Mask tools` block.
 The project-owned Pixal3D runner normally stays alive between base and refine
 operations. It loads the pipeline once and caches source preprocessing plus
 automatic camera estimation by source content. Cancellation, protocol/runtime

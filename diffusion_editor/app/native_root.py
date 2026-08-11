@@ -1135,7 +1135,7 @@ class NativeEditorRoot:
                 source_image,
                 mask_image,
                 checkpoint_path,
-                parameters=node.refine_parameters,
+                parameters=node.lr_refine_parameters,
                 generation_parameters=node.generation_parameters,
             )
             if event.status and event.error is None:
@@ -1160,7 +1160,11 @@ class NativeEditorRoot:
             self.application.set_status(f"Cannot start LR refinement: {exc}")
 
     def _start_selected_reconstruction_texture_refine(
-            self, node: ReconstructionLayer) -> None:
+            self,
+            node: ReconstructionLayer,
+            *,
+            parameters=None,
+    ) -> None:
         stack = self.application.layer_stack
         parent = node.active_run or node.base_run
         source_path = (
@@ -1203,7 +1207,7 @@ class NativeEditorRoot:
                 node,
                 source_image,
                 mask_image,
-                parameters=node.refine_parameters,
+                parameters=parameters or node.refine_parameters,
                 shape_checkpoint_path=shape_checkpoint,
                 texture_checkpoint_path=texture_checkpoint,
             )
@@ -1465,6 +1469,32 @@ class NativeEditorRoot:
                 node.refine_parameters = replace(
                     node.refine_parameters, **{action: normalized}
                 )
+            elif action.startswith(("lr_", "hr_", "texture_")):
+                scope, parameter_key = action.split("_", 1)
+                if parameter_key not in {
+                        "strength", "steps", "seed",
+                        "resize_detail_to_1024"}:
+                    return
+                normalized = (
+                    int(value)
+                    if parameter_key in {"steps", "seed"}
+                    else bool(value)
+                    if parameter_key == "resize_detail_to_1024"
+                    else float(value)
+                )
+                attribute = {
+                    "lr": "lr_refine_parameters",
+                    "hr": "refine_parameters",
+                    "texture": "texture_refine_parameters",
+                }[scope]
+                setattr(
+                    node,
+                    attribute,
+                    replace(
+                        getattr(node, attribute),
+                        **{parameter_key: normalized},
+                    ),
+                )
             elif action == "clear":
                 self.application.document.execute(ClearSelectionCommand())
             elif action == "run":
@@ -1475,6 +1505,11 @@ class NativeEditorRoot:
                 return
             elif action == "run_texture":
                 self._start_selected_reconstruction_texture_refine(node)
+                return
+            elif action == "run_texture_workspace":
+                self._start_selected_reconstruction_texture_refine(
+                    node, parameters=node.texture_refine_parameters
+                )
                 return
             elif action == "select_run" and value is not None:
                 self.application.document.execute(
@@ -1636,6 +1671,8 @@ class NativeEditorRoot:
                     node.refine_parameters,
                     node.runs,
                     node.active_run_id,
+                    lr_parameters=node.lr_refine_parameters,
+                    texture_parameters=node.texture_refine_parameters,
                     mask_ready=(
                         not self.application.layer_stack.selection.is_empty
                     ),

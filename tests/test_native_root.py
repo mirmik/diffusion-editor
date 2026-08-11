@@ -655,12 +655,20 @@ def test_offscreen_root_creates_selected_reconstruction_object(
         )
         root.view._activate_reconstruction_refine("strength", 0.65)
         root.view._activate_reconstruction_refine("steps", 12.0)
+        root.view._activate_reconstruction_refine("lr_steps", 13.0)
+        root.view._activate_reconstruction_refine("lr_seed", 901.0)
+        root.view._activate_reconstruction_refine("texture_steps", 14.0)
+        root.view._activate_reconstruction_refine("texture_seed", 902.0)
         root.view._activate_reconstruction_refine("paint", True)
         assert node.generation_parameters.steps == 20
         assert node.generation_parameters.resolution == 1280
         assert node.generation_parameters.lr_conditioning_resolution == 1024
         assert node.refine_parameters.strength == 0.65
         assert node.refine_parameters.steps == 12
+        assert node.lr_refine_parameters.steps == 13
+        assert node.lr_refine_parameters.seed == 901
+        assert node.texture_refine_parameters.steps == 14
+        assert node.texture_refine_parameters.seed == 902
         assert root.canvas_controls_coordinator.selection_state.edit_mode
         assert root.canvas.controller.overlay_bridge.selection_as_mask
         root.view._activate_reconstruction_stage(

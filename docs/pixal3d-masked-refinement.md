@@ -92,6 +92,12 @@ another preview does not alter it. This permits several independent refines
 from Base as well as an intentional refine chain from a chosen Refined LR
 variant.
 
+LR, HR geometry and texture refinement store independent sampling parameter
+sets. Each operation therefore has its own strength, step count and seed rather
+than inheriting the values last used by another refine phase. Mask painting is
+intentionally shared: paint/erase mode, brush size, hardness, flow and clear
+live in the separate `Mask tools` block and operate on the same canvas mask.
+
 ## Masked texture refinement
 
 Every completed textured run owns two independent checkpoints:

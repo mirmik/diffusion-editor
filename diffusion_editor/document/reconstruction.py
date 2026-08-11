@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from enum import Enum
 import os
 
@@ -47,7 +48,12 @@ class ReconstructionLayer(Layer):
         self.triangle_count = 0
         self.mesh_count = 0
         self.generation_parameters = ReconstructionParameters()
+        # HR geometry keeps the historic name for document compatibility.
         self.refine_parameters = ReconstructionRefineParameters()
+        self.lr_refine_parameters = ReconstructionRefineParameters(seed=124)
+        self.texture_refine_parameters = ReconstructionRefineParameters(
+            seed=125
+        )
         self.runs: tuple[ReconstructionRun, ...] = ()
         self.active_run_id: str | None = None
         self.resume_checkpoint_path: str | None = None
@@ -154,6 +160,10 @@ class ReconstructionLayer(Layer):
             "mesh_count": self.mesh_count,
             "generation_parameters": self.generation_parameters.to_dict(),
             "refine_parameters": self.refine_parameters.to_dict(),
+            "lr_refine_parameters": self.lr_refine_parameters.to_dict(),
+            "texture_refine_parameters": (
+                self.texture_refine_parameters.to_dict()
+            ),
         }
         return payload
 
@@ -197,6 +207,30 @@ class ReconstructionLayer(Layer):
             )
         except (TypeError, ValueError):
             layer.refine_parameters = ReconstructionRefineParameters()
+        try:
+            layer.lr_refine_parameters = (
+                ReconstructionRefineParameters.from_dict(
+                    state.get("lr_refine_parameters")
+                )
+                if "lr_refine_parameters" in state
+                else replace(layer.refine_parameters, seed=124)
+            )
+        except (TypeError, ValueError):
+            layer.lr_refine_parameters = ReconstructionRefineParameters(
+                seed=124
+            )
+        try:
+            layer.texture_refine_parameters = (
+                ReconstructionRefineParameters.from_dict(
+                    state.get("texture_refine_parameters")
+                )
+                if "texture_refine_parameters" in state
+                else replace(layer.refine_parameters, seed=125)
+            )
+        except (TypeError, ValueError):
+            layer.texture_refine_parameters = ReconstructionRefineParameters(
+                seed=125
+            )
         layer._initialize_stage_state()
         if layer.glb_path and os.path.isfile(layer.glb_path):
             restored_run = ReconstructionRun(
