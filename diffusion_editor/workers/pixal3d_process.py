@@ -6,14 +6,25 @@ import os
 import json
 import math
 from pathlib import Path
+from queue import Empty, Queue
 import shutil
 import signal
 import subprocess
 import tempfile
 import threading
+import time
+import uuid
 from collections.abc import Callable
 
 from PIL import Image
+
+from .pixal3d_protocol import (
+    MAX_MESSAGE_BYTES,
+    PROTOCOL_VERSION,
+    Pixal3DProtocolError,
+    decode_response,
+    encode_message,
+)
 
 from ..generation.types import (
     ReconstructionParameters,
@@ -46,6 +57,7 @@ class Pixal3DProcessClient:
         low_vram: bool = True,
         runner_path: str | Path | None = None,
         staged: bool | None = None,
+        persistent: bool | None = None,
     ) -> None:
         self._python = Path(python or os.environ.get(
             "DIFFUSION_EDITOR_PIXAL3D_PYTHON", DEFAULT_PIXAL3D_PYTHON))
@@ -62,8 +74,16 @@ class Pixal3DProcessClient:
             __file__
         ).with_name("pixal3d_staged_runner.py")
         self._staged = bool(runner_path is None) if staged is None else bool(staged)
+        self._persistent = (
+            runner_path is None if persistent is None else bool(persistent)
+        ) and self._staged
         self._lock = threading.Lock()
         self._process: subprocess.Popen[bytes] | None = None
+        self._worker_process: subprocess.Popen[bytes] | None = None
+        self._worker_responses: Queue[bytes | None] | None = None
+        self._worker_reader: threading.Thread | None = None
+        self._worker_identity: tuple[str, str, str, bool] | None = None
+        self._worker_operation_lock = threading.Lock()
         self._artifact_roots: list[Path] = []
         self._artifacts: list[ReconstructionStageArtifact] = []
         self._checkpoint_path: Path | None = None
@@ -216,7 +236,12 @@ class Pixal3DProcessClient:
         if low_vram:
             command.append("--low_vram")
 
-        self._run_command(command, log_path, events_path, cancel, on_event)
+        if self._persistent:
+            self._run_persistent_command(
+                command, events_path, cancel, on_event, low_vram=low_vram
+            )
+        else:
+            self._run_command(command, log_path, events_path, cancel, on_event)
         if checkpoint_path.is_file():
             self._checkpoint_path = checkpoint_path
         if texture_checkpoint_path.is_file():
@@ -298,11 +323,20 @@ class Pixal3DProcessClient:
             "--decimation-target", str(generation.decimation_target),
             "--texture-size", str(generation.texture_size),
         ]
-        if generation.low_vram if low_vram is None else bool(low_vram):
+        effective_low_vram = (
+            generation.low_vram if low_vram is None else bool(low_vram)
+        )
+        if effective_low_vram:
             command.append("--low_vram")
         if snapshot.resize_detail_to_1024:
             command.append("--resize-refine-detail")
-        self._run_command(command, log_path, events_path, cancel, on_event)
+        if self._persistent:
+            self._run_persistent_command(
+                command, events_path, cancel, on_event,
+                low_vram=effective_low_vram,
+            )
+        else:
+            self._run_command(command, log_path, events_path, cancel, on_event)
         if not output_path.is_file() or output_path.stat().st_size == 0:
             raise RuntimeError("Pixal3D refinement completed without a GLB")
         if not checkpoint_path.is_file():
@@ -385,7 +419,13 @@ class Pixal3DProcessClient:
             command.append("--low_vram")
         if snapshot.resize_detail_to_1024:
             command.append("--resize-refine-detail")
-        self._run_command(command, log_path, events_path, cancel, on_event)
+        if self._persistent:
+            self._run_persistent_command(
+                command, events_path, cancel, on_event,
+                low_vram=generation.low_vram,
+            )
+        else:
+            self._run_command(command, log_path, events_path, cancel, on_event)
         if not output_path.is_file() or output_path.stat().st_size == 0:
             raise RuntimeError("Pixal3D texture refinement completed without a GLB")
         if not next_texture_checkpoint.is_file():
@@ -398,14 +438,7 @@ class Pixal3DProcessClient:
             self._conditioning_path = preprocessed
         return output_path, source_path
 
-    def _run_command(
-        self,
-        command: list[str],
-        log_path: Path,
-        events_path: Path,
-        cancel: threading.Event,
-        on_event: Callable[[ReconstructionStageEvent], None] | None,
-    ) -> None:
+    def _worker_environment(self) -> dict[str, str]:
         environment = os.environ.copy()
         existing_pythonpath = environment.get("PYTHONPATH", "")
         environment["PYTHONPATH"] = (
@@ -416,6 +449,193 @@ class Pixal3DProcessClient:
         environment.setdefault("ATTN_BACKEND", "sdpa")
         environment.setdefault("SPARSE_ATTN_BACKEND", "sdpa")
         environment.update(self._environment_overrides)
+        return environment
+
+    def _run_persistent_command(
+        self,
+        command: list[str],
+        events_path: Path,
+        cancel: threading.Event,
+        on_event: Callable[[ReconstructionStageEvent], None] | None,
+        *,
+        low_vram: bool,
+    ) -> None:
+        with self._worker_operation_lock:
+            process, responses = self._ensure_worker(low_vram)
+            request_id = uuid.uuid4().hex
+            request = encode_message({
+                "protocol": PROTOCOL_VERSION,
+                "type": "run",
+                "request_id": request_id,
+                "arguments": command[2:],
+            })
+            try:
+                assert process.stdin is not None
+                process.stdin.write(request)
+                process.stdin.flush()
+                event_offset = 0
+                deadline = time.monotonic() + 1800.0
+                while True:
+                    event_offset = self._read_stage_events(
+                        events_path, event_offset, on_event
+                    )
+                    if cancel.is_set():
+                        raise RuntimeError(
+                            f"{self._backend_label} generation cancelled"
+                        )
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("Pixal3D worker request timed out")
+                    try:
+                        message = responses.get(timeout=min(0.05, remaining))
+                    except Empty:
+                        if process.poll() is not None:
+                            raise RuntimeError(
+                                "Pixal3D worker exited with code "
+                                f"{process.returncode}"
+                            )
+                        continue
+                    if message is None:
+                        raise RuntimeError(
+                            "Pixal3D worker exited with code "
+                            f"{process.poll()}"
+                        )
+                    response = decode_response(message)
+                    if response.request_id != request_id:
+                        raise Pixal3DProtocolError(
+                            "Pixal3D response request ID mismatch"
+                        )
+                    if response.kind == "error":
+                        raise RuntimeError(
+                            response.error or "Pixal3D worker failed"
+                        )
+                    if response.kind != "result":
+                        raise Pixal3DProtocolError(
+                            "Pixal3D worker returned a non-result response"
+                        )
+                    break
+                self._read_stage_events(events_path, event_offset, on_event)
+            except Exception:
+                self._stop_worker(timeout=0.2)
+                raise
+
+    def _ensure_worker(
+        self, low_vram: bool
+    ) -> tuple[subprocess.Popen[bytes], Queue[bytes | None]]:
+        identity = (
+            str(self._python), str(self._root.resolve()),
+            str(self._model_path.resolve()), bool(low_vram),
+        )
+        with self._lock:
+            process = self._worker_process
+            if (
+                process is not None
+                and process.poll() is None
+                and self._worker_identity == identity
+            ):
+                assert self._worker_responses is not None
+                return process, self._worker_responses
+        self._stop_worker(timeout=0.5)
+        worker_command = [
+            str(self._python), "-u", str(self._runner_path), "--server",
+            "--pixal3d-root", str(self._root),
+            "--model_path", str(self._model_path),
+        ]
+        if low_vram:
+            worker_command.append("--low_vram")
+        process = subprocess.Popen(
+            worker_command,
+            cwd=self._root,
+            env=self._worker_environment(),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=None,
+            start_new_session=(os.name != "nt"),
+        )
+        responses: Queue[bytes | None] = Queue(maxsize=8)
+        reader = threading.Thread(
+            target=self._read_worker_responses,
+            args=(process, responses),
+            name="pixal3d-worker-reader",
+            daemon=True,
+        )
+        with self._lock:
+            self._worker_process = process
+            self._worker_responses = responses
+            self._worker_reader = reader
+            self._worker_identity = identity
+        reader.start()
+        try:
+            deadline = time.monotonic() + 300.0
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("Pixal3D worker startup timed out")
+                try:
+                    message = responses.get(timeout=min(0.05, remaining))
+                except Empty:
+                    if process.poll() is not None:
+                        raise RuntimeError(
+                            "Pixal3D worker exited during startup with code "
+                            f"{process.returncode}"
+                        )
+                    continue
+                if message is None:
+                    raise RuntimeError(
+                        "Pixal3D worker exited during startup with code "
+                        f"{process.poll()}"
+                    )
+                response = decode_response(message)
+                if response.kind != "ready":
+                    raise Pixal3DProtocolError(
+                        "Pixal3D worker did not send ready"
+                    )
+                break
+        except Exception:
+            self._stop_worker(timeout=0.2)
+            raise
+        return process, responses
+
+    @staticmethod
+    def _read_worker_responses(
+        process: subprocess.Popen[bytes], responses: Queue[bytes | None]
+    ) -> None:
+        assert process.stdout is not None
+        try:
+            while message := process.stdout.readline(MAX_MESSAGE_BYTES + 1):
+                responses.put(message)
+        finally:
+            responses.put(None)
+
+    def _stop_worker(self, timeout: float = 1.0) -> None:
+        with self._lock:
+            process = self._worker_process
+            self._worker_process = None
+            self._worker_responses = None
+            self._worker_reader = None
+            self._worker_identity = None
+        if process is None:
+            return
+        if process.stdin is not None:
+            try:
+                process.stdin.close()
+            except BrokenPipeError:
+                pass
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self._terminate(process, timeout=max(timeout, 0.5))
+
+    def _run_command(
+        self,
+        command: list[str],
+        log_path: Path,
+        events_path: Path,
+        cancel: threading.Event,
+        on_event: Callable[[ReconstructionStageEvent], None] | None,
+    ) -> None:
+        self._stop_worker(timeout=0.5)
+        environment = self._worker_environment()
         with log_path.open("wb") as log_file:
             process = subprocess.Popen(
                 command,
@@ -450,6 +670,7 @@ class Pixal3DProcessClient:
         self._read_stage_events(events_path, event_offset, on_event)
 
     def shutdown(self, timeout: float = 2.0) -> None:
+        self._stop_worker(timeout=timeout)
         with self._lock:
             process = self._process
         if process is not None and process.poll() is None:

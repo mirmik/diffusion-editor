@@ -15,6 +15,7 @@ from diffusion_editor.generation.reconstruction_controller import (
     ReconstructionController,
 )
 from diffusion_editor.workers.pixal3d_process import Pixal3DProcessClient
+from diffusion_editor.workers.pixal3d_staged_runner import Pixal3DRuntime
 from diffusion_editor.generation.types import (
     ReconstructionParameters,
     ReconstructionRefineParameters,
@@ -71,6 +72,31 @@ def test_pixal3d_resume_compatibility_only_freezes_completed_phases():
     assert not pixal3d_resume_parameters_compatible(
         previous, changed_lr, ReconstructionStage.LR_SHAPE_LATENT
     )
+
+
+def test_persistent_runtime_caches_preprocessed_source_by_content(tmp_path):
+    class Pipeline:
+        calls = 0
+        def preprocess_image(self, image):
+            self.calls += 1
+            return image.convert("RGB")
+
+    runtime = Pixal3DRuntime.__new__(Pixal3DRuntime)
+    runtime.pipeline = Pipeline()
+    runtime._source_sha256 = None
+    runtime._prepared_image = None
+    runtime._auto_camera = None
+    first = tmp_path / "first.png"
+    second = tmp_path / "second.png"
+    Image.new("RGB", (3, 2), "red").save(first)
+    second.write_bytes(first.read_bytes())
+
+    first_image, first_hash = runtime.prepare_image(first)
+    second_image, second_hash = runtime.prepare_image(second)
+
+    assert runtime.pipeline.calls == 1
+    assert first_hash == second_hash
+    assert first_image is not second_image
 
 
 _FAKE_STAGED_RUNNER = r"""
@@ -171,6 +197,45 @@ with Path(args.events).open('w') as stream:
         'artifact_path': str(preview),
         'preview_kind': 'mesh',
     }) + '\n')
+"""
+
+
+_FAKE_PERSISTENT_RUNNER = r"""
+import argparse
+import json
+from pathlib import Path
+import sys
+
+if '--server' not in sys.argv:
+    raise SystemExit(2)
+startup_file = Path(sys.argv[sys.argv.index('--pixal3d-root') + 1]) / 'starts'
+count = int(startup_file.read_text()) if startup_file.exists() else 0
+startup_file.write_text(str(count + 1))
+wire = sys.stdout.buffer
+wire.write(b'{"protocol":1,"type":"ready"}\n')
+wire.flush()
+for line in sys.stdin.buffer:
+    request = json.loads(line)
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('--output')
+    parser.add_argument('--events')
+    parser.add_argument('--session-checkpoint')
+    parser.add_argument('--resume-checkpoint')
+    parser.add_argument('--target-stage')
+    args, _unknown = parser.parse_known_args(request['arguments'])
+    stage = 'lr_shape_latent' if args.resume_checkpoint else 'sparse_occupancy'
+    Path(args.session_checkpoint).write_bytes(b'persistent-checkpoint')
+    with Path(args.events).open('w') as stream:
+        stream.write(json.dumps({
+            'stage': stage,
+            'status': 'ready',
+        }) + '\n')
+    wire.write((json.dumps({
+        'protocol': 1,
+        'type': 'result',
+        'request_id': request['request_id'],
+    }) + '\n').encode())
+    wire.flush()
 """
 
 
@@ -373,6 +438,52 @@ def test_staged_client_passes_previous_session_checkpoint_for_resume(tmp_path):
         event.stage for event in resumed_events
     }
     client.shutdown()
+
+
+def test_persistent_client_reuses_one_worker_for_resume(tmp_path):
+    root = tmp_path / "pixal3d"
+    root.mkdir()
+    runner = tmp_path / "persistent.py"
+    runner.write_text(_FAKE_PERSISTENT_RUNNER)
+    model = tmp_path / "model"
+    model.mkdir()
+    client = Pixal3DProcessClient(
+        python=sys.executable,
+        root=root,
+        model_path=model,
+        runner_path=runner,
+        staged=True,
+        persistent=True,
+    )
+
+    first_events = []
+    client.generate(
+        Image.new("RGB", (4, 3)), 7, threading.Event(),
+        target_stage=ReconstructionStage.SPARSE_OCCUPANCY,
+        on_event=first_events.append,
+    )
+    checkpoint = client.resume_checkpoint_path
+    second_events = []
+    client.generate(
+        Image.new("RGB", (4, 3)), 7, threading.Event(),
+        target_stage=ReconstructionStage.LR_SHAPE_LATENT,
+        resume_checkpoint_path=checkpoint,
+        on_event=second_events.append,
+    )
+
+    assert (root / "starts").read_text() == "1"
+    assert [event.stage for event in first_events] == [
+        ReconstructionStage.SOURCE_IMAGE,
+        ReconstructionStage.SPARSE_OCCUPANCY,
+    ]
+    assert [event.stage for event in second_events] == [
+        ReconstructionStage.SOURCE_IMAGE,
+        ReconstructionStage.LR_SHAPE_LATENT,
+    ]
+    assert client._worker_process is not None
+    assert client._worker_process.poll() is None
+    client.shutdown()
+    assert client._worker_process is None
 
 
 def test_staged_client_runs_masked_refine_as_separate_artifact(tmp_path):

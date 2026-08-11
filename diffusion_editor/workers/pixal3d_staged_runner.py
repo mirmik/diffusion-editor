@@ -8,6 +8,7 @@ keeping the stage protocol and stopping semantics under editor ownership.
 from __future__ import annotations
 
 import argparse
+from contextlib import redirect_stdout
 import hashlib
 import json
 import math
@@ -15,6 +16,7 @@ import os
 from pathlib import Path
 import sys
 import time
+import traceback
 
 
 STAGES = (
@@ -702,7 +704,9 @@ def _preprocess_refine_pair(pipeline, source_image, mask_image):
     return condition, mask
 
 
-def _run_refine(args, reporter, upstream, sp, torch, np, o_voxel) -> None:
+def _run_refine(
+    args, reporter, upstream, sp, torch, np, o_voxel, pipeline=None
+) -> None:
     from PIL import Image
 
     checkpoint_path = Path(args.refine_checkpoint)
@@ -723,7 +727,9 @@ def _run_refine(args, reporter, upstream, sp, torch, np, o_voxel) -> None:
             "mesh_scale": float(saved["mesh_scale"][0]),
         }
 
-    pipeline = upstream.init_pipeline(args.model_path, low_vram=args.low_vram)
+    pipeline = pipeline or upstream.init_pipeline(
+        args.model_path, low_vram=args.low_vram
+    )
     condition_image, mask_image = _preprocess_refine_pair(
         pipeline,
         Image.open(args.image),
@@ -890,7 +896,9 @@ def _run_refine(args, reporter, upstream, sp, torch, np, o_voxel) -> None:
     )
 
 
-def _run_texture_refine(args, reporter, upstream, sp, torch, np, o_voxel) -> None:
+def _run_texture_refine(
+    args, reporter, upstream, sp, torch, np, o_voxel, pipeline=None
+) -> None:
     """Refine a saved normalized texture latent on fixed shape coordinates."""
     from PIL import Image
 
@@ -920,7 +928,9 @@ def _run_texture_refine(args, reporter, upstream, sp, torch, np, o_voxel) -> Non
     if not np.array_equal(shape_coords_np, texture_coords_np):
         raise ValueError("shape and texture checkpoint coordinates differ")
 
-    pipeline = upstream.init_pipeline(args.model_path, low_vram=args.low_vram)
+    pipeline = pipeline or upstream.init_pipeline(
+        args.model_path, low_vram=args.low_vram
+    )
     condition_image, mask_image = _preprocess_refine_pair(
         pipeline,
         Image.open(args.image),
@@ -1059,24 +1069,82 @@ def _run_texture_refine(args, reporter, upstream, sp, torch, np, o_voxel) -> Non
     )
 
 
-def run(args) -> None:
-    sys.path.insert(0, str(Path(args.pixal3d_root).resolve()))
-    import torch
-    from PIL import Image
-    from pixal3d.modules import sparse as sp
-    from pixal3d.pipelines.samplers.flow_euler import FlowEulerSampler
-    from easydict import EasyDict as edict
-    import inference as upstream
-    import o_voxel
-    import numpy as np
+class Pixal3DRuntime:
+    """Loaded Pixal3D pipeline plus source-local preparation caches."""
 
-    torch.set_grad_enabled(False)
+    def __init__(self, pixal3d_root: str, model_path: str, low_vram: bool):
+        root = str(Path(pixal3d_root).resolve())
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        import torch
+        from pixal3d.modules import sparse as sp
+        from pixal3d.pipelines.samplers.flow_euler import FlowEulerSampler
+        from easydict import EasyDict as edict
+        import inference as upstream
+        import o_voxel
+        import numpy as np
+
+        torch.set_grad_enabled(False)
+        self.torch = torch
+        self.sp = sp
+        self.FlowEulerSampler = FlowEulerSampler
+        self.edict = edict
+        self.upstream = upstream
+        self.o_voxel = o_voxel
+        self.np = np
+        self.pipeline = upstream.init_pipeline(model_path, low_vram=low_vram)
+        self._source_sha256 = None
+        self._prepared_image = None
+        self._auto_camera = None
+
+    def prepare_image(self, path: Path):
+        from PIL import Image
+
+        digest = _file_sha256(path)
+        if digest == self._source_sha256 and self._prepared_image is not None:
+            return self._prepared_image.copy(), digest
+        image = self.pipeline.preprocess_image(Image.open(path))
+        self._source_sha256 = digest
+        self._prepared_image = image.copy()
+        self._auto_camera = None
+        return image, digest
+
+    def cached_auto_camera(self, source_sha256: str):
+        if source_sha256 != self._source_sha256:
+            return None
+        return dict(self._auto_camera) if self._auto_camera is not None else None
+
+    def store_auto_camera(self, source_sha256: str, camera: dict) -> None:
+        if source_sha256 == self._source_sha256:
+            self._auto_camera = dict(camera)
+
+
+def run(args, runtime: Pixal3DRuntime | None = None) -> None:
+    if runtime is None:
+        runtime = Pixal3DRuntime(
+            args.pixal3d_root, args.model_path, args.low_vram
+        )
+    torch = runtime.torch
+    sp = runtime.sp
+    FlowEulerSampler = runtime.FlowEulerSampler
+    edict = runtime.edict
+    upstream = runtime.upstream
+    o_voxel = runtime.o_voxel
+    np = runtime.np
+    from PIL import Image
+
     reporter = StageReporter(Path(args.events))
     if args.texture_refine_checkpoint:
-        _run_texture_refine(args, reporter, upstream, sp, torch, np, o_voxel)
+        _run_texture_refine(
+            args, reporter, upstream, sp, torch, np, o_voxel,
+            pipeline=runtime.pipeline,
+        )
         return
     if args.refine_checkpoint:
-        _run_refine(args, reporter, upstream, sp, torch, np, o_voxel)
+        _run_refine(
+            args, reporter, upstream, sp, torch, np, o_voxel,
+            pipeline=runtime.pipeline,
+        )
         return
     active_flow = {"stage": ""}
 
@@ -1112,8 +1180,8 @@ def run(args) -> None:
     FlowEulerSampler.sample = tracked_sample
     target = args.target_stage
     artifact_root = Path(args.output).resolve().parent
-    pipeline = upstream.init_pipeline(args.model_path, low_vram=args.low_vram)
-    image = pipeline.preprocess_image(Image.open(args.image))
+    pipeline = runtime.pipeline
+    image, source_sha256 = runtime.prepare_image(Path(args.image))
     preprocessed = artifact_root / "preprocessed.png"
     image.save(preprocessed)
 
@@ -1143,15 +1211,18 @@ def run(args) -> None:
             "mesh_scale": 1.0,
         }
     else:
-        moge = upstream.load_moge_model(device="cuda")
-        camera = upstream.get_camera_params_wild_moge(
-            str(preprocessed),
-            moge,
-            image_resolution=args.image_resolution,
-        )
-        moge.cpu()
-        del moge
-        torch.cuda.empty_cache()
+        camera = runtime.cached_auto_camera(source_sha256)
+        if camera is None:
+            moge = upstream.load_moge_model(device="cuda")
+            camera = upstream.get_camera_params_wild_moge(
+                str(preprocessed),
+                moge,
+                image_resolution=args.image_resolution,
+            )
+            moge.cpu()
+            del moge
+            torch.cuda.empty_cache()
+            runtime.store_auto_camera(source_sha256, camera)
 
     base_sampler = {
         "guidance_strength": 7.5,
@@ -1513,7 +1584,7 @@ def run(args) -> None:
     )
 
 
-def main() -> int:
+def _job_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pixal3d-root", required=True)
     parser.add_argument("--image", required=True)
@@ -1557,12 +1628,92 @@ def main() -> int:
     parser.add_argument("--max-num-tokens", type=int, default=49152)
     parser.add_argument("--manual-fov", type=float, default=-1.0)
     parser.add_argument("--low_vram", action="store_true")
-    args = parser.parse_args()
+    return parser
+
+
+def _normalize_job_args(args):
     for phase in ("sparse", "lr", "hr", "texture"):
         if getattr(args, f"{phase}_seed") is None:
             setattr(args, f"{phase}_seed", args.seed)
         if getattr(args, f"{phase}_steps") is None:
             setattr(args, f"{phase}_steps", args.steps)
+    return args
+
+
+def _send_wire(wire, payload: dict) -> None:
+    message = (
+        json.dumps(payload, ensure_ascii=True, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+    wire.write(message)
+    wire.flush()
+
+
+def _serve(pixal3d_root: str, model_path: str, low_vram: bool) -> int:
+    wire = sys.stdout.buffer
+    with redirect_stdout(sys.stderr):
+        runtime = Pixal3DRuntime(pixal3d_root, model_path, low_vram)
+    _send_wire(wire, {"protocol": 1, "type": "ready"})
+    while message := sys.stdin.buffer.readline(256 * 1024 + 1):
+        request_id = "unknown"
+        try:
+            if len(message) > 256 * 1024:
+                raise ValueError("Pixal3D request is too large")
+            request = json.loads(message)
+            if (
+                not isinstance(request, dict)
+                or request.get("protocol") != 1
+                or request.get("type") != "run"
+                or not isinstance(request.get("request_id"), str)
+                or not isinstance(request.get("arguments"), list)
+                or not all(
+                    isinstance(value, str)
+                    for value in request.get("arguments", ())
+                )
+            ):
+                raise ValueError("Invalid persistent Pixal3D request")
+            request_id = request["request_id"]
+            args = _normalize_job_args(
+                _job_parser().parse_args(request["arguments"])
+            )
+            expected_identity = (
+                str(Path(model_path).resolve()), bool(low_vram)
+            )
+            actual_identity = (
+                str(Path(args.model_path).resolve()), bool(args.low_vram)
+            )
+            if actual_identity != expected_identity:
+                raise ValueError("Pixal3D request changed the loaded runtime")
+            with redirect_stdout(sys.stderr):
+                run(args, runtime=runtime)
+                runtime.torch.cuda.empty_cache()
+            _send_wire(wire, {
+                "protocol": 1,
+                "type": "result",
+                "request_id": request_id,
+            })
+        except (Exception, SystemExit) as exc:
+            traceback.print_exc(file=sys.stderr)
+            _send_wire(wire, {
+                "protocol": 1,
+                "type": "error",
+                "request_id": request_id,
+                "error": str(exc) or type(exc).__name__,
+            })
+    return 0
+
+
+def main() -> int:
+    if "--server" in sys.argv[1:]:
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--server", action="store_true")
+        parser.add_argument("--pixal3d-root", required=True)
+        parser.add_argument("--model_path", required=True)
+        parser.add_argument("--low_vram", action="store_true")
+        server = parser.parse_args()
+        return _serve(
+            server.pixal3d_root, server.model_path, server.low_vram
+        )
+    args = _normalize_job_args(_job_parser().parse_args())
     run(args)
     return 0
 

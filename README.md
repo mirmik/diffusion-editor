@@ -165,6 +165,12 @@ operation. Sparse, LR shape, HR shape and texture sampling have independent
 seed and step overrides; until edited they inherit the Legacy values. A
 downstream override may change after resume without invalidating an accepted
 upstream checkpoint, while changing a completed phase invalidates that prefix.
+The project-owned Pixal3D runner normally stays alive between base and refine
+operations. It loads the pipeline once and caches source preprocessing plus
+automatic camera estimation by source content. Cancellation, protocol/runtime
+errors, a low-VRAM identity change, or editor shutdown terminates the worker;
+the next request then starts a clean runtime. Custom runner paths retain the
+one-shot subprocess fallback unless persistence is explicitly requested.
 Planned LR refine and local-detail operations (upscaled conditioning, isolated
 local geometry, registration, fusion, local texture and transfer) remain
 disabled until their resumable runners and artifact contracts are connected.
