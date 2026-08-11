@@ -350,6 +350,19 @@ def test_root_refine_entry_point_uses_active_run_checkpoint(tmp_path) -> None:
         str(checkpoint), str(texture_checkpoint)
     )
 
+    node.runs = ()
+    node.active_run_id = None
+    node.intermediate_source_path = str(source)
+    node.intermediate_shape_checkpoint_path = str(checkpoint)
+    node.intermediate_texture_checkpoint_path = str(texture_checkpoint)
+    root._start_selected_reconstruction_refine(node)
+    assert controller.captured[2] == str(checkpoint)
+    assert root._reconstruction_parent_run_id is None
+    root._start_selected_reconstruction_texture_refine(node)
+    assert controller.texture_captured[2:4] == (
+        str(checkpoint), str(texture_checkpoint)
+    )
+
 
 def test_reconstruction_node_tracks_target_progress_and_preview(tmp_path) -> None:
     node = ReconstructionLayer("Staged")
@@ -523,6 +536,55 @@ def test_workspace_generate_action_routes_to_legacy_stage() -> None:
 
     assert started == [ReconstructionStage.LR_SHAPE_LATENT]
     assert node.target_stage is ReconstructionStage.LR_SHAPE_LATENT
+
+
+def test_partial_pixal3d_result_keeps_refine_checkpoints(tmp_path) -> None:
+    stack, _document_service = _document()
+    node = ReconstructionLayer("Workspace")
+    stack.insert_layer(node)
+    source = tmp_path / "source.png"
+    Image.new("RGBA", (10, 8)).save(source)
+    shape_checkpoint = tmp_path / "shape.npz"
+    shape_checkpoint.write_bytes(b"shape")
+    resume_checkpoint = tmp_path / "resume.npz"
+    resume_checkpoint.write_bytes(b"resume")
+    result = ReconstructionResult(
+        str(tmp_path / "not-built-yet.glb"),
+        str(source),
+        completed_stage=ReconstructionStage.HR_SHAPE_FLOW,
+        checkpoint_path=str(shape_checkpoint),
+        resume_checkpoint_path=str(resume_checkpoint),
+    )
+
+    class Application:
+        layer_stack = stack
+        status = ""
+
+        def set_status(self, value):
+            self.status = value
+
+    class Controller:
+        is_busy = False
+
+        def poll(self):
+            return ReconstructionControllerEvent(result=result)
+
+    root = NativeEditorRoot.__new__(NativeEditorRoot)
+    root.application = Application()
+    root.reconstruction_controller = Controller()
+    root._reconstruction_job_node_id = node.id
+    root._reconstruction_parent_run_id = None
+    root._reconstruction_job_source_sha256 = "source-hash"
+    root._reconstruction_job_parameters = node.generation_parameters
+    root.view = None
+
+    root._poll_reconstruction()
+
+    assert node.intermediate_source_path == str(source)
+    assert node.intermediate_shape_checkpoint_path == str(shape_checkpoint)
+    assert node.resume_checkpoint_path == str(resume_checkpoint)
+    assert node.resume_stage is ReconstructionStage.HR_SHAPE_FLOW
+    assert node.reconstruction_status is ReconstructionStatus.READY
 
 
 def test_workspace_parameter_action_updates_stage_override() -> None:

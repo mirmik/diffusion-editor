@@ -921,6 +921,7 @@ class NativeEditorRoot:
         mask_image: Image.Image,
         *,
         parameters=None,
+        base_checkpoint_path: str | None = None,
     ):
         """Start a masked refinement from a canvas-sized source and mask."""
         controller = self.reconstruction_controller
@@ -934,20 +935,32 @@ class NativeEditorRoot:
             and parent.backend is not ReconstructionBackend.PIXAL3D
         ):
             raise ValueError("masked refinement is not available for TRELLIS.2")
-        if parent is None or not parent.checkpoint_path:
-            raise ValueError("active reconstruction run has no refine checkpoint")
-        if not os.path.isfile(parent.checkpoint_path):
+        if (
+            parent is None
+            and node.generation_parameters.backend
+            is not ReconstructionBackend.PIXAL3D
+        ):
+            raise ValueError("masked refinement requires a Pixal3D checkpoint")
+        checkpoint_path = (
+            base_checkpoint_path
+            or (parent.checkpoint_path if parent is not None else None)
+        )
+        if not checkpoint_path:
+            raise ValueError("reconstruction has no HR refine checkpoint")
+        if not os.path.isfile(checkpoint_path):
             raise ValueError("active reconstruction refine checkpoint is missing")
         event = controller.start_refine(
             conditioning_image,
             mask_image,
-            parent.checkpoint_path,
+            checkpoint_path,
             parameters=parameters,
             generation_parameters=node.generation_parameters,
         )
         if event.status and event.error is None:
             self._reconstruction_job_node_id = node.id
-            self._reconstruction_parent_run_id = parent.run_id
+            self._reconstruction_parent_run_id = (
+                parent.run_id if parent is not None else None
+            )
             self._set_reconstruction_status(node, ReconstructionStatus.GENERATING)
             self.application.set_status(event.status)
         elif event.status:
@@ -961,6 +974,8 @@ class NativeEditorRoot:
         mask_image: Image.Image,
         *,
         parameters=None,
+        shape_checkpoint_path: str | None = None,
+        texture_checkpoint_path: str | None = None,
     ):
         controller = self.reconstruction_controller
         if controller is None or controller.is_busy:
@@ -973,27 +988,43 @@ class NativeEditorRoot:
             and parent.backend is not ReconstructionBackend.PIXAL3D
         ):
             raise ValueError("texture refinement is not available for TRELLIS.2")
-        if parent is None or not parent.checkpoint_path:
+        if (
+            parent is None
+            and node.generation_parameters.backend
+            is not ReconstructionBackend.PIXAL3D
+        ):
+            raise ValueError("texture refinement requires Pixal3D checkpoints")
+        shape_checkpoint = (
+            shape_checkpoint_path
+            or (parent.checkpoint_path if parent is not None else None)
+        )
+        texture_checkpoint = (
+            texture_checkpoint_path
+            or (parent.texture_checkpoint_path if parent is not None else None)
+        )
+        if not shape_checkpoint:
             raise ValueError("active run has no shape checkpoint")
-        if not parent.texture_checkpoint_path:
+        if not texture_checkpoint:
             raise ValueError("active run has no texture checkpoint")
         for label, path in (
-            ("shape", parent.checkpoint_path),
-            ("texture", parent.texture_checkpoint_path),
+            ("shape", shape_checkpoint),
+            ("texture", texture_checkpoint),
         ):
             if not os.path.isfile(path):
                 raise ValueError(f"active run {label} checkpoint is missing")
         event = controller.start_texture_refine(
             conditioning_image,
             mask_image,
-            parent.checkpoint_path,
-            parent.texture_checkpoint_path,
+            shape_checkpoint,
+            texture_checkpoint,
             parameters=parameters,
             generation_parameters=node.generation_parameters,
         )
         if event.status and event.error is None:
             self._reconstruction_job_node_id = node.id
-            self._reconstruction_parent_run_id = parent.run_id
+            self._reconstruction_parent_run_id = (
+                parent.run_id if parent is not None else None
+            )
             self._set_reconstruction_status(node, ReconstructionStatus.GENERATING)
             self.application.set_status(event.status)
         elif event.status:
@@ -1004,12 +1035,20 @@ class NativeEditorRoot:
             self, node: ReconstructionLayer) -> None:
         stack = self.application.layer_stack
         parent = node.active_run or node.base_run
-        if parent is None or not parent.source_path:
+        source_path = (
+            parent.source_path if parent is not None
+            else node.intermediate_source_path
+        )
+        checkpoint_path = (
+            parent.checkpoint_path if parent is not None
+            else node.intermediate_shape_checkpoint_path
+        )
+        if not source_path:
             self.application.set_status(
                 "Cannot refine: the selected version has no source image"
             )
             return
-        if not os.path.isfile(parent.source_path):
+        if not os.path.isfile(source_path):
             self.application.set_status(
                 "Cannot refine: the selected version source image is missing"
             )
@@ -1020,7 +1059,7 @@ class NativeEditorRoot:
             )
             return
         try:
-            with Image.open(parent.source_path) as opened:
+            with Image.open(source_path) as opened:
                 source_image = opened.convert("RGBA").copy()
             if source_image.size != (stack.width, stack.height):
                 raise ValueError(
@@ -1035,6 +1074,7 @@ class NativeEditorRoot:
                 source_image,
                 mask_image,
                 parameters=node.refine_parameters,
+                base_checkpoint_path=checkpoint_path,
             )
             self._refresh_reconstruction_panel(node)
         except Exception as exc:
@@ -1045,12 +1085,24 @@ class NativeEditorRoot:
             self, node: ReconstructionLayer) -> None:
         stack = self.application.layer_stack
         parent = node.active_run or node.base_run
-        if parent is None or not parent.source_path:
+        source_path = (
+            parent.source_path if parent is not None
+            else node.intermediate_source_path
+        )
+        shape_checkpoint = (
+            parent.checkpoint_path if parent is not None
+            else node.intermediate_shape_checkpoint_path
+        )
+        texture_checkpoint = (
+            parent.texture_checkpoint_path if parent is not None
+            else node.intermediate_texture_checkpoint_path
+        )
+        if not source_path:
             self.application.set_status(
                 "Cannot refine texture: the selected version has no source image"
             )
             return
-        if not os.path.isfile(parent.source_path):
+        if not os.path.isfile(source_path):
             self.application.set_status(
                 "Cannot refine texture: source image is missing"
             )
@@ -1059,7 +1111,7 @@ class NativeEditorRoot:
             self.application.set_status("Paint a texture refine mask first")
             return
         try:
-            with Image.open(parent.source_path) as opened:
+            with Image.open(source_path) as opened:
                 source_image = opened.convert("RGBA").copy()
             if source_image.size != (stack.width, stack.height):
                 raise ValueError(
@@ -1074,6 +1126,8 @@ class NativeEditorRoot:
                 source_image,
                 mask_image,
                 parameters=node.refine_parameters,
+                shape_checkpoint_path=shape_checkpoint,
+                texture_checkpoint_path=texture_checkpoint,
             )
             self._refresh_reconstruction_panel(node)
         except Exception as exc:
@@ -1138,6 +1192,16 @@ class NativeEditorRoot:
                 )
                 node.resume_parameters = getattr(
                     self, "_reconstruction_job_parameters", None
+                )
+            if event.result.source_path:
+                node.intermediate_source_path = event.result.source_path
+            if event.result.checkpoint_path:
+                node.intermediate_shape_checkpoint_path = (
+                    event.result.checkpoint_path
+                )
+            if event.result.texture_checkpoint_path:
+                node.intermediate_texture_checkpoint_path = (
+                    event.result.texture_checkpoint_path
                 )
             if event.result.completed_stage is not ReconstructionStage.FINAL_MESH:
                 self._set_reconstruction_status(node, ReconstructionStatus.READY)
@@ -1386,20 +1450,38 @@ class NativeEditorRoot:
                 refine_supported = (
                     selected_backend is ReconstructionBackend.PIXAL3D
                 )
-                can_refine = bool(
-                    parent
-                    and parent.backend is ReconstructionBackend.PIXAL3D
-                    and parent.checkpoint_path
-                    and os.path.isfile(parent.checkpoint_path)
-                    and parent.source_path
-                    and os.path.isfile(parent.source_path)
-                )
-                can_texture_refine = bool(
-                    can_refine
-                    and parent
-                    and parent.texture_checkpoint_path
-                    and os.path.isfile(parent.texture_checkpoint_path)
-                )
+                if parent is not None:
+                    can_refine = bool(
+                        parent
+                        and parent.backend is ReconstructionBackend.PIXAL3D
+                        and parent.checkpoint_path
+                        and os.path.isfile(parent.checkpoint_path)
+                        and parent.source_path
+                        and os.path.isfile(parent.source_path)
+                    )
+                    can_texture_refine = bool(
+                        can_refine
+                        and parent.texture_checkpoint_path
+                        and os.path.isfile(parent.texture_checkpoint_path)
+                    )
+                else:
+                    can_refine = bool(
+                        node.generation_parameters.backend
+                        is ReconstructionBackend.PIXAL3D
+                        and node.intermediate_shape_checkpoint_path
+                        and os.path.isfile(
+                            node.intermediate_shape_checkpoint_path
+                        )
+                        and node.intermediate_source_path
+                        and os.path.isfile(node.intermediate_source_path)
+                    )
+                    can_texture_refine = bool(
+                        can_refine
+                        and node.intermediate_texture_checkpoint_path
+                        and os.path.isfile(
+                            node.intermediate_texture_checkpoint_path
+                        )
+                    )
                 selection = (
                     self.canvas_controls_coordinator.selection_state
                     if self.canvas_controls_coordinator is not None

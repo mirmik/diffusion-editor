@@ -53,6 +53,9 @@ class ReconstructionLayer(Layer):
         self.resume_stage: ReconstructionStage | None = None
         self.resume_source_sha256: str | None = None
         self.resume_parameters: ReconstructionParameters | None = None
+        self.intermediate_source_path: str | None = None
+        self.intermediate_shape_checkpoint_path: str | None = None
+        self.intermediate_texture_checkpoint_path: str | None = None
         self._initialize_stage_state()
 
     @property
@@ -162,6 +165,9 @@ class ReconstructionLayer(Layer):
         layer.resume_stage = None
         layer.resume_source_sha256 = None
         layer.resume_parameters = None
+        layer.intermediate_source_path = None
+        layer.intermediate_shape_checkpoint_path = None
+        layer.intermediate_texture_checkpoint_path = None
         try:
             layer.generation_parameters = ReconstructionParameters.from_dict(
                 state.get("generation_parameters")

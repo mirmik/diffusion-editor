@@ -397,6 +397,19 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar():
         assert view.reconstruction_workspace_actions[
             "generate"
         ].widget.enabled is False
+        assert view.reconstruction_workspace_mask_panel.visible is True
+        assert "not connected yet" in view.reconstruction_workspace_status.text
+        workspace_refine_actions = []
+        view.set_reconstruction_refine_handler(
+            lambda action, value:
+            workspace_refine_actions.append((action, value))
+        )
+        view.reconstruction_workspace_mask_controls["paint"].checked = True
+        assert workspace_refine_actions == [("paint", True)]
+        view._select_reconstruction_workspace_operation("sparse.generate")
+        assert view.reconstruction_workspace_mask_panel.visible is False
+        view._select_reconstruction_workspace_operation("hr.refine")
+        assert view.reconstruction_workspace_mask_panel.visible is True
         view._set_reconstruction_workspace_mode(True)
         assert view.reconstruction_workspace_mode is True
         view._set_reconstruction_workspace_mode(False)
@@ -580,6 +593,32 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar():
         assert refine_controls["version"].selected_index == 1
         assert refine_controls["run"].widget.enabled is True
         assert refine_controls["run_texture"].widget.enabled is True
+        workspace_mask_controls = (
+            view.reconstruction_workspace_mask_controls
+        )
+        assert workspace_mask_controls["paint"].checked is True
+        assert workspace_mask_controls["erase"].checked is True
+        assert workspace_mask_controls["brush_size"].value == 72.0
+        assert workspace_mask_controls["brush_hardness"].value == 0.25
+        assert workspace_mask_controls["brush_flow"].value == 0.75
+        assert workspace_mask_controls[
+            "resize_detail_to_1024"
+        ].checked is False
+        assert workspace_mask_controls["strength"].value == pytest.approx(0.6)
+        assert workspace_mask_controls["steps"].value == 12.0
+        assert workspace_mask_controls["seed"].value == 456.0
+        assert workspace_mask_controls["clear"].widget.enabled is True
+        assert view.reconstruction_workspace_actions[
+            "refine"
+        ].widget.enabled is True
+        view._run_reconstruction_workspace_refine()
+        assert refine_actions[-1] == ("run", None)
+        view._select_reconstruction_workspace_operation("texture.refine")
+        assert view.reconstruction_workspace_actions[
+            "refine"
+        ].widget.enabled is True
+        view._run_reconstruction_workspace_refine()
+        assert refine_actions[-1] == ("run_texture", None)
         assert view.reconstruction_refine_title.visible is True
         assert view.reconstruction_refine_panel.visible is True
         assert view.reconstruction_versions_panel.visible is True
