@@ -16,6 +16,8 @@ from ..generation.types import (
 )
 from ..workers.pixal3d_process import Pixal3DProcessClient
 from ..workers.hi3dgen_process import Hi3DGenProcessClient
+from ..workers.hunyuan3d21_process import Hunyuan3D21ProcessClient
+from ..workers.sam3d_objects_process import Sam3DObjectsProcessClient
 from ..workers.spar3d_process import Spar3DProcessClient
 from ..workers.trellis2_process import Trellis2ProcessClient
 from .threaded_lifecycle import EngineTaskQueue
@@ -31,11 +33,19 @@ class ReconstructionEngine:
         trellis_client: Trellis2ProcessClient | None = None,
         spar3d_client: Spar3DProcessClient | None = None,
         hi3dgen_client: Hi3DGenProcessClient | None = None,
+        hunyuan3d21_client: Hunyuan3D21ProcessClient | None = None,
+        sam3d_objects_client: Sam3DObjectsProcessClient | None = None,
     ) -> None:
         self._client = client or Pixal3DProcessClient()
         self._trellis_client = trellis_client or Trellis2ProcessClient()
         self._spar3d_client = spar3d_client or Spar3DProcessClient()
         self._hi3dgen_client = hi3dgen_client or Hi3DGenProcessClient()
+        self._hunyuan3d21_client = (
+            hunyuan3d21_client or Hunyuan3D21ProcessClient()
+        )
+        self._sam3d_objects_client = (
+            sam3d_objects_client or Sam3DObjectsProcessClient()
+        )
         self._tasks = EngineTaskQueue()
 
     @property
@@ -81,6 +91,8 @@ class ReconstructionEngine:
             ReconstructionBackend.TRELLIS2: self._trellis_client,
             ReconstructionBackend.SPAR3D: self._spar3d_client,
             ReconstructionBackend.HI3DGEN: self._hi3dgen_client,
+            ReconstructionBackend.HUNYUAN3D21: self._hunyuan3d21_client,
+            ReconstructionBackend.SAM3D_OBJECTS: self._sam3d_objects_client,
         }[request.parameters.backend]
         glb_path, source_path = client.generate(
             request.image,
@@ -230,3 +242,5 @@ class ReconstructionEngine:
             self._trellis_client.shutdown(timeout)
             self._spar3d_client.shutdown(timeout)
             self._hi3dgen_client.shutdown(timeout)
+            self._hunyuan3d21_client.shutdown(timeout)
+            self._sam3d_objects_client.shutdown(timeout)

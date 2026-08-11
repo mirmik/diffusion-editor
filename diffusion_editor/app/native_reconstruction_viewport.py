@@ -64,16 +64,86 @@ layout(push_constant) uniform PCBlock {
 } pc;
 #define U_COLOR pc.u_color
 #define U_LIGHT_DIRECTION pc.u_light_direction.xyz
+#define U_DISPLAY_MODE pc.u_light_direction.w
 #else
 uniform vec4 u_color;
-uniform vec3 u_light_direction;
+uniform vec4 u_light_direction;
 #define U_COLOR u_color
-#define U_LIGHT_DIRECTION u_light_direction
+#define U_LIGHT_DIRECTION u_light_direction.xyz
+#define U_DISPLAY_MODE u_light_direction.w
 #endif
 layout(location=0) in vec3 v_position;
 layout(location=0) out vec4 frag_color;
 void main() {
     vec3 normal = normalize(cross(dFdy(v_position), dFdx(v_position)));
+    int display_mode = int(U_DISPLAY_MODE + 0.5);
+    if (display_mode == 2) {
+        frag_color = U_COLOR;
+        return;
+    }
+    if (display_mode == 3) {
+        frag_color = vec4(normal * 0.5 + 0.5, 1.0);
+        return;
+    }
+    vec3 light_direction = normalize(U_LIGHT_DIRECTION);
+    float diffuse = max(dot(normal, light_direction), 0.0);
+    vec3 color = U_COLOR.rgb * (0.28 + 0.72 * diffuse);
+    frag_color = vec4(color, 1.0);
+}
+"""
+
+_SMOOTH_VERTEX_SHADER = """#version 450 core
+#ifdef VULKAN
+layout(push_constant) uniform PCBlock {
+    mat4 u_mvp;
+    vec4 u_color;
+    vec4 u_light_direction;
+} pc;
+#define U_MVP pc.u_mvp
+#else
+uniform mat4 u_mvp;
+#define U_MVP u_mvp
+#endif
+layout(location=0) in vec3 a_position;
+layout(location=1) in vec3 a_normal;
+layout(location=0) out vec3 v_normal;
+void main() {
+    v_normal = a_normal;
+    gl_Position = U_MVP * vec4(a_position, 1.0);
+}
+"""
+
+_SMOOTH_FRAGMENT_SHADER = """#version 450 core
+#ifdef VULKAN
+layout(push_constant) uniform PCBlock {
+    mat4 u_mvp;
+    vec4 u_color;
+    vec4 u_light_direction;
+} pc;
+#define U_COLOR pc.u_color
+#define U_LIGHT_DIRECTION pc.u_light_direction.xyz
+#define U_DISPLAY_MODE pc.u_light_direction.w
+#else
+uniform vec4 u_color;
+uniform vec4 u_light_direction;
+#define U_COLOR u_color
+#define U_LIGHT_DIRECTION u_light_direction.xyz
+#define U_DISPLAY_MODE u_light_direction.w
+#endif
+layout(location=0) in vec3 v_normal;
+layout(location=0) out vec4 frag_color;
+void main() {
+    vec3 normal = normalize(v_normal);
+    normal = gl_FrontFacing ? normal : -normal;
+    int display_mode = int(U_DISPLAY_MODE + 0.5);
+    if (display_mode == 2) {
+        frag_color = U_COLOR;
+        return;
+    }
+    if (display_mode == 3) {
+        frag_color = vec4(normal * 0.5 + 0.5, 1.0);
+        return;
+    }
     vec3 light_direction = normalize(U_LIGHT_DIRECTION);
     float diffuse = max(dot(normal, light_direction), 0.0);
     vec3 color = U_COLOR.rgb * (0.28 + 0.72 * diffuse);
@@ -113,11 +183,13 @@ layout(push_constant) uniform PCBlock {
 } pc;
 #define U_COLOR pc.u_color
 #define U_LIGHT_DIRECTION pc.u_light_direction.xyz
+#define U_DISPLAY_MODE pc.u_light_direction.w
 #else
 uniform vec4 u_color;
-uniform vec3 u_light_direction;
+uniform vec4 u_light_direction;
 #define U_COLOR u_color
-#define U_LIGHT_DIRECTION u_light_direction
+#define U_LIGHT_DIRECTION u_light_direction.xyz
+#define U_DISPLAY_MODE u_light_direction.w
 #endif
 layout(binding=0) uniform sampler2D u_base_color_texture;
 layout(location=0) in vec3 v_position;
@@ -125,12 +197,104 @@ layout(location=1) in vec2 v_uv;
 layout(location=0) out vec4 frag_color;
 void main() {
     vec3 normal = normalize(cross(dFdy(v_position), dFdx(v_position)));
+    vec4 base_color = texture(u_base_color_texture, v_uv) * U_COLOR;
+    int display_mode = int(U_DISPLAY_MODE + 0.5);
+    if (display_mode == 2) {
+        frag_color = base_color;
+        return;
+    }
+    if (display_mode == 3) {
+        frag_color = vec4(normal * 0.5 + 0.5, 1.0);
+        return;
+    }
     vec3 light_direction = normalize(U_LIGHT_DIRECTION);
     float diffuse = max(dot(normal, light_direction), 0.0);
-    vec4 base_color = texture(u_base_color_texture, v_uv) * U_COLOR;
     frag_color = vec4(base_color.rgb * (0.28 + 0.72 * diffuse), base_color.a);
 }
 """
+
+_SMOOTH_TEXTURED_VERTEX_SHADER = """#version 450 core
+#ifdef VULKAN
+layout(push_constant) uniform PCBlock {
+    mat4 u_mvp;
+    vec4 u_color;
+    vec4 u_light_direction;
+} pc;
+#define U_MVP pc.u_mvp
+#else
+uniform mat4 u_mvp;
+#define U_MVP u_mvp
+#endif
+layout(location=0) in vec3 a_position;
+layout(location=1) in vec3 a_normal;
+layout(location=2) in vec2 a_uv;
+layout(location=0) out vec3 v_normal;
+layout(location=1) out vec2 v_uv;
+void main() {
+    v_normal = a_normal;
+    v_uv = a_uv;
+    gl_Position = U_MVP * vec4(a_position, 1.0);
+}
+"""
+
+_SMOOTH_TEXTURED_FRAGMENT_SHADER = """#version 450 core
+#ifdef VULKAN
+layout(push_constant) uniform PCBlock {
+    mat4 u_mvp;
+    vec4 u_color;
+    vec4 u_light_direction;
+} pc;
+#define U_COLOR pc.u_color
+#define U_LIGHT_DIRECTION pc.u_light_direction.xyz
+#define U_DISPLAY_MODE pc.u_light_direction.w
+#else
+uniform vec4 u_color;
+uniform vec4 u_light_direction;
+#define U_COLOR u_color
+#define U_LIGHT_DIRECTION u_light_direction.xyz
+#define U_DISPLAY_MODE u_light_direction.w
+#endif
+layout(binding=0) uniform sampler2D u_base_color_texture;
+layout(location=0) in vec3 v_normal;
+layout(location=1) in vec2 v_uv;
+layout(location=0) out vec4 frag_color;
+void main() {
+    vec3 normal = normalize(v_normal);
+    normal = gl_FrontFacing ? normal : -normal;
+    vec4 base_color = texture(u_base_color_texture, v_uv) * U_COLOR;
+    int display_mode = int(U_DISPLAY_MODE + 0.5);
+    if (display_mode == 2) {
+        frag_color = base_color;
+        return;
+    }
+    if (display_mode == 3) {
+        frag_color = vec4(normal * 0.5 + 0.5, 1.0);
+        return;
+    }
+    vec3 light_direction = normalize(U_LIGHT_DIRECTION);
+    float diffuse = max(dot(normal, light_direction), 0.0);
+    frag_color = vec4(base_color.rgb * (0.28 + 0.72 * diffuse), base_color.a);
+}
+"""
+
+
+RECONSTRUCTION_SHADING_MODES = (
+    "flat", "smooth", "unlit", "normals", "wireframe"
+)
+RECONSTRUCTION_SHADING_LABELS = {
+    "flat": "Flat",
+    "smooth": "Smooth",
+    "unlit": "Unlit",
+    "normals": "Normals",
+    "wireframe": "Wireframe",
+}
+_SHADING_MODE_IDS = {
+    "flat": 0.0,
+    "smooth": 1.0,
+    "unlit": 2.0,
+    "normals": 3.0,
+    "wireframe": 4.0,
+}
 
 
 @dataclass
@@ -138,6 +302,44 @@ class _MeshRenderItem:
     mesh: object
     texture: object | None = None
     color: tuple[float, float, float, float] = (0.34, 0.72, 0.95, 1.0)
+    has_normals: bool = False
+    wire_mesh: object | None = None
+
+
+def _wireframe_indices(triangles: np.ndarray) -> np.ndarray:
+    """Expand triangle indices into three independent line segments each."""
+    faces = np.asarray(triangles, dtype=np.uint32)
+    if faces.ndim != 2 or faces.shape[1] != 3:
+        raise ValueError("triangles must have shape (count, 3)")
+    if not len(faces):
+        return np.empty(0, dtype=np.uint32)
+    result = np.empty((len(faces), 6), dtype=np.uint32)
+    result[:, 0:2] = faces[:, (0, 1)]
+    result[:, 2:4] = faces[:, (1, 2)]
+    result[:, 4:6] = faces[:, (2, 0)]
+    return np.ascontiguousarray(result.reshape(-1))
+
+
+def _build_wireframe_mesh(source_mesh):
+    from tmesh import TcAttribType, TcDrawMode, TcMesh, TcVertexLayout
+
+    positions = np.ascontiguousarray(source_mesh.vertices, dtype=np.float32)
+    triangles = source_mesh.triangles
+    if triangles is None or not len(triangles):
+        return None
+    indices = _wireframe_indices(triangles)
+    layout = TcVertexLayout()
+    if not layout.add("position", 3, TcAttribType.FLOAT32, 0):
+        raise RuntimeError("failed to create reconstruction wireframe layout")
+    return TcMesh.from_interleaved(
+        positions,
+        len(positions),
+        indices,
+        layout,
+        name=f"{source_mesh.name} Wireframe",
+        uuid=f"{source_mesh.uuid}-wireframe",
+        draw_mode=TcDrawMode.LINES,
+    )
 
 
 def _decode_texture(payload: bytes) -> tuple[int, int, np.ndarray]:
@@ -206,11 +408,16 @@ class _OrbitCamera:
         self._camera.elevation = self.FRONT_ELEVATION
 
 
-def _draw_constants(mvp: np.ndarray, color, light_direction) -> np.ndarray:
+def _draw_constants(
+    mvp: np.ndarray,
+    color,
+    light_direction,
+    display_mode: float = 0.0,
+) -> np.ndarray:
     gpu_mvp = np.ascontiguousarray(mvp.T, dtype=np.float32)
     color_array = np.asarray(color, dtype=np.float32)
     light_array = np.asarray(
-        (*light_direction, 0.0), dtype=np.float32
+        (*light_direction, float(display_mode)), dtype=np.float32
     )
     constants = np.concatenate(
         (gpu_mvp.reshape(-1), color_array, light_array)
@@ -339,6 +546,7 @@ class NativeReconstructionViewport:
         self._request_repaint = request_repaint
         self._camera = _OrbitCamera()
         self._light_direction = self._camera.direction_from_target()
+        self._shading_mode = "flat"
         self._dirty = True
         self._closed = False
         self._mesh_items: list[_MeshRenderItem] = []
@@ -357,6 +565,12 @@ class NativeReconstructionViewport:
         )
         self._fragment_shader = self._graphics.device.create_shader(
             Tgfx2ShaderStage.Fragment, _FRAGMENT_SHADER
+        )
+        self._smooth_vertex_shader = self._graphics.device.create_shader(
+            Tgfx2ShaderStage.Vertex, _SMOOTH_VERTEX_SHADER
+        )
+        self._smooth_fragment_shader = self._graphics.device.create_shader(
+            Tgfx2ShaderStage.Fragment, _SMOOTH_FRAGMENT_SHADER
         )
         self._textured_shader = TcShader.get_or_create(
             "diffusion-editor-reconstruction-textured"
@@ -379,6 +593,34 @@ class NativeReconstructionViewport:
         self._textured_fragment_shader = textured_pair.fs
         if not self._textured_vertex_shader or not self._textured_fragment_shader:
             raise RuntimeError("Reconstruction texture shader compile failed")
+        self._smooth_textured_shader = TcShader.get_or_create(
+            "diffusion-editor-reconstruction-smooth-textured"
+        )
+        self._smooth_textured_shader.set_language(ShaderLanguage.GLSL)
+        self._smooth_textured_shader.set_artifact_policy(
+            ShaderArtifactPolicy.REQUIRED
+        )
+        self._smooth_textured_shader.set_sources_with_entries(
+            _SMOOTH_TEXTURED_VERTEX_SHADER,
+            _SMOOTH_TEXTURED_FRAGMENT_SHADER,
+            "",
+            "diffusion-editor-reconstruction-smooth-textured",
+            "diffusion_editor/app/reconstruction_smooth_textured.glsl",
+            "main",
+            "main",
+        )
+        smooth_textured_pair = tc_shader_ensure_tgfx2(
+            self._graphics.context, self._smooth_textured_shader
+        )
+        self._smooth_textured_vertex_shader = smooth_textured_pair.vs
+        self._smooth_textured_fragment_shader = smooth_textured_pair.fs
+        if (
+            not self._smooth_textured_vertex_shader
+            or not self._smooth_textured_fragment_shader
+        ):
+            raise RuntimeError(
+                "Reconstruction smooth texture shader compile failed"
+            )
         self.surface = _ViewportSurface(self._camera, self.invalidate)
         self.viewport = document.create_viewport3d()
         self.viewport.widget.stable_id = "diffusion-editor.reconstruction.viewport"
@@ -397,6 +639,19 @@ class NativeReconstructionViewport:
     @property
     def light_direction(self) -> tuple[float, float, float]:
         return tuple(map(float, self._light_direction))
+
+    @property
+    def shading_mode(self) -> str:
+        return self._shading_mode
+
+    def set_shading_mode(self, mode: str) -> None:
+        normalized = str(mode).strip().lower()
+        if normalized not in RECONSTRUCTION_SHADING_MODES:
+            raise ValueError(f"unsupported reconstruction shading mode: {mode}")
+        if normalized == self._shading_mode:
+            return
+        self._shading_mode = normalized
+        self.invalidate()
 
     def light_from_camera(self) -> None:
         self._require_open()
@@ -442,7 +697,12 @@ class NativeReconstructionViewport:
                     width, height, pixels, TextureEncoding.SRGB
                 )
                 color = base_color.factor
-            mesh_items.append(_MeshRenderItem(mesh, texture, color))
+            mesh_items.append(_MeshRenderItem(
+                mesh,
+                texture,
+                color,
+                has_normals=mesh.vertex_normals is not None,
+            ))
             vertices += int(mesh.vertex_count)
             indices += int(mesh.index_count)
             payload = np.asarray(mesh.mesh.get_vertices_buffer(), dtype=np.float32)
@@ -499,6 +759,10 @@ class NativeReconstructionViewport:
     def render_if_dirty(self) -> bool:
         if self._closed or not self._dirty:
             return False
+        if self._shading_mode == "wireframe":
+            for item in self._mesh_items:
+                if item.wire_mesh is None:
+                    item.wire_mesh = _build_wireframe_mesh(item.mesh)
         width, height = self.surface.size
         self._ensure_textures(width, height)
         ctx = self._graphics.context
@@ -518,16 +782,49 @@ class NativeReconstructionViewport:
         ctx.set_blend(False)
         ctx.set_cull(CULL_NONE)
         mvp = self._camera.mvp(width, height)
+        display_mode = _SHADING_MODE_IDS[self._shading_mode]
         for item in self._mesh_items:
-            if item.texture is None:
+            if self._shading_mode == "wireframe":
+                if item.wire_mesh is None:
+                    continue
                 ctx.bind_shader(self._vertex_shader, self._fragment_shader)
+                self._set_draw_state(
+                    mvp,
+                    (0.72, 0.80, 0.95, 1.0),
+                    self._light_direction,
+                    _SHADING_MODE_IDS["unlit"],
+                )
+                draw_tc_mesh(ctx, item.wire_mesh)
+                continue
+            use_smooth_normals = (
+                self._shading_mode in {"smooth", "normals"}
+                and item.has_normals
+            )
+            if item.texture is None and use_smooth_normals:
+                ctx.bind_shader(
+                    self._smooth_vertex_shader, self._smooth_fragment_shader
+                )
+            elif item.texture is None:
+                ctx.bind_shader(self._vertex_shader, self._fragment_shader)
+            elif use_smooth_normals:
+                ctx.bind_shader(
+                    self._smooth_textured_vertex_shader,
+                    self._smooth_textured_fragment_shader,
+                )
+                ctx.use_shader_resource_layout(self._smooth_textured_shader)
+                ctx.bind_texture_by_name("u_base_color_texture", item.texture)
             else:
                 ctx.bind_shader(
                     self._textured_vertex_shader, self._textured_fragment_shader
                 )
                 ctx.use_shader_resource_layout(self._textured_shader)
                 ctx.bind_texture_by_name("u_base_color_texture", item.texture)
-            self._set_draw_state(mvp, item.color, self._light_direction)
+            self._set_draw_state(
+                mvp,
+                item.color,
+                self._light_direction,
+                display_mode,
+            )
             draw_tc_mesh(ctx, item.mesh)
         if not self._point_cloud.empty:
             self._point_cloud_draw_params.view_projection = tuple(
@@ -558,6 +855,8 @@ class NativeReconstructionViewport:
             self._graphics.destroy_texture(self._depth_texture)
         self._graphics.device.destroy_shader(self._vertex_shader)
         self._graphics.device.destroy_shader(self._fragment_shader)
+        self._graphics.device.destroy_shader(self._smooth_vertex_shader)
+        self._graphics.device.destroy_shader(self._smooth_fragment_shader)
         self._point_cloud.release(self._graphics.context)
         self._point_cloud_renderer.release(self._graphics.context)
         self._color_texture = None
@@ -587,9 +886,15 @@ class NativeReconstructionViewport:
         )
         self._texture_size = size
 
-    def _set_draw_state(self, mvp: np.ndarray, color, light_direction) -> None:
+    def _set_draw_state(
+        self,
+        mvp: np.ndarray,
+        color,
+        light_direction,
+        display_mode: float,
+    ) -> None:
         self._graphics.context.set_push_constants(
-            _draw_constants(mvp, color, light_direction)
+            _draw_constants(mvp, color, light_direction, display_mode)
         )
 
     def _require_open(self) -> None:

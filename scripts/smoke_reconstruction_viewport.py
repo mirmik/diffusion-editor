@@ -10,6 +10,9 @@ import tempfile
 import numpy as np
 
 from diffusion_editor.app.application import EditorApplication
+from diffusion_editor.app.native_reconstruction_viewport import (
+    RECONSTRUCTION_SHADING_MODES,
+)
 from diffusion_editor.app.native_root import NativeEditorRoot
 
 
@@ -43,14 +46,20 @@ def main() -> int:
         ) as root:
             viewport = root._ensure_reconstruction_viewport()
             stats = viewport.load_glb(str(args.glb))
-            for _ in range(3):
-                root.composition.request_repaint()
-                root.tick()
-            if not viewport.viewport.texture_id:
-                raise RuntimeError("reconstruction viewport published no texture")
+            for mode in RECONSTRUCTION_SHADING_MODES:
+                viewport.set_shading_mode(mode)
+                for _ in range(3):
+                    root.composition.request_repaint()
+                    root.tick()
+                if not viewport.viewport.texture_id:
+                    raise RuntimeError(
+                        "reconstruction viewport published no texture "
+                        f"in {mode!r} shading mode"
+                    )
             print(
                 "Reconstruction viewport smoke OK: "
-                f"vertices={stats[0]} triangles={stats[1]} meshes={stats[2]}"
+                f"vertices={stats[0]} triangles={stats[1]} meshes={stats[2]} "
+                f"shading={','.join(RECONSTRUCTION_SHADING_MODES)}"
             )
     return 0
 

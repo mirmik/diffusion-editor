@@ -12,7 +12,11 @@ from termin.gui_native import (
 )
 
 from diffusion_editor.app.native_shell import MENU_COMMANDS, NativeEditorView
+from diffusion_editor.generation.reconstruction_workspace import (
+    build_legacy_workspace,
+)
 from diffusion_editor.generation.types import (
+    RECONSTRUCTION_BACKEND_PARAMETER_KEYS,
     RECONSTRUCTION_STAGES,
     ReconstructionParameters,
     ReconstructionBackend,
@@ -20,6 +24,7 @@ from diffusion_editor.generation.types import (
     ReconstructionRun,
     ReconstructionRunKind,
     ReconstructionStage,
+    ReconstructionStageArtifact,
     ReconstructionStageStatus,
 )
 
@@ -274,14 +279,109 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar():
     class MountedView:
         def __init__(self, widget):
             self.widget = widget
+            self.shading_modes = []
+
+        def set_shading_mode(self, mode):
+            self.shading_modes.append(mode)
 
     canvas = document.create_vstack("TestCanvas")
     canvas.stable_id = "test.canvas"
     viewport = document.create_vstack("TestReconstructionViewport")
     viewport.stable_id = "test.reconstruction-viewport"
+    mounted_viewport = MountedView(viewport)
     try:
         view.mount_canvas(MountedView(canvas))
-        view.mount_reconstruction_viewport(MountedView(viewport))
+        view.mount_reconstruction_viewport(mounted_viewport)
+        assert view.reconstruction_workspace_mode is False
+        assert view.reconstruction_workspace_open.widget.enabled is True
+        assert "lr.refine" in view.reconstruction_workspace_operation_buttons
+        assert (
+            "local.upscale"
+            in view.reconstruction_workspace_operation_buttons
+        )
+        assert (
+            "local.generate_geometry"
+            in view.reconstruction_workspace_operation_buttons
+        )
+        view._select_reconstruction_workspace_operation("local.upscale")
+        assert view.reconstruction_workspace_operation_rows[
+            "local.upscale"
+        ].visible is True
+        assert view.reconstruction_workspace_inspector_title.text == (
+            "Upscale local conditioning"
+        )
+        assert "SR/upscaled condition" in (
+            view.reconstruction_workspace_inspector_outputs.text
+        )
+        workspace_statuses = {
+            stage: ReconstructionStageStatus.PENDING
+            for stage in RECONSTRUCTION_STAGES
+        }
+        workspace_statuses[ReconstructionStage.SOURCE_IMAGE] = (
+            ReconstructionStageStatus.READY
+        )
+        workspace_statuses[ReconstructionStage.SPARSE_OCCUPANCY] = (
+            ReconstructionStageStatus.READY
+        )
+        workspace = build_legacy_workspace(
+            ReconstructionParameters(),
+            workspace_statuses,
+            {
+                ReconstructionStage.SOURCE_IMAGE:
+                ReconstructionStageArtifact(
+                    ReconstructionStage.SOURCE_IMAGE,
+                    "/tmp/source.png",
+                    "image",
+                ),
+                ReconstructionStage.SPARSE_OCCUPANCY:
+                ReconstructionStageArtifact(
+                    ReconstructionStage.SPARSE_OCCUPANCY,
+                    "/tmp/sparse.glb",
+                    "mesh",
+                ),
+            },
+            (),
+            None,
+        )
+        view.update_reconstruction_workspace(
+            ReconstructionBackend.PIXAL3D, workspace
+        )
+        view._select_reconstruction_workspace_operation("sparse.generate")
+        assert view.reconstruction_workspace_variant_combo.item_count == 1
+        assert view.reconstruction_workspace_variant_combo.item_text(0) == (
+            "Current generation · ready"
+        )
+        assert view.reconstruction_workspace_artifact_combo.item_count == 1
+        assert "Sparse occupancy preview" in (
+            view.reconstruction_workspace_artifact_combo.item_text(0)
+        )
+        assert view.reconstruction_workspace_actions[
+            "preview"
+        ].widget.enabled is True
+        workspace_actions = []
+        view.set_reconstruction_workspace_handler(
+            lambda action, value: workspace_actions.append((action, value))
+        )
+        view._preview_reconstruction_workspace_artifact()
+        assert workspace_actions == [(
+            "preview_artifact",
+            "legacy:current:sparse.generate:sparse_occupancy",
+        )]
+        assert view.reconstruction_workspace_actions[
+            "generate"
+        ].widget.enabled is True
+        view._run_reconstruction_workspace_operation()
+        assert workspace_actions[-1] == (
+            "generate_to_operation", "sparse.generate"
+        )
+        view._select_reconstruction_workspace_operation("lr.refine")
+        assert view.reconstruction_workspace_actions[
+            "generate"
+        ].widget.enabled is False
+        view._set_reconstruction_workspace_mode(True)
+        assert view.reconstruction_workspace_mode is True
+        view._set_reconstruction_workspace_mode(False)
+        assert view.reconstruction_workspace_mode is False
         global_ids = {
             command.data.stable_id
             for command in view.toolbar_model.commands
@@ -297,6 +397,13 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar():
             "generation.3d_cancel",
             "view.3d_light_from_camera",
         } <= context_ids
+        assert view.reconstruction_shading_combo.item_count == 5
+        assert [
+            view.reconstruction_shading_combo.item_text(index)
+            for index in range(view.reconstruction_shading_combo.item_count)
+        ] == ["Flat", "Smooth", "Unlit", "Normals", "Wireframe"]
+        view.reconstruction_shading_combo.selected_index = 1
+        assert mounted_viewport.shading_modes == ["smooth"]
         selected_stages = []
         view.set_reconstruction_stage_handler(selected_stages.append)
         view._activate_reconstruction_stage(ReconstructionStage.HR_COORDINATES)
@@ -351,6 +458,61 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar():
         assert parameter_controls["steps"].widget.enabled is False
         assert parameter_controls["resolution"].widget.enabled is False
         assert parameter_controls["decimation_target"].widget.enabled is False
+        hunyuan_parameters = ReconstructionParameters(
+            backend=ReconstructionBackend.HUNYUAN3D21,
+            hunyuan3d21_guidance_scale=6.0,
+            hunyuan3d21_octree_resolution=256,
+            hunyuan3d21_texture_steps=16,
+            hunyuan3d21_texture_guidance_scale=4.0,
+        )
+        view.update_reconstruction_parameters(hunyuan_parameters, busy=False)
+        assert parameter_controls["backend"].selected_index == 4
+        assert parameter_controls["hunyuan3d21_guidance_scale"].value == 6.0
+        assert parameter_controls[
+            "hunyuan3d21_octree_resolution"
+        ].selected_index == 2
+        assert parameter_controls["hunyuan3d21_texture_steps"].value == 16.0
+        assert parameter_controls[
+            "hunyuan3d21_texture_guidance_scale"
+        ].value == 4.0
+        assert parameter_controls["resolution"].widget.enabled is False
+        assert parameter_controls["texture_size"].widget.enabled is True
+        assert parameter_controls["low_vram"].widget.enabled is False
+        sam_parameters = ReconstructionParameters(
+            backend=ReconstructionBackend.SAM3D_OBJECTS,
+            sam3d_sparse_steps=23,
+            sam3d_slat_steps=19,
+            sam3d_sparse_guidance_scale=6.5,
+            sam3d_slat_guidance_scale=1.25,
+            sam3d_simplify=0.9,
+        )
+        view.update_reconstruction_parameters(sam_parameters, busy=False)
+        assert parameter_controls["backend"].selected_index == 5
+        assert parameter_controls["sam3d_sparse_steps"].value == 23.0
+        assert parameter_controls["sam3d_slat_steps"].value == 19.0
+        assert parameter_controls["sam3d_sparse_guidance_scale"].value == 6.5
+        assert parameter_controls["sam3d_slat_guidance_scale"].value == 1.25
+        assert parameter_controls["sam3d_simplify"].value == pytest.approx(0.9)
+        assert parameter_controls["sam3d_sparse_steps"].widget.enabled is True
+        assert parameter_controls["steps"].widget.enabled is False
+        assert parameter_controls["resolution"].widget.enabled is False
+        assert parameter_controls["decimation_target"].widget.enabled is False
+        assert parameter_controls["texture_size"].widget.enabled is True
+        assert parameter_controls["low_vram"].widget.enabled is False
+        for backend in ReconstructionBackend:
+            view.update_reconstruction_parameters(
+                ReconstructionParameters(backend=backend), busy=False
+            )
+            visible = {
+                key for key, widget
+                in view.reconstruction_parameter_widgets.items()
+                if widget.visible
+            }
+            assert visible == RECONSTRUCTION_BACKEND_PARAMETER_KEYS[backend]
+            assert {
+                key for key, control in parameter_controls.items()
+                if control.widget.enabled
+            } == visible
         refine_actions = []
         view.set_reconstruction_refine_handler(
             lambda action, value: refine_actions.append((action, value))
@@ -399,6 +561,9 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar():
         assert refine_controls["version"].selected_index == 1
         assert refine_controls["run"].widget.enabled is True
         assert refine_controls["run_texture"].widget.enabled is True
+        assert view.reconstruction_refine_title.visible is True
+        assert view.reconstruction_refine_panel.visible is True
+        assert view.reconstruction_versions_panel.visible is True
         trellis_run = ReconstructionRun(
             "trellis-run",
             ReconstructionRunKind.BASE,
@@ -418,6 +583,9 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar():
         assert refine_controls["run"].widget.enabled is False
         assert refine_controls["version"].widget.enabled is True
         assert refine_controls["version"].item_text(0) == "Base (TRELLIS.2)"
+        assert view.reconstruction_refine_title.visible is False
+        assert view.reconstruction_refine_panel.visible is False
+        assert view.reconstruction_versions_panel.visible is True
         statuses = {
             stage: ReconstructionStageStatus.PENDING
             for stage in RECONSTRUCTION_STAGES
@@ -441,6 +609,19 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar():
         assert view.reconstruction_stage_buttons[
             ReconstructionStage.SPARSE_OCCUPANCY
         ].widget.enabled is False
+        statuses[ReconstructionStage.TEXTURE_LATENT] = (
+            ReconstructionStageStatus.READY
+        )
+        view.update_reconstruction_stages(
+            statuses,
+            {},
+            ReconstructionStage.FINAL_MESH,
+            ReconstructionStage.TEXTURE_LATENT,
+            backend=ReconstructionBackend.HUNYUAN3D21,
+        )
+        assert view.reconstruction_stage_buttons[
+            ReconstructionStage.TEXTURE_LATENT
+        ].widget.enabled is True
         document.layout_roots(Rect(0.0, 0.0, 1000.0, 700.0))
         snapshot = _snapshot_by_id(document)
         host = snapshot["diffusion-editor.canvas-host"]["bounds"]

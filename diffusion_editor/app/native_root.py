@@ -41,6 +41,11 @@ from ..generation.types import (
     ReconstructionStage,
     ReconstructionStageStatus,
 )
+from ..generation.reconstruction_workspace import (
+    LEGACY_OPERATION_TARGET_STAGES,
+    WorkspacePreviewKind,
+    build_legacy_workspace,
+)
 from .application import EditorApplication, ShutdownPhase
 from .canvas_controls import (
     CanvasControlsCoordinator,
@@ -300,6 +305,7 @@ class NativeEditorRoot:
         self._reconstruction_job_node_id: str | None = None
         self._reconstruction_parent_run_id: str | None = None
         self._presented_reconstruction_id: str | None = None
+        self._active_reconstruction_workspace = None
         self.automation = None
 
         try:
@@ -354,6 +360,13 @@ class NativeEditorRoot:
                 )
                 if callable(set_refine_handler):
                     set_refine_handler(self._handle_reconstruction_refine)
+                set_workspace_handler = getattr(
+                    self.view, "set_reconstruction_workspace_handler", None
+                )
+                if callable(set_workspace_handler):
+                    set_workspace_handler(
+                        self._handle_reconstruction_workspace
+                    )
             mount_canvas = getattr(self.view, "mount_canvas", None)
             graphics = getattr(composition, "graphics", None)
             if mount_canvas is not None and graphics is not None:
@@ -1303,6 +1316,23 @@ class NativeEditorRoot:
             )
             if callable(update_parameters):
                 update_parameters(node.generation_parameters, busy=busy)
+            update_workspace = getattr(
+                self.view, "update_reconstruction_workspace", None
+            )
+            if callable(update_workspace):
+                workspace = build_legacy_workspace(
+                    node.generation_parameters,
+                    node.stage_statuses,
+                    node.stage_artifacts,
+                    node.runs,
+                    node.active_run_id,
+                )
+                self._active_reconstruction_workspace = workspace
+                update_workspace(
+                    node.generation_parameters.backend,
+                    workspace,
+                    busy=busy,
+                )
             update_refine = getattr(
                 self.view, "update_reconstruction_refine", None
             )
@@ -1352,6 +1382,68 @@ class NativeEditorRoot:
                     brush_flow=selection.flow if selection else 1.0,
                     busy=busy,
                 )
+
+    def _handle_reconstruction_workspace(
+            self, action: str, value=None) -> None:
+        if action == "generate_to_operation":
+            node = self.application.layer_stack.active_layer
+            controller = self.reconstruction_controller
+            if (
+                    not isinstance(node, ReconstructionLayer)
+                    or node.generation_parameters.backend
+                    is not ReconstructionBackend.PIXAL3D
+                    or (controller is not None and controller.is_busy)):
+                return
+            stage = LEGACY_OPERATION_TARGET_STAGES.get(str(value))
+            if stage is None:
+                return
+            node.target_stage = stage
+            self.application.set_status(
+                "Starting legacy Pixal3D execution through "
+                f"{str(value).replace('.', ' ')}"
+            )
+            self._start_reconstruction()
+            return
+        if action != "preview_artifact":
+            return
+        node = self.application.layer_stack.active_layer
+        workspace = self._active_reconstruction_workspace
+        if not isinstance(node, ReconstructionLayer) or workspace is None:
+            return
+        try:
+            artifact = workspace.artifact(str(value))
+            if not artifact.path or not os.path.isfile(artifact.path):
+                self.application.set_status(
+                    "Cannot preview graph artifact: file is missing"
+                )
+                return
+            if artifact.preview_kind in {
+                    WorkspacePreviewKind.MESH,
+                    WorkspacePreviewKind.OVERLAY}:
+                self._ensure_reconstruction_viewport().load_glb(artifact.path)
+                self._presented_reconstruction_id = node.id
+            elif artifact.preview_kind is WorkspacePreviewKind.POINTS:
+                self._ensure_reconstruction_viewport().load_point_cloud(
+                    artifact.path
+                )
+                self._presented_reconstruction_id = node.id
+            elif (
+                    artifact.preview_kind is WorkspacePreviewKind.IMAGE
+                    and artifact.role == "source"):
+                if self.canvas is not None:
+                    self.canvas.fit_in_view()
+            else:
+                self.application.set_status(
+                    "This artifact needs a viewer that is not connected yet"
+                )
+                return
+            workspace.select_artifact(artifact.artifact_id)
+            self.application.set_status(
+                f"Previewing graph artifact: {artifact.role}"
+            )
+        except Exception as exc:
+            log.exception("Failed to preview reconstruction graph artifact")
+            self.application.set_status(f"Cannot preview graph artifact: {exc}")
 
     def _sync_reconstruction_selection(
             self, node: ReconstructionLayer | None) -> None:

@@ -6,10 +6,16 @@ import numpy as np
 import pytest
 
 from diffusion_editor.app.native_reconstruction_viewport import (
+    RECONSTRUCTION_SHADING_MODES,
+    _FRAGMENT_SHADER,
     _OrbitCamera,
+    _SMOOTH_TEXTURED_VERTEX_SHADER,
+    _SMOOTH_VERTEX_SHADER,
+    _TEXTURED_FRAGMENT_SHADER,
     _decode_texture,
     _draw_constants,
     _should_fit_camera,
+    _wireframe_indices,
 )
 
 
@@ -48,6 +54,45 @@ def test_draw_constants_include_configurable_light_direction() -> None:
     assert packed.shape == (24,)
     assert packed[16:20] == pytest.approx((0.1, 0.2, 0.3, 1.0))
     assert packed[20:24] == pytest.approx((0.0, 1.0, 0.25, 0.0))
+
+
+def test_draw_constants_encode_display_mode_with_the_light() -> None:
+    packed = _draw_constants(
+        np.eye(4, dtype=np.float32),
+        (0.1, 0.2, 0.3, 1.0),
+        (0.0, 1.0, 0.25),
+        3.0,
+    ).view(np.float32)
+
+    assert packed[20:24] == pytest.approx((0.0, 1.0, 0.25, 3.0))
+
+
+def test_shading_shaders_cover_flat_smooth_unlit_and_normals() -> None:
+    assert RECONSTRUCTION_SHADING_MODES == (
+        "flat", "smooth", "unlit", "normals", "wireframe"
+    )
+    assert "layout(location=1) in vec3 a_normal" in _SMOOTH_VERTEX_SHADER
+    assert "layout(location=1) in vec3 a_normal" in (
+        _SMOOTH_TEXTURED_VERTEX_SHADER
+    )
+    assert "display_mode == 2" in _FRAGMENT_SHADER
+    assert "display_mode == 3" in _FRAGMENT_SHADER
+    assert "display_mode == 2" in _TEXTURED_FRAGMENT_SHADER
+    assert "display_mode == 3" in _TEXTURED_FRAGMENT_SHADER
+
+
+def test_wireframe_indices_expand_every_triangle_edge() -> None:
+    indices = _wireframe_indices(np.asarray([
+        (0, 1, 2),
+        (2, 1, 3),
+    ], dtype=np.uint32))
+
+    assert indices.dtype == np.uint32
+    assert indices.flags.c_contiguous
+    assert indices.tolist() == [
+        0, 1, 1, 2, 2, 0,
+        2, 1, 1, 3, 3, 2,
+    ]
 
 
 def test_decode_texture_preserves_top_to_bottom_pixel_order() -> None:

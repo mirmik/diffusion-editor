@@ -31,10 +31,10 @@ class ReconstructionStage(str, Enum):
 
 RECONSTRUCTION_STAGES = tuple(ReconstructionStage)
 
-# Only stages that produce a distinct, human-readable artifact belong in the
-# editor's preview list. Flow integration and the texture latent remain part of
-# the worker protocol, but exposing them as previews would imply an artifact
-# that does not exist.
+# Only stages that can produce a distinct, human-readable artifact belong in
+# the editor's preview list. Flow integration remains progress-only. Texture
+# latent is enabled only for backends such as Hunyuan that publish a baked,
+# textured mesh artifact for it.
 RECONSTRUCTION_PREVIEW_STAGES = (
     ReconstructionStage.SOURCE_IMAGE,
     ReconstructionStage.POINT_CLOUD,
@@ -42,6 +42,7 @@ RECONSTRUCTION_PREVIEW_STAGES = (
     ReconstructionStage.LR_SHAPE_LATENT,
     ReconstructionStage.HR_COORDINATES,
     ReconstructionStage.HR_SHAPE_LATENT,
+    ReconstructionStage.TEXTURE_LATENT,
     ReconstructionStage.FINAL_MESH,
 )
 
@@ -80,6 +81,8 @@ class ReconstructionBackend(str, Enum):
     TRELLIS2 = "trellis2"
     SPAR3D = "spar3d"
     HI3DGEN = "hi3dgen"
+    HUNYUAN3D21 = "hunyuan3d21"
+    SAM3D_OBJECTS = "sam3d_objects"
 
 
 RECONSTRUCTION_BACKEND_LABELS = {
@@ -87,6 +90,8 @@ RECONSTRUCTION_BACKEND_LABELS = {
     ReconstructionBackend.TRELLIS2: "TRELLIS.2",
     ReconstructionBackend.SPAR3D: "SPAR3D",
     ReconstructionBackend.HI3DGEN: "Hi3DGen",
+    ReconstructionBackend.HUNYUAN3D21: "Hunyuan3D 2.1",
+    ReconstructionBackend.SAM3D_OBJECTS: "SAM 3D Objects",
 }
 
 
@@ -118,6 +123,60 @@ RECONSTRUCTION_BACKEND_STAGES = {
         ReconstructionStage.HR_SHAPE_LATENT,
         ReconstructionStage.FINAL_MESH,
     ),
+    ReconstructionBackend.HUNYUAN3D21: (
+        ReconstructionStage.SOURCE_IMAGE,
+        ReconstructionStage.HR_SHAPE_FLOW,
+        ReconstructionStage.HR_SHAPE_LATENT,
+        ReconstructionStage.TEXTURE_FLOW,
+        ReconstructionStage.TEXTURE_LATENT,
+        ReconstructionStage.FINAL_MESH,
+    ),
+    ReconstructionBackend.SAM3D_OBJECTS: (
+        ReconstructionStage.SOURCE_IMAGE,
+        ReconstructionStage.POINT_CLOUD,
+        ReconstructionStage.SPARSE_OCCUPANCY,
+        ReconstructionStage.HR_SHAPE_FLOW,
+        ReconstructionStage.HR_SHAPE_LATENT,
+        ReconstructionStage.TEXTURE_LATENT,
+        ReconstructionStage.FINAL_MESH,
+    ),
+}
+
+
+# Temporary descriptor for the current linear reconstruction panel.  Keep the
+# backend contract explicit while the operation/artifact workspace is still a
+# separate architectural decision: the UI must not infer applicability from a
+# control's name or from ad-hoc enablement branches.
+RECONSTRUCTION_BACKEND_PARAMETER_KEYS = {
+    ReconstructionBackend.PIXAL3D: frozenset({
+        "backend", "seed", "steps", "resolution",
+        "lr_conditioning_resolution", "manual_fov_degrees",
+        "decimation_target", "texture_size", "low_vram",
+    }),
+    ReconstructionBackend.TRELLIS2: frozenset({
+        "backend", "seed", "steps", "resolution", "decimation_target",
+        "texture_size", "low_vram",
+    }),
+    ReconstructionBackend.SPAR3D: frozenset({
+        "backend", "seed", "spar3d_guidance_scale", "texture_size",
+        "low_vram",
+    }),
+    ReconstructionBackend.HI3DGEN: frozenset({
+        "backend", "seed", "steps", "decimation_target",
+        "hi3dgen_slat_steps", "hi3dgen_guidance_scale",
+        "hi3dgen_normal_resolution",
+    }),
+    ReconstructionBackend.HUNYUAN3D21: frozenset({
+        "backend", "seed", "steps", "decimation_target", "texture_size",
+        "hunyuan3d21_guidance_scale", "hunyuan3d21_octree_resolution",
+        "hunyuan3d21_texture_steps",
+        "hunyuan3d21_texture_guidance_scale",
+    }),
+    ReconstructionBackend.SAM3D_OBJECTS: frozenset({
+        "backend", "seed", "texture_size", "sam3d_sparse_steps",
+        "sam3d_slat_steps", "sam3d_sparse_guidance_scale",
+        "sam3d_slat_guidance_scale", "sam3d_simplify",
+    }),
 }
 
 
@@ -136,6 +195,15 @@ class ReconstructionParameters:
     hi3dgen_slat_steps: int = 6
     hi3dgen_guidance_scale: float = 3.0
     hi3dgen_normal_resolution: int = 768
+    hunyuan3d21_guidance_scale: float = 5.0
+    hunyuan3d21_octree_resolution: int = 384
+    hunyuan3d21_texture_steps: int = 10
+    hunyuan3d21_texture_guidance_scale: float = 3.0
+    sam3d_sparse_steps: int = 25
+    sam3d_slat_steps: int = 25
+    sam3d_sparse_guidance_scale: float = 7.0
+    sam3d_slat_guidance_scale: float = 1.0
+    sam3d_simplify: float = 0.95
 
     def __post_init__(self) -> None:
         if not isinstance(self.backend, ReconstructionBackend):
@@ -164,6 +232,26 @@ class ReconstructionParameters:
             raise ValueError("Hi3DGen guidance scale must be in [0, 20]")
         if self.hi3dgen_normal_resolution not in (512, 768, 1024):
             raise ValueError("Hi3DGen normal resolution must be 512, 768, or 1024")
+        if not 0.0 <= self.hunyuan3d21_guidance_scale <= 20.0:
+            raise ValueError("Hunyuan3D 2.1 shape guidance must be in [0, 20]")
+        if self.hunyuan3d21_octree_resolution not in (96, 192, 256, 384, 512):
+            raise ValueError(
+                "Hunyuan3D 2.1 octree resolution must be 96, 192, 256, 384, or 512"
+            )
+        if not 1 <= self.hunyuan3d21_texture_steps <= 50:
+            raise ValueError("Hunyuan3D 2.1 texture steps must be in [1, 50]")
+        if not 0.0 <= self.hunyuan3d21_texture_guidance_scale <= 20.0:
+            raise ValueError("Hunyuan3D 2.1 texture guidance must be in [0, 20]")
+        if not 1 <= self.sam3d_sparse_steps <= 50:
+            raise ValueError("SAM 3D Objects sparse steps must be in [1, 50]")
+        if not 1 <= self.sam3d_slat_steps <= 50:
+            raise ValueError("SAM 3D Objects structured-latent steps must be in [1, 50]")
+        if not 0.0 <= self.sam3d_sparse_guidance_scale <= 20.0:
+            raise ValueError("SAM 3D Objects sparse guidance must be in [0, 20]")
+        if not 0.0 <= self.sam3d_slat_guidance_scale <= 20.0:
+            raise ValueError("SAM 3D Objects latent guidance must be in [0, 20]")
+        if not 0.0 <= self.sam3d_simplify <= 0.99:
+            raise ValueError("SAM 3D Objects simplify ratio must be in [0, 0.99]")
 
     def to_dict(self) -> dict:
         return {
@@ -180,6 +268,17 @@ class ReconstructionParameters:
             "hi3dgen_slat_steps": self.hi3dgen_slat_steps,
             "hi3dgen_guidance_scale": self.hi3dgen_guidance_scale,
             "hi3dgen_normal_resolution": self.hi3dgen_normal_resolution,
+            "hunyuan3d21_guidance_scale": self.hunyuan3d21_guidance_scale,
+            "hunyuan3d21_octree_resolution": self.hunyuan3d21_octree_resolution,
+            "hunyuan3d21_texture_steps": self.hunyuan3d21_texture_steps,
+            "hunyuan3d21_texture_guidance_scale": (
+                self.hunyuan3d21_texture_guidance_scale
+            ),
+            "sam3d_sparse_steps": self.sam3d_sparse_steps,
+            "sam3d_slat_steps": self.sam3d_slat_steps,
+            "sam3d_sparse_guidance_scale": self.sam3d_sparse_guidance_scale,
+            "sam3d_slat_guidance_scale": self.sam3d_slat_guidance_scale,
+            "sam3d_simplify": self.sam3d_simplify,
         }
 
     @classmethod
@@ -210,6 +309,27 @@ class ReconstructionParameters:
             hi3dgen_normal_resolution=int(
                 payload.get("hi3dgen_normal_resolution", 768)
             ),
+            hunyuan3d21_guidance_scale=float(
+                payload.get("hunyuan3d21_guidance_scale", 5.0)
+            ),
+            hunyuan3d21_octree_resolution=int(
+                payload.get("hunyuan3d21_octree_resolution", 384)
+            ),
+            hunyuan3d21_texture_steps=int(
+                payload.get("hunyuan3d21_texture_steps", 10)
+            ),
+            hunyuan3d21_texture_guidance_scale=float(
+                payload.get("hunyuan3d21_texture_guidance_scale", 3.0)
+            ),
+            sam3d_sparse_steps=int(payload.get("sam3d_sparse_steps", 25)),
+            sam3d_slat_steps=int(payload.get("sam3d_slat_steps", 25)),
+            sam3d_sparse_guidance_scale=float(
+                payload.get("sam3d_sparse_guidance_scale", 7.0)
+            ),
+            sam3d_slat_guidance_scale=float(
+                payload.get("sam3d_slat_guidance_scale", 1.0)
+            ),
+            sam3d_simplify=float(payload.get("sam3d_simplify", 0.95)),
         )
 
 

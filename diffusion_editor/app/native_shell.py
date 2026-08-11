@@ -16,6 +16,7 @@ from termin.gui_native import (
 )
 
 from ..generation.types import (
+    RECONSTRUCTION_BACKEND_PARAMETER_KEYS,
     RECONSTRUCTION_BACKEND_STAGES,
     RECONSTRUCTION_BACKEND_LABELS,
     RECONSTRUCTION_PREVIEW_STAGES,
@@ -28,6 +29,17 @@ from ..generation.types import (
     ReconstructionStage,
     ReconstructionStageStatus,
 )
+from ..generation.reconstruction_workspace import (
+    LEGACY_OPERATION_TARGET_STAGES,
+    PIXAL3D_PIPELINE,
+    ReconstructionWorkspace,
+    WorkspaceOperationStatus,
+    WorkspacePreviewKind,
+)
+from .native_reconstruction_viewport import (
+    RECONSTRUCTION_SHADING_LABELS,
+    RECONSTRUCTION_SHADING_MODES,
+)
 from .presentation import ViewPorts
 
 
@@ -35,10 +47,17 @@ CommandHandler = Callable[[], None]
 
 _CHROME_BACKGROUND = SrgbColor(0.075, 0.080, 0.095, 1.0)
 _WORKSPACE_EDGE = SrgbColor(0.32, 0.35, 0.40, 1.0)
+_PIPELINE_GROUP_BACKGROUND = SrgbColor(0.105, 0.115, 0.140, 1.0)
+_PIPELINE_OPERATION_BACKGROUND = SrgbColor(0.155, 0.165, 0.190, 1.0)
+_PIPELINE_OPERATION_SELECTED = SrgbColor(0.105, 0.285, 0.455, 1.0)
+_PIPELINE_OPERATION_READY = SrgbColor(0.105, 0.245, 0.185, 1.0)
+_PIPELINE_OPERATION_RUNNING = SrgbColor(0.330, 0.245, 0.095, 1.0)
+_PIPELINE_OPERATION_FAILED = SrgbColor(0.355, 0.115, 0.120, 1.0)
 _RECONSTRUCTION_RESOLUTIONS = (1024, 1280, 1536)
 _RECONSTRUCTION_LR_CONDITIONING_RESOLUTIONS = (512, 1024)
 _RECONSTRUCTION_TEXTURE_SIZES = (1024, 2048, 4096)
 _HI3DGEN_NORMAL_RESOLUTIONS = (512, 768, 1024)
+_HUNYUAN3D21_OCTREE_RESOLUTIONS = (96, 192, 256, 384, 512)
 
 
 def _set_widget_background(widget, color: SrgbColor) -> None:
@@ -314,6 +333,7 @@ class NativeEditorView:
         self.canvas_reconstruction_splitter = None
         self.reconstruction_toolbar_model = None
         self.reconstruction_toolbar = None
+        self.reconstruction_shading_combo = None
         self.reconstruction_buttons = {}
         self.reconstruction_stage_buttons = {}
         self.reconstruction_stage_checks = {}
@@ -323,7 +343,37 @@ class NativeEditorView:
         self._syncing_reconstruction_parameters = False
         self._syncing_reconstruction_refine = False
         self.reconstruction_parameter_controls = {}
+        self.reconstruction_parameter_widgets = {}
         self.reconstruction_refine_controls = {}
+        self.reconstruction_versions_title = None
+        self.reconstruction_versions_panel = None
+        self.reconstruction_refine_title = None
+        self.reconstruction_refine_panel = None
+        self.reconstruction_workspace_panel = None
+        self.reconstruction_workspace_mode = False
+        self.reconstruction_workspace_open = None
+        self.reconstruction_workspace_backend = None
+        self.reconstruction_workspace_group_buttons = {}
+        self.reconstruction_workspace_operation_buttons = {}
+        self.reconstruction_workspace_operation_rows = {}
+        self.reconstruction_workspace_inspector_title = None
+        self.reconstruction_workspace_inspector_description = None
+        self.reconstruction_workspace_inspector_inputs = None
+        self.reconstruction_workspace_inspector_outputs = None
+        self.reconstruction_workspace_variant_combo = None
+        self.reconstruction_workspace_artifact_combo = None
+        self.reconstruction_workspace_status = None
+        self.reconstruction_workspace_actions = {}
+        self._reconstruction_workspace_handler = None
+        self._reconstruction_workspace_snapshot = None
+        self._reconstruction_workspace_operation_ids = []
+        self._reconstruction_workspace_artifact_ids = []
+        self._selected_reconstruction_workspace_operation_id = None
+        self._selected_reconstruction_workspace_artifact_id = None
+        self._syncing_reconstruction_workspace = False
+        self._reconstruction_workspace_busy = False
+        self._expanded_reconstruction_workspace_groups = {"source"}
+        self._selected_reconstruction_workspace_operation = None
         self._reconstruction_run_ids = []
         self.reconstruction_status = None
         self.reconstruction_panel = None
@@ -578,6 +628,36 @@ class NativeEditorView:
             reconstruction_buttons[command_id] = button
             toolbar.add_preferred_child(button.widget)
 
+        shading_row = self._document.create_hstack(
+            "DiffusionEditorReconstructionShadingRow"
+        )
+        shading_row.set_layout_spacing(4.0)
+        shading_label = self._document.create_label(
+            "Shading", "DiffusionEditorReconstructionShadingLabel"
+        )
+        shading_combo = self._document.create_combo_box()
+        shading_combo.widget.stable_id = (
+            "diffusion-editor.reconstruction.shading"
+        )
+        for mode in RECONSTRUCTION_SHADING_MODES:
+            shading_combo.add_item(RECONSTRUCTION_SHADING_LABELS[mode])
+        shading_combo.selected_index = 0
+        set_shading_mode = getattr(viewport_view, "set_shading_mode", None)
+
+        def activate_shading(index, *_rest):
+            if (
+                callable(set_shading_mode)
+                and 0 <= index < len(RECONSTRUCTION_SHADING_MODES)
+            ):
+                set_shading_mode(RECONSTRUCTION_SHADING_MODES[index])
+
+        self._connections.append(shading_combo.connect_changed(
+            activate_shading
+        ))
+        shading_row.add_flex_child(shading_label, 1.0)
+        shading_row.add_fixed_child(shading_combo.widget, 108.0)
+        toolbar.add_preferred_child(shading_row)
+
         status = self._document.create_label(
             "Empty", "DiffusionEditorReconstructionStatus"
         )
@@ -586,6 +666,15 @@ class NativeEditorView:
             "3D Reconstruction", "DiffusionEditorReconstructionTitle"
         )
         title.stable_id = "diffusion-editor.reconstruction.title"
+        open_workspace = self._document.create_button(
+            "Try Experimental Pipeline…"
+        )
+        open_workspace.widget.stable_id = (
+            "diffusion-editor.reconstruction.workspace.open"
+        )
+        self._connections.append(open_workspace.connect_clicked(
+            lambda: self._set_reconstruction_workspace_mode(True)
+        ))
         stage_list = self._document.create_vstack(
             "DiffusionEditorReconstructionStages"
         )
@@ -634,6 +723,7 @@ class NativeEditorView:
         parameters_panel.set_layout_spacing(3.0)
         defaults = ReconstructionParameters()
         parameter_controls = {}
+        parameter_widgets = {}
 
         def add_slider(key, label, value, minimum, maximum, step, decimals=0):
             control = self._document.create_slider_edit(float(value))
@@ -650,11 +740,15 @@ class NativeEditorView:
                 )
             ))
             parameter_controls[key] = control
+            parameter_widgets[key] = control.widget
             parameters_panel.add_preferred_child(control.widget)
 
         def add_spin(key, label, value, minimum, maximum, step, decimals=0):
             row = self._document.create_hstack(
                 "DiffusionEditorReconstructionParameterRow"
+            )
+            row.stable_id = (
+                f"diffusion-editor.reconstruction.parameter.{key}.row"
             )
             row.set_layout_spacing(4.0)
             caption = self._document.create_label(
@@ -676,6 +770,7 @@ class NativeEditorView:
                 )
             ))
             parameter_controls[key] = control
+            parameter_widgets[key] = row
             row.add_flex_child(caption, 1.0)
             row.add_fixed_child(control.widget, 108.0)
             parameters_panel.add_preferred_child(row)
@@ -683,6 +778,9 @@ class NativeEditorView:
         def add_combo(key, label, values, labels=None):
             row = self._document.create_hstack(
                 "DiffusionEditorReconstructionParameterRow"
+            )
+            row.stable_id = (
+                f"diffusion-editor.reconstruction.parameter.{key}.row"
             )
             row.set_layout_spacing(4.0)
             caption = self._document.create_label(
@@ -705,6 +803,7 @@ class NativeEditorView:
                 self._change_reconstruction_parameter(key, values[index])
             ))
             parameter_controls[key] = control
+            parameter_widgets[key] = row
             row.add_flex_child(caption, 1.0)
             row.add_fixed_child(control.widget, 92.0)
             parameters_panel.add_preferred_child(row)
@@ -749,8 +848,48 @@ class NativeEditorView:
             "Normal resolution",
             _HI3DGEN_NORMAL_RESOLUTIONS,
         )
+        add_slider(
+            "hunyuan3d21_guidance_scale", "HY3D shape guidance",
+            defaults.hunyuan3d21_guidance_scale, 0, 20, 0.1, 1,
+        )
+        add_combo(
+            "hunyuan3d21_octree_resolution",
+            "HY3D octree resolution",
+            _HUNYUAN3D21_OCTREE_RESOLUTIONS,
+        )
+        add_slider(
+            "hunyuan3d21_texture_steps", "HY3D texture steps",
+            defaults.hunyuan3d21_texture_steps, 1, 50, 1,
+        )
+        add_slider(
+            "hunyuan3d21_texture_guidance_scale", "HY3D texture guidance",
+            defaults.hunyuan3d21_texture_guidance_scale, 0, 20, 0.1, 1,
+        )
+        add_slider(
+            "sam3d_sparse_steps", "SAM sparse steps",
+            defaults.sam3d_sparse_steps, 1, 50, 1,
+        )
+        add_slider(
+            "sam3d_slat_steps", "SAM latent steps",
+            defaults.sam3d_slat_steps, 1, 50, 1,
+        )
+        add_slider(
+            "sam3d_sparse_guidance_scale", "SAM sparse guidance",
+            defaults.sam3d_sparse_guidance_scale, 0, 20, 0.1, 1,
+        )
+        add_slider(
+            "sam3d_slat_guidance_scale", "SAM latent guidance",
+            defaults.sam3d_slat_guidance_scale, 0, 20, 0.1, 1,
+        )
+        add_slider(
+            "sam3d_simplify", "SAM simplify",
+            defaults.sam3d_simplify, 0, 0.99, 0.01, 2,
+        )
         low_vram_row = self._document.create_hstack(
             "DiffusionEditorReconstructionParameterRow"
+        )
+        low_vram_row.stable_id = (
+            "diffusion-editor.reconstruction.parameter.low_vram.row"
         )
         low_vram_row.set_layout_spacing(4.0)
         low_vram = self._document.create_checkbox(defaults.low_vram)
@@ -769,9 +908,22 @@ class NativeEditorView:
             )
         ))
         parameter_controls["low_vram"] = low_vram
+        parameter_widgets["low_vram"] = low_vram_row
         low_vram_row.add_preferred_child(low_vram.widget)
         low_vram_row.add_flex_child(low_vram_label, 1.0)
         parameters_panel.add_preferred_child(low_vram_row)
+
+        versions_title = self._document.create_label(
+            "Versions", "DiffusionEditorReconstructionVersionsTitle"
+        )
+        versions_title.stable_id = (
+            "diffusion-editor.reconstruction.versions.title"
+        )
+        versions_panel = self._document.create_vstack(
+            "DiffusionEditorReconstructionVersions"
+        )
+        versions_panel.stable_id = "diffusion-editor.reconstruction.versions"
+        versions_panel.set_layout_spacing(3.0)
 
         refine_title = self._document.create_label(
             "Masked refinement", "DiffusionEditorReconstructionRefineTitle"
@@ -887,7 +1039,7 @@ class NativeEditorView:
         refine_controls["version"] = version_combo
         version_row.add_flex_child(version_label, 1.0)
         version_row.add_fixed_child(version_combo.widget, 120.0)
-        refine_panel.add_preferred_child(version_row)
+        versions_panel.add_preferred_child(version_row)
 
         clear_mask = self._document.create_button("Clear refine mask")
         clear_mask.widget.stable_id = (
@@ -928,8 +1080,11 @@ class NativeEditorView:
         )
         panel_content.set_layout_spacing(4.0)
         panel_content.add_preferred_child(title)
+        panel_content.add_preferred_child(open_workspace.widget)
         panel_content.add_preferred_child(parameters_title)
         panel_content.add_preferred_child(parameters_panel)
+        panel_content.add_preferred_child(versions_title)
+        panel_content.add_preferred_child(versions_panel)
         panel_content.add_preferred_child(refine_title)
         panel_content.add_preferred_child(refine_panel)
         panel_content.add_preferred_child(stage_list)
@@ -940,17 +1095,607 @@ class NativeEditorView:
         panel.set_scroll_axes(False, True)
         panel.set_content(panel_content)
 
+        workspace_content = self._document.create_vstack(
+            "DiffusionEditorReconstructionWorkspaceContent"
+        )
+        workspace_content.stable_id = (
+            "diffusion-editor.reconstruction.workspace.content"
+        )
+        workspace_content.set_layout_spacing(4.0)
+        workspace_title = self._document.create_label(
+            "3D Pipeline · Experimental",
+            "DiffusionEditorReconstructionWorkspaceTitle",
+        )
+        workspace_title.stable_id = (
+            "diffusion-editor.reconstruction.workspace.title"
+        )
+        workspace_notice = self._document.create_label(
+            "Isolated preview: legacy generation remains unchanged.",
+            "DiffusionEditorReconstructionWorkspaceNotice",
+        )
+        workspace_notice.stable_id = (
+            "diffusion-editor.reconstruction.workspace.notice"
+        )
+        back_to_legacy = self._document.create_button("← Legacy Tools")
+        back_to_legacy.widget.stable_id = (
+            "diffusion-editor.reconstruction.workspace.back"
+        )
+        self._connections.append(back_to_legacy.connect_clicked(
+            lambda: self._set_reconstruction_workspace_mode(False)
+        ))
+        workspace_backend = self._document.create_label(
+            "Backend: Pixal3D",
+            "DiffusionEditorReconstructionWorkspaceBackend",
+        )
+        workspace_backend.stable_id = (
+            "diffusion-editor.reconstruction.workspace.backend"
+        )
+        workspace_content.add_preferred_child(workspace_title)
+        workspace_content.add_preferred_child(workspace_notice)
+        workspace_content.add_preferred_child(back_to_legacy.widget)
+        workspace_content.add_preferred_child(workspace_backend)
+
+        workspace_group_buttons = {}
+        workspace_operation_buttons = {}
+        workspace_operation_rows = {}
+        for group in PIXAL3D_PIPELINE.groups:
+            group_row = self._document.create_hstack(
+                "DiffusionEditorReconstructionWorkspaceGroup"
+            )
+            group_row.stable_id = (
+                f"diffusion-editor.reconstruction.workspace.group.{group.key}"
+            )
+            group_row.set_layout_spacing(6.0)
+            _set_widget_background(group_row, _PIPELINE_GROUP_BACKGROUND)
+            group_button = self._document.create_button(
+                "-" if group.key == "source" else "+"
+            )
+            group_button.widget.stable_id = (
+                "diffusion-editor.reconstruction.workspace.group."
+                f"{group.key}.toggle"
+            )
+            group_label = self._document.create_label(
+                group.label,
+                "DiffusionEditorReconstructionWorkspaceGroupLabel",
+            )
+            group_label.stable_id = (
+                "diffusion-editor.reconstruction.workspace.group."
+                f"{group.key}.label"
+            )
+            self._connections.append(group_button.connect_clicked(
+                lambda group_key=group.key:
+                self._toggle_reconstruction_workspace_group(group_key)
+            ))
+            workspace_group_buttons[group.key] = group_button
+            group_row.add_fixed_child(group_button.widget, 30.0)
+            group_row.add_flex_child(group_label, 1.0)
+            workspace_content.add_fixed_child(group_row, 28.0)
+            for operation in PIXAL3D_PIPELINE.operations_in_group(group.key):
+                operation_row = self._document.create_hstack(
+                    "DiffusionEditorReconstructionWorkspaceOperationRow"
+                )
+                operation_row.stable_id = (
+                    "diffusion-editor.reconstruction.workspace.operation."
+                    f"{operation.key}.row"
+                )
+                operation_indent = self._document.create_hstack(
+                    "DiffusionEditorReconstructionWorkspaceOperationIndent"
+                )
+                button = self._document.create_button(operation.label)
+                button.widget.stable_id = (
+                    "diffusion-editor.reconstruction.workspace.operation."
+                    f"{operation.key}"
+                )
+                _set_widget_background(
+                    button.widget, _PIPELINE_OPERATION_BACKGROUND
+                )
+                self._connections.append(button.connect_clicked(
+                    lambda operation_key=operation.key:
+                    self._select_reconstruction_workspace_operation(
+                        operation_key
+                    )
+                ))
+                operation_row.add_fixed_child(operation_indent, 18.0)
+                operation_row.add_flex_child(button.widget, 1.0)
+                operation_row.visible = group.key == "source"
+                workspace_operation_buttons[operation.key] = button
+                workspace_operation_rows[operation.key] = operation_row
+                workspace_content.add_fixed_child(operation_row, 28.0)
+
+        inspector_title = self._document.create_label(
+            "Operation inspector",
+            "DiffusionEditorReconstructionWorkspaceInspectorTitle",
+        )
+        inspector_title.stable_id = (
+            "diffusion-editor.reconstruction.workspace.inspector.title"
+        )
+        inspector_description = self._document.create_label(
+            "Select an operation.",
+            "DiffusionEditorReconstructionWorkspaceInspectorText",
+        )
+        inspector_description.stable_id = (
+            "diffusion-editor.reconstruction.workspace.inspector.description"
+        )
+        inspector_inputs = self._document.create_label(
+            "Inputs: —", "DiffusionEditorReconstructionWorkspaceInspectorText"
+        )
+        inspector_inputs.stable_id = (
+            "diffusion-editor.reconstruction.workspace.inspector.inputs"
+        )
+        inspector_outputs = self._document.create_label(
+            "Outputs: —", "DiffusionEditorReconstructionWorkspaceInspectorText"
+        )
+        inspector_outputs.stable_id = (
+            "diffusion-editor.reconstruction.workspace.inspector.outputs"
+        )
+        workspace_content.add_preferred_child(inspector_title)
+        workspace_content.add_preferred_child(inspector_description)
+        workspace_content.add_preferred_child(inspector_inputs)
+        workspace_content.add_preferred_child(inspector_outputs)
+
+        variant_row = self._document.create_hstack(
+            "DiffusionEditorReconstructionWorkspaceInspectorRow"
+        )
+        variant_row.set_layout_spacing(4.0)
+        variant_label = self._document.create_label(
+            "Variant", "DiffusionEditorReconstructionWorkspaceInspectorText"
+        )
+        variant_combo = self._document.create_combo_box()
+        variant_combo.widget.stable_id = (
+            "diffusion-editor.reconstruction.workspace.variant"
+        )
+        self._connections.append(variant_combo.connect_changed(
+            self._change_reconstruction_workspace_variant
+        ))
+        variant_row.add_flex_child(variant_label, 1.0)
+        variant_row.add_fixed_child(variant_combo.widget, 170.0)
+        workspace_content.add_preferred_child(variant_row)
+
+        artifact_row = self._document.create_hstack(
+            "DiffusionEditorReconstructionWorkspaceInspectorRow"
+        )
+        artifact_row.set_layout_spacing(4.0)
+        artifact_label = self._document.create_label(
+            "Artifact", "DiffusionEditorReconstructionWorkspaceInspectorText"
+        )
+        artifact_combo = self._document.create_combo_box()
+        artifact_combo.widget.stable_id = (
+            "diffusion-editor.reconstruction.workspace.artifact"
+        )
+        self._connections.append(artifact_combo.connect_changed(
+            self._change_reconstruction_workspace_artifact
+        ))
+        artifact_row.add_flex_child(artifact_label, 1.0)
+        artifact_row.add_fixed_child(artifact_combo.widget, 170.0)
+        workspace_content.add_preferred_child(artifact_row)
+
+        workspace_actions = {}
+        for key, label in (
+            ("preview", "Preview Artifact"),
+            ("generate", "Run Through Selected · Legacy"),
+            ("refine", "Refine Selected"),
+            ("accept", "Accept and Continue"),
+        ):
+            button = self._document.create_button(label)
+            button.widget.stable_id = (
+                f"diffusion-editor.reconstruction.workspace.action.{key}"
+            )
+            button.widget.enabled = False
+            if key == "preview":
+                self._connections.append(button.connect_clicked(
+                    self._preview_reconstruction_workspace_artifact
+                ))
+            elif key == "generate":
+                self._connections.append(button.connect_clicked(
+                    self._run_reconstruction_workspace_operation
+                ))
+            workspace_actions[key] = button
+            workspace_content.add_preferred_child(button.widget)
+        workspace_status = self._document.create_label(
+            "Graph execution is not connected in this first safe slice.",
+            "DiffusionEditorReconstructionWorkspaceNotice",
+        )
+        workspace_status.stable_id = (
+            "diffusion-editor.reconstruction.workspace.status"
+        )
+        workspace_content.add_preferred_child(workspace_status)
+        workspace_panel = self._document.create_scroll_area()
+        workspace_panel.widget.stable_id = (
+            "diffusion-editor.reconstruction.workspace.panel"
+        )
+        workspace_panel.set_scroll_axes(False, True)
+        workspace_panel.set_content(workspace_content)
+
         self.canvas_reconstruction_splitter = splitter
         self.reconstruction_viewport = viewport_view
         self.reconstruction_toolbar_model = toolbar_model
         self.reconstruction_toolbar = toolbar
+        self.reconstruction_shading_combo = shading_combo
         self.reconstruction_buttons = reconstruction_buttons
         self.reconstruction_stage_buttons = stage_buttons
         self.reconstruction_stage_checks = stage_checks
         self.reconstruction_parameter_controls = parameter_controls
+        self.reconstruction_parameter_widgets = parameter_widgets
         self.reconstruction_refine_controls = refine_controls
+        self.reconstruction_versions_title = versions_title
+        self.reconstruction_versions_panel = versions_panel
+        self.reconstruction_refine_title = refine_title
+        self.reconstruction_refine_panel = refine_panel
+        self.reconstruction_workspace_panel = workspace_panel
+        self.reconstruction_workspace_open = open_workspace
+        self.reconstruction_workspace_backend = workspace_backend
+        self.reconstruction_workspace_group_buttons = workspace_group_buttons
+        self.reconstruction_workspace_operation_buttons = (
+            workspace_operation_buttons
+        )
+        self.reconstruction_workspace_operation_rows = (
+            workspace_operation_rows
+        )
+        self.reconstruction_workspace_inspector_title = inspector_title
+        self.reconstruction_workspace_inspector_description = (
+            inspector_description
+        )
+        self.reconstruction_workspace_inspector_inputs = inspector_inputs
+        self.reconstruction_workspace_inspector_outputs = inspector_outputs
+        self.reconstruction_workspace_variant_combo = variant_combo
+        self.reconstruction_workspace_artifact_combo = artifact_combo
+        self.reconstruction_workspace_status = workspace_status
+        self.reconstruction_workspace_actions = workspace_actions
         self.reconstruction_status = status
         self.reconstruction_panel = panel
+        self._select_reconstruction_workspace_operation("source.prepare")
+        self._request_repaint()
+
+    def _toggle_reconstruction_workspace_group(self, key: str) -> None:
+        if key in self._expanded_reconstruction_workspace_groups:
+            self._expanded_reconstruction_workspace_groups.remove(key)
+        else:
+            self._expanded_reconstruction_workspace_groups.add(key)
+        self._refresh_reconstruction_workspace_groups()
+
+    def _refresh_reconstruction_workspace_groups(self) -> None:
+        for group in PIXAL3D_PIPELINE.groups:
+            expanded = (
+                group.key in self._expanded_reconstruction_workspace_groups
+            )
+            button = self.reconstruction_workspace_group_buttons.get(group.key)
+            if button is not None:
+                button.set_text("-" if expanded else "+")
+            for operation in PIXAL3D_PIPELINE.operations_in_group(group.key):
+                operation_row = (
+                    self.reconstruction_workspace_operation_rows.get(
+                        operation.key
+                    )
+                )
+                if operation_row is not None:
+                    operation_row.visible = expanded
+        self._request_repaint()
+
+    def _set_reconstruction_workspace_mode(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if (
+                enabled
+                and self.reconstruction_workspace_open is not None
+                and not self.reconstruction_workspace_open.widget.enabled):
+            return
+        self.reconstruction_workspace_mode = enabled
+        if self.reconstruction_mode:
+            active = (
+                self.reconstruction_workspace_panel
+                if enabled else self.reconstruction_panel
+            )
+            if active is not None:
+                self.main_splitter.set_first(active.widget)
+        self._request_repaint()
+
+    def _select_reconstruction_workspace_operation(self, key: str) -> None:
+        try:
+            operation = PIXAL3D_PIPELINE.operation(key)
+        except KeyError:
+            return
+        self._expanded_reconstruction_workspace_groups.add(
+            operation.group_key
+        )
+        self._refresh_reconstruction_workspace_groups()
+        self._selected_reconstruction_workspace_operation = key
+        self._refresh_reconstruction_workspace_operation_buttons()
+        if self.reconstruction_workspace_inspector_title is not None:
+            self.reconstruction_workspace_inspector_title.text = operation.label
+            self.reconstruction_workspace_inspector_description.text = (
+                operation.description
+            )
+            inputs = ", ".join(operation.input_roles) or "none"
+            outputs = ", ".join(
+                output.label for output in operation.outputs
+            ) or "none"
+            self.reconstruction_workspace_inspector_inputs.text = (
+                f"Inputs: {inputs}"
+            )
+            self.reconstruction_workspace_inspector_outputs.text = (
+                f"Outputs: {outputs}"
+            )
+        self._refresh_reconstruction_workspace_variants()
+        self._refresh_reconstruction_workspace_actions()
+        self._request_repaint()
+
+    def set_reconstruction_workspace_handler(self, handler) -> None:
+        self._reconstruction_workspace_handler = handler
+
+    def _change_reconstruction_workspace_variant(
+            self, index: int, *_rest) -> None:
+        if self._syncing_reconstruction_workspace:
+            return
+        if 0 <= index < len(self._reconstruction_workspace_operation_ids):
+            self._selected_reconstruction_workspace_operation_id = (
+                self._reconstruction_workspace_operation_ids[index]
+            )
+        else:
+            self._selected_reconstruction_workspace_operation_id = None
+        self._refresh_reconstruction_workspace_artifacts()
+
+    def _change_reconstruction_workspace_artifact(
+            self, index: int, *_rest) -> None:
+        if self._syncing_reconstruction_workspace:
+            return
+        preview = self.reconstruction_workspace_actions.get("preview")
+        artifact = self._selected_reconstruction_workspace_artifact(index)
+        self._selected_reconstruction_workspace_artifact_id = (
+            artifact.artifact_id if artifact is not None else None
+        )
+        if preview is not None:
+            preview.widget.enabled = bool(
+                artifact is not None
+                and artifact.preview_kind in {
+                    WorkspacePreviewKind.IMAGE,
+                    WorkspacePreviewKind.MESH,
+                    WorkspacePreviewKind.POINTS,
+                    WorkspacePreviewKind.OVERLAY,
+                }
+            )
+        self._request_repaint()
+
+    def _selected_reconstruction_workspace_artifact(self, index=None):
+        workspace = self._reconstruction_workspace_snapshot
+        combo = self.reconstruction_workspace_artifact_combo
+        if workspace is None or combo is None:
+            return None
+        if index is None:
+            index = combo.selected_index
+        if not 0 <= index < len(self._reconstruction_workspace_artifact_ids):
+            return None
+        try:
+            return workspace.artifact(
+                self._reconstruction_workspace_artifact_ids[index]
+            )
+        except KeyError:
+            return None
+
+    def _preview_reconstruction_workspace_artifact(self) -> None:
+        artifact = self._selected_reconstruction_workspace_artifact()
+        if artifact is None or self._reconstruction_workspace_handler is None:
+            return
+        self._reconstruction_workspace_handler(
+            "preview_artifact", artifact.artifact_id
+        )
+
+    def _run_reconstruction_workspace_operation(self) -> None:
+        key = self._selected_reconstruction_workspace_operation
+        if (
+                key not in LEGACY_OPERATION_TARGET_STAGES
+                or self._reconstruction_workspace_handler is None
+                or self._reconstruction_workspace_busy):
+            return
+        self._reconstruction_workspace_handler("generate_to_operation", key)
+
+    def _refresh_reconstruction_workspace_actions(self) -> None:
+        generate = self.reconstruction_workspace_actions.get("generate")
+        if generate is not None:
+            generate.widget.enabled = bool(
+                self._reconstruction_workspace_snapshot is not None
+                and self._selected_reconstruction_workspace_operation
+                in LEGACY_OPERATION_TARGET_STAGES
+                and not self._reconstruction_workspace_busy
+            )
+
+    def _refresh_reconstruction_workspace_operation_buttons(self) -> None:
+        workspace = self._reconstruction_workspace_snapshot
+        for spec in PIXAL3D_PIPELINE.operations:
+            operations = (
+                workspace.operations_for_spec(spec.key)
+                if workspace is not None else ()
+            )
+            ready = sum(
+                operation.status in {
+                    WorkspaceOperationStatus.READY,
+                    WorkspaceOperationStatus.CACHED,
+                }
+                for operation in operations
+            )
+            running = any(
+                operation.status is WorkspaceOperationStatus.RUNNING
+                for operation in operations
+            )
+            failed = any(
+                operation.status is WorkspaceOperationStatus.FAILED
+                for operation in operations
+            )
+            suffix = ""
+            background = _PIPELINE_OPERATION_BACKGROUND
+            if running:
+                suffix = " · running"
+                background = _PIPELINE_OPERATION_RUNNING
+            elif ready:
+                variant_suffix = (
+                    f" · {len(operations)} variants"
+                    if len(operations) > 1 else ""
+                )
+                suffix = f" · ready{variant_suffix}"
+                background = _PIPELINE_OPERATION_READY
+            elif failed:
+                suffix = " · failed"
+                background = _PIPELINE_OPERATION_FAILED
+            button = self.reconstruction_workspace_operation_buttons.get(
+                spec.key
+            )
+            if button is None:
+                continue
+            button.set_text(f"{spec.label}{suffix}")
+            if spec.key == self._selected_reconstruction_workspace_operation:
+                background = _PIPELINE_OPERATION_SELECTED
+            _set_widget_background(button.widget, background)
+
+    def _refresh_reconstruction_workspace_variants(self) -> None:
+        combo = self.reconstruction_workspace_variant_combo
+        workspace = self._reconstruction_workspace_snapshot
+        if combo is None:
+            return
+        previous = self._selected_reconstruction_workspace_operation_id
+        operations = (
+            workspace.operations_for_spec(
+                self._selected_reconstruction_workspace_operation
+            )
+            if workspace is not None
+            and self._selected_reconstruction_workspace_operation is not None
+            else ()
+        )
+        self._syncing_reconstruction_workspace = True
+        try:
+            combo.clear()
+            self._reconstruction_workspace_operation_ids = [
+                operation.operation_id for operation in operations
+            ]
+            for operation in operations:
+                combo.add_item(
+                    f"{operation.variant_label} · {operation.status.value}"
+                )
+            selected = next(
+                (index for index, operation in enumerate(operations)
+                 if operation.operation_id == previous),
+                -1,
+            )
+            if selected < 0 and workspace is not None:
+                selected_artifact = workspace.selected_artifact_id
+                if selected_artifact:
+                    try:
+                        producer = workspace.artifact(
+                            selected_artifact
+                        ).producer_operation_id
+                    except KeyError:
+                        producer = None
+                    selected = next(
+                        (index for index, operation in enumerate(operations)
+                         if operation.operation_id == producer),
+                        -1,
+                    )
+            if selected < 0 and operations:
+                selected = next(
+                    (index for index, operation in enumerate(operations)
+                     if operation.status is WorkspaceOperationStatus.RUNNING),
+                    len(operations) - 1,
+                )
+            combo.selected_index = selected
+            combo.widget.enabled = bool(operations)
+            self._selected_reconstruction_workspace_operation_id = (
+                operations[selected].operation_id if selected >= 0 else None
+            )
+        finally:
+            self._syncing_reconstruction_workspace = False
+        self._refresh_reconstruction_workspace_artifacts()
+
+    def _refresh_reconstruction_workspace_artifacts(self) -> None:
+        combo = self.reconstruction_workspace_artifact_combo
+        workspace = self._reconstruction_workspace_snapshot
+        if combo is None:
+            return
+        operation_id = self._selected_reconstruction_workspace_operation_id
+        artifacts = (
+            workspace.artifacts_for_operation(operation_id)
+            if workspace is not None and operation_id is not None
+            else ()
+        )
+        self._syncing_reconstruction_workspace = True
+        try:
+            previous_artifact_id = (
+                self._selected_reconstruction_workspace_artifact_id
+            )
+            combo.clear()
+            self._reconstruction_workspace_artifact_ids = [
+                artifact.artifact_id for artifact in artifacts
+            ]
+            operation = (
+                workspace.operation(operation_id)
+                if workspace is not None and operation_id is not None
+                else None
+            )
+            spec = (
+                PIXAL3D_PIPELINE.operation(operation.spec_key)
+                if operation is not None else None
+            )
+            port_labels = {
+                output.role: output.label for output in spec.outputs
+            } if spec is not None else {}
+            for artifact in artifacts:
+                combo.add_item(
+                    f"{port_labels.get(artifact.role, artifact.role)}"
+                    f" · {artifact.kind.value}"
+                )
+            selected = next(
+                (index for index, artifact in enumerate(artifacts)
+                 if artifact.artifact_id == previous_artifact_id),
+                -1,
+            )
+            if selected < 0:
+                selected = next(
+                    (index for index, artifact in enumerate(artifacts)
+                     if workspace is not None
+                     and artifact.artifact_id == workspace.selected_artifact_id),
+                    0 if artifacts else -1,
+                )
+            combo.selected_index = selected
+            combo.widget.enabled = bool(artifacts)
+        finally:
+            self._syncing_reconstruction_workspace = False
+        self._change_reconstruction_workspace_artifact(
+            combo.selected_index
+        )
+
+    def update_reconstruction_workspace(
+            self,
+            backend: ReconstructionBackend,
+            workspace: ReconstructionWorkspace | None = None,
+            *,
+            busy: bool = False,
+    ) -> None:
+        available = backend is ReconstructionBackend.PIXAL3D
+        self._reconstruction_workspace_busy = bool(busy)
+        self._reconstruction_workspace_snapshot = workspace
+        if self.reconstruction_workspace_open is not None:
+            self.reconstruction_workspace_open.widget.enabled = available
+        if self.reconstruction_workspace_backend is not None:
+            label = RECONSTRUCTION_BACKEND_LABELS[backend]
+            suffix = "" if available else " · use Legacy Tools"
+            self.reconstruction_workspace_backend.text = (
+                f"Backend: {label}{suffix}"
+            )
+        for button in self.reconstruction_workspace_operation_buttons.values():
+            button.widget.enabled = available
+        if workspace is not None:
+            if self.reconstruction_workspace_status is not None:
+                state = "generating" if busy else "read-through"
+                self.reconstruction_workspace_status.text = (
+                    f"Legacy graph adapter · {state} · "
+                    f"{len(workspace.operations)} operations · "
+                    f"{len(workspace.artifacts)} artifacts"
+                )
+        elif self.reconstruction_workspace_status is not None:
+            self.reconstruction_workspace_status.text = (
+                "No Pixal3D graph snapshot is available."
+            )
+        self._refresh_reconstruction_workspace_operation_buttons()
+        self._refresh_reconstruction_workspace_variants()
+        self._refresh_reconstruction_workspace_actions()
+        if not available and self.reconstruction_workspace_mode:
+            self._set_reconstruction_workspace_mode(False)
         self._request_repaint()
 
     def set_reconstruction_stage_handler(self, handler) -> None:
@@ -985,11 +1730,23 @@ class NativeEditorView:
             "texture_size",
             "hi3dgen_slat_steps",
             "hi3dgen_normal_resolution",
+            "hunyuan3d21_octree_resolution",
+            "hunyuan3d21_texture_steps",
+            "sam3d_sparse_steps",
+            "sam3d_slat_steps",
         }:
             value = int(round(float(value)))
         elif key == "manual_fov_degrees":
             value = float(value)
-        elif key in {"spar3d_guidance_scale", "hi3dgen_guidance_scale"}:
+        elif key in {
+            "spar3d_guidance_scale",
+            "hi3dgen_guidance_scale",
+            "hunyuan3d21_guidance_scale",
+            "hunyuan3d21_texture_guidance_scale",
+            "sam3d_sparse_guidance_scale",
+            "sam3d_slat_guidance_scale",
+            "sam3d_simplify",
+        }:
             value = float(value)
         elif key == "low_vram":
             value = bool(value)
@@ -1042,43 +1799,41 @@ class NativeEditorView:
                     parameters.hi3dgen_normal_resolution
                 )
             )
+            controls["hunyuan3d21_guidance_scale"].value = (
+                parameters.hunyuan3d21_guidance_scale
+            )
+            controls["hunyuan3d21_octree_resolution"].selected_index = (
+                _HUNYUAN3D21_OCTREE_RESOLUTIONS.index(
+                    parameters.hunyuan3d21_octree_resolution
+                )
+            )
+            controls["hunyuan3d21_texture_steps"].value = float(
+                parameters.hunyuan3d21_texture_steps
+            )
+            controls["hunyuan3d21_texture_guidance_scale"].value = (
+                parameters.hunyuan3d21_texture_guidance_scale
+            )
+            controls["sam3d_sparse_steps"].value = float(
+                parameters.sam3d_sparse_steps
+            )
+            controls["sam3d_slat_steps"].value = float(
+                parameters.sam3d_slat_steps
+            )
+            controls["sam3d_sparse_guidance_scale"].value = (
+                parameters.sam3d_sparse_guidance_scale
+            )
+            controls["sam3d_slat_guidance_scale"].value = (
+                parameters.sam3d_slat_guidance_scale
+            )
+            controls["sam3d_simplify"].value = parameters.sam3d_simplify
             controls["low_vram"].checked = parameters.low_vram
-            for control in controls.values():
-                control.widget.enabled = not busy
-            pixal3d = parameters.backend is ReconstructionBackend.PIXAL3D
-            spar3d = parameters.backend is ReconstructionBackend.SPAR3D
-            hi3dgen = parameters.backend is ReconstructionBackend.HI3DGEN
-            controls["lr_conditioning_resolution"].widget.enabled = (
-                pixal3d and not busy
-            )
-            controls["manual_fov_degrees"].widget.enabled = (
-                pixal3d and not busy
-            )
-            controls["spar3d_guidance_scale"].widget.enabled = (
-                spar3d and not busy
-            )
-            controls["hi3dgen_slat_steps"].widget.enabled = (
-                hi3dgen and not busy
-            )
-            controls["hi3dgen_guidance_scale"].widget.enabled = (
-                hi3dgen and not busy
-            )
-            controls["hi3dgen_normal_resolution"].widget.enabled = (
-                hi3dgen and not busy
-            )
-            controls["steps"].widget.enabled = not spar3d and not busy
-            controls["resolution"].widget.enabled = (
-                not spar3d and not hi3dgen and not busy
-            )
-            controls["decimation_target"].widget.enabled = (
-                not spar3d and not busy
-            )
-            controls["texture_size"].widget.enabled = (
-                not spar3d and not hi3dgen and not busy
-            )
-            controls["low_vram"].widget.enabled = (
-                not hi3dgen and not busy
-            )
+            applicable = RECONSTRUCTION_BACKEND_PARAMETER_KEYS[
+                parameters.backend
+            ]
+            for key, control in controls.items():
+                visible = key in applicable
+                self.reconstruction_parameter_widgets[key].visible = visible
+                control.widget.enabled = visible and not busy
         finally:
             self._syncing_reconstruction_parameters = False
         self._request_repaint()
@@ -1139,6 +1894,11 @@ class NativeEditorView:
                 for label in labels:
                     version.add_item(label)
             self._reconstruction_run_ids = [run.run_id for run in runs]
+            has_versions = bool(runs)
+            self.reconstruction_versions_title.visible = has_versions
+            self.reconstruction_versions_panel.visible = has_versions
+            self.reconstruction_refine_title.visible = refine_supported
+            self.reconstruction_refine_panel.visible = refine_supported
             try:
                 version.selected_index = self._reconstruction_run_ids.index(
                     active_run_id
@@ -1201,10 +1961,20 @@ class NativeEditorView:
             self.reconstruction_stage_checks[stage].checked = (
                 state is ReconstructionStageStatus.READY
             )
+            previewable = (
+                stage in RECONSTRUCTION_PREVIEW_STAGES
+                and (
+                    stage is not ReconstructionStage.TEXTURE_LATENT
+                    or backend in {
+                        ReconstructionBackend.HUNYUAN3D21,
+                        ReconstructionBackend.SAM3D_OBJECTS,
+                    }
+                )
+            )
             button.widget.enabled = (
                 stage in supported
                 and
-                stage in RECONSTRUCTION_PREVIEW_STAGES
+                previewable
                 and (not busy or state is ReconstructionStageStatus.READY)
             )
         self._request_repaint()
@@ -1227,7 +1997,12 @@ class NativeEditorView:
             self._request_repaint()
             return
         if visible:
-            self.main_splitter.set_first(panel.widget)
+            active_panel = (
+                self.reconstruction_workspace_panel
+                if self.reconstruction_workspace_mode
+                else panel
+            )
+            self.main_splitter.set_first(active_panel.widget)
             self.canvas_host.remove_child(canvas.widget)
             splitter.set_first(canvas.widget)
             self.canvas_host.add_flex_child(splitter.widget, 1.0)

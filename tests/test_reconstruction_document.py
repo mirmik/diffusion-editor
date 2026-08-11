@@ -20,6 +20,10 @@ from diffusion_editor.document.reconstruction import (
 from diffusion_editor.generation.reconstruction_controller import (
     ReconstructionControllerEvent,
 )
+from diffusion_editor.generation.reconstruction_workspace import (
+    PIXAL3D_PIPELINE,
+    ReconstructionWorkspace,
+)
 from diffusion_editor.generation.types import (
     ReconstructionBackend,
     ReconstructionParameters,
@@ -489,3 +493,82 @@ def test_root_binds_late_worker_result_to_launching_node(tmp_path) -> None:
     assert node.active_run is not None
     assert node.active_run.backend is ReconstructionBackend.TRELLIS2
     assert stack.active_layer is background
+
+
+def test_workspace_generate_action_routes_to_legacy_stage() -> None:
+    stack, _document_service = _document()
+    node = ReconstructionLayer("Workspace")
+    stack.insert_layer(node)
+
+    class Application:
+        layer_stack = stack
+        status = ""
+
+        def set_status(self, value):
+            self.status = value
+
+    class Controller:
+        is_busy = False
+
+    root = NativeEditorRoot.__new__(NativeEditorRoot)
+    root.application = Application()
+    root.reconstruction_controller = Controller()
+    started = []
+    root._start_reconstruction = lambda: started.append(node.target_stage)
+
+    root._handle_reconstruction_workspace(
+        "generate_to_operation", "lr.generate"
+    )
+
+    assert started == [ReconstructionStage.LR_SHAPE_LATENT]
+    assert node.target_stage is ReconstructionStage.LR_SHAPE_LATENT
+
+
+def test_workspace_preview_loads_graph_mesh_without_changing_legacy_stage(
+        tmp_path) -> None:
+    stack, _document_service = _document()
+    node = ReconstructionLayer("Workspace")
+    stack.insert_layer(node)
+    node.selected_preview_stage = ReconstructionStage.SPARSE_OCCUPANCY
+    mesh_path = tmp_path / "hr.glb"
+    mesh_path.write_bytes(b"glb")
+
+    workspace = ReconstructionWorkspace(PIXAL3D_PIPELINE)
+    operation = workspace.plan_operation(
+        "hr.generate",
+        model_identity="pixal3d:test",
+        worker_protocol="test",
+        operation_id="hr-operation",
+    )
+    artifact = workspace.publish_artifact(
+        operation.operation_id,
+        "hr_mesh",
+        path=str(mesh_path),
+        artifact_id="hr-artifact",
+    )
+    loaded = []
+
+    class Application:
+        layer_stack = stack
+        status = ""
+
+        def set_status(self, value):
+            self.status = value
+
+    class Viewport:
+        def load_glb(self, path):
+            loaded.append(path)
+
+    root = NativeEditorRoot.__new__(NativeEditorRoot)
+    root.application = Application()
+    root._active_reconstruction_workspace = workspace
+    root._presented_reconstruction_id = None
+    root._ensure_reconstruction_viewport = lambda: Viewport()
+
+    root._handle_reconstruction_workspace(
+        "preview_artifact", artifact.artifact_id
+    )
+
+    assert loaded == [str(mesh_path)]
+    assert workspace.selected_artifact_id == artifact.artifact_id
+    assert node.selected_preview_stage is ReconstructionStage.SPARSE_OCCUPANCY

@@ -125,7 +125,8 @@ button or **Layer → New 3D Reconstruction**, then select it and use
 brush and generation controls. Selecting a raster layer restores those controls
 and the full-width Canvas; selecting a reconstruction restores its left panel
 and Canvas/3D workspace. The reconstruction panel can use Pixal3D, TRELLIS.2,
-the optional SPAR3D point-aware backend, or geometry-only Hi3DGen. It reports
+the optional SPAR3D point-aware backend, geometry-only Hi3DGen, or the
+geometry-and-PBR Hunyuan3D 2.1 and SAM 3D Objects backends. It reports
 staged sampling progress,
 lets a ready stage be previewed, and lets a pending stage be selected as the
 next generation target. Coordinate stages are
@@ -133,7 +134,10 @@ published as lightweight GLB geometry previews; shape and final stages publish
 mesh previews. Per-reconstruction generation controls cover seed, sampling
 steps, HR resolution, automatic or manual camera FOV, final mesh face budget,
 texture size, low-VRAM execution, and an experimental 512/1024 LR conditioning
-resolution selector. The 1024 option uses the trained 1024 shape conditioner
+resolution selector. Only controls consumed by the selected backend are shown;
+version selection remains common, while masked-refinement controls appear only
+for compatible Pixal3D runs. The 1024 option uses the trained 1024 shape
+conditioner
 while retaining the LR coordinate grid. Parameter values are saved with the
 layer and snapshotted when a job starts. The current vertical slice captures
 the full visible composite;
@@ -145,12 +149,31 @@ runs leave a session-local HR shape checkpoint; a same-sized preprocessed
 conditioning image and soft mask can produce a geometry-only child run without
 overwriting its parent. See
 [Pixal3D masked refinement backend](docs/pixal3d-masked-refinement.md).
+
+A parallel experimental reconstruction workspace is available for Pixal3D.
+Its read-through adapter projects current legacy stage progress, completed run
+variants, checkpoints and preview artifacts into the operation graph without
+writing back to the legacy run. Existing mesh and point artifacts can be
+previewed, and connected base operations can invoke the shared legacy worker
+through the selected milestone; this currently recomputes earlier stages.
+Planned LR refine and local-detail operations (upscaled conditioning, isolated
+local geometry, registration, fusion, local texture and transfer) remain
+disabled until their resumable runners and artifact contracts are connected.
+The existing reconstruction panel remains the default during migration.
+See the accepted
+[reconstruction artifact workspace decision](docs/architecture-council/2026-08-11-reconstruction-artifact-workspace.md).
 TRELLIS.2 currently supports base staged generation and PBR GLB export only;
 see [TRELLIS.2 backend](docs/trellis2-backend.md).
 SPAR3D exposes its editable colored point-cloud stage before final PBR export;
 see [SPAR3D backend](docs/spar3d-backend.md).
 Hi3DGen conditions TRELLIS-style geometry generation on an inferred normal map;
 see [Hi3DGen backend](docs/hi3dgen-backend.md).
+
+For the local shape-latent and PBR pipeline, see
+[Hunyuan3D 2.1 backend](docs/hunyuan3d21-backend.md).
+SAM 3D Objects exposes its MoGe pointmap, sparse occupancy, structured latent,
+Gaussian appearance and baked mesh; see
+[SAM 3D Objects backend](docs/sam3d-objects-backend.md).
 
 For live development automation, enable the local Editor MCP server in
 **Edit → Settings** and restart the editor. Termin's existing MCP/CLI helper
