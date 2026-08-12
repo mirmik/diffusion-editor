@@ -425,6 +425,7 @@ class ReconstructionRefineParameters:
     strength: float = 0.35
     steps: int = 8
     seed: int = 123
+    local_resolution: int | None = None
     rescale_t: float = 3.0
     guidance_strength: float = 7.5
     resize_detail_to_1024: bool = True
@@ -436,6 +437,10 @@ class ReconstructionRefineParameters:
             raise ValueError("refine steps must be in [1, 50]")
         if not 0 <= self.seed <= 2_147_483_647:
             raise ValueError("refine seed must be in [0, 2147483647]")
+        if self.local_resolution not in (None, 1024, 1280, 1536):
+            raise ValueError(
+                "local refine resolution must be 1024, 1280, 1536, or None"
+            )
         if self.rescale_t <= 0.0:
             raise ValueError("refine rescale_t must be positive")
         if self.guidance_strength < 0.0:
@@ -446,6 +451,7 @@ class ReconstructionRefineParameters:
             "strength": self.strength,
             "steps": self.steps,
             "seed": self.seed,
+            "local_resolution": self.local_resolution,
             "rescale_t": self.rescale_t,
             "guidance_strength": self.guidance_strength,
             "resize_detail_to_1024": self.resize_detail_to_1024,
@@ -459,6 +465,11 @@ class ReconstructionRefineParameters:
             strength=float(payload.get("strength", 0.35)),
             steps=int(payload.get("steps", 8)),
             seed=int(payload.get("seed", 123)),
+            local_resolution=(
+                int(payload["local_resolution"])
+                if payload.get("local_resolution") is not None
+                else None
+            ),
             rescale_t=float(payload.get("rescale_t", 3.0)),
             guidance_strength=float(payload.get("guidance_strength", 7.5)),
             resize_detail_to_1024=bool(

@@ -555,8 +555,9 @@ def test_staged_client_runs_masked_refine_as_separate_artifact(tmp_path):
         base_checkpoint,
         threading.Event(),
         parameters=ReconstructionRefineParameters(
-            strength=0.6, steps=8, seed=321
+            strength=0.6, steps=8, seed=321, local_resolution=1280
         ),
+        generation_parameters=ReconstructionParameters(resolution=1536),
         on_event=events.append,
     )
 
@@ -572,7 +573,7 @@ def test_staged_client_runs_masked_refine_as_separate_artifact(tmp_path):
     assert captured["refine_strength"] == "0.6"
     assert captured["refine_steps"] == "8"
     assert captured["refine_seed"] == "321"
-    assert captured["resolution"] == "1024"
+    assert captured["resolution"] == "1280"
     assert captured["resize_refine_detail"] is True
     assert [event.stage for event in events] == [
         ReconstructionStage.HR_SHAPE_FLOW,

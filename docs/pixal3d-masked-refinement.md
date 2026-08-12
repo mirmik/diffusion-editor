@@ -57,6 +57,11 @@ HR refine treats the selected image region as an independent Pixal3D object:
 5. retain an ellipsoidal overlap collar, reconstruct one surface with CUDA
    narrow-band dual contouring and simplify it for the main viewport.
 
+The experimental inspector exposes the local HR resolution independently of
+the base model: `Same as base`, 1024, 1280, or 1536. Changing it affects the
+independently generated local fragment; fusion still uses the base model's
+spatial resolution.
+
 The result checkpoint is explicitly marked `enlarged_hr_geometry_v1` and keeps
 the base and local HR latents plus their registration instead of pretending the
 fused surface is one canonical Pixal3D latent. It cannot be used as the source

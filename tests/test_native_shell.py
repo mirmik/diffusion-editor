@@ -618,6 +618,7 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar(
         )
         refine_parameters = ReconstructionRefineParameters(
             strength=0.6, steps=12, seed=456,
+            local_resolution=1280,
             resize_detail_to_1024=False,
         )
         lr_refine_parameters = ReconstructionRefineParameters(
@@ -677,6 +678,18 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar(
         view._select_reconstruction_workspace_operation("hr.refine")
         assert workspace_refine_controls["steps"].value == 12.0
         assert workspace_refine_controls["seed"].value == 456.0
+        assert workspace_refine_controls[
+            "local_resolution"
+        ].item_text(
+            workspace_refine_controls["local_resolution"].selected_index
+        ) == "1280"
+        assert view.reconstruction_workspace_refine_parameter_rows[
+            "local_resolution"
+        ].visible is True
+        view._change_reconstruction_workspace_refine_parameter(
+            "local_resolution", 1024
+        )
+        assert refine_actions[-1] == ("hr_local_resolution", 1024)
         assert view.reconstruction_workspace_refine_parameter_rows[
             "resize_detail_to_1024"
         ].visible is False
@@ -686,6 +699,9 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar(
         view._run_reconstruction_workspace_refine()
         assert refine_actions[-1] == ("run", None)
         view._select_reconstruction_workspace_operation("texture.refine")
+        assert view.reconstruction_workspace_refine_parameter_rows[
+            "local_resolution"
+        ].visible is False
         assert workspace_refine_controls["steps"].value == 14.0
         assert workspace_refine_controls["seed"].value == 458.0
         assert workspace_refine_controls[

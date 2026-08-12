@@ -98,6 +98,7 @@ def test_reconstruction_result_is_bound_to_its_node_and_roundtrips(tmp_path) -> 
         strength=0.55,
         steps=11,
         seed=456,
+        local_resolution=1280,
         rescale_t=2.5,
         guidance_strength=6.0,
         resize_detail_to_1024=False,

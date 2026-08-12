@@ -673,6 +673,9 @@ def test_offscreen_root_creates_selected_reconstruction_object(
         )
         root.view._activate_reconstruction_refine("strength", 0.65)
         root.view._activate_reconstruction_refine("steps", 12.0)
+        root.view._activate_reconstruction_refine(
+            "hr_local_resolution", 1024
+        )
         root.view._activate_reconstruction_refine("lr_steps", 13.0)
         root.view._activate_reconstruction_refine("lr_seed", 901.0)
         root.view._activate_reconstruction_refine("texture_steps", 14.0)
@@ -683,6 +686,7 @@ def test_offscreen_root_creates_selected_reconstruction_object(
         assert node.generation_parameters.lr_conditioning_resolution == 1024
         assert node.refine_parameters.strength == 0.65
         assert node.refine_parameters.steps == 12
+        assert node.refine_parameters.local_resolution == 1024
         assert node.lr_refine_parameters.steps == 13
         assert node.lr_refine_parameters.seed == 901
         assert node.texture_refine_parameters.steps == 14

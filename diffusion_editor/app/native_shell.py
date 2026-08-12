@@ -1647,6 +1647,34 @@ class NativeEditorView:
             workspace_refine_parameter_rows[key] = row
             workspace_refine_parameters_panel.add_preferred_child(row)
 
+        def add_workspace_refine_combo(key, label, values, labels=None):
+            row = self._document.create_hstack(
+                "DiffusionEditorReconstructionWorkspaceInspectorRow"
+            )
+            row.set_layout_spacing(4.0)
+            caption = self._document.create_label(
+                label, "DiffusionEditorReconstructionWorkspaceInspectorText"
+            )
+            control = self._document.create_combo_box()
+            control.widget.stable_id = (
+                "diffusion-editor.reconstruction.workspace.refine."
+                f"{key}"
+            )
+            shown = labels or tuple(map(str, values))
+            for item in shown:
+                control.add_item(str(item))
+            self._connections.append(control.connect_changed(
+                lambda index, *_rest, key=key, values=values:
+                self._change_reconstruction_workspace_refine_parameter(
+                    key, values[index]
+                )
+            ))
+            row.add_flex_child(caption, 1.0)
+            row.add_fixed_child(control.widget, 108.0)
+            workspace_refine_parameter_controls[key] = control
+            workspace_refine_parameter_rows[key] = row
+            workspace_refine_parameters_panel.add_preferred_child(row)
+
         add_workspace_refine_checkbox(
             "resize_detail_to_1024", "Resize masked detail to 1024",
             refine_defaults.resize_detail_to_1024,
@@ -1661,6 +1689,11 @@ class NativeEditorView:
         add_workspace_refine_spin(
             "seed", "Refine seed", refine_defaults.seed,
             0, _MAX_RECONSTRUCTION_SEED,
+        )
+        add_workspace_refine_combo(
+            "local_resolution", "Local HR resolution",
+            (None, *_RECONSTRUCTION_RESOLUTIONS),
+            ("Same as base", *_RECONSTRUCTION_RESOLUTIONS),
         )
         workspace_refine_parameters_panel.visible = False
         workspace_content.add_preferred_child(
@@ -2027,6 +2060,11 @@ class NativeEditorView:
         )
         if resize_row is not None:
             resize_row.visible = operation == "texture.refine"
+        resolution_row = self.reconstruction_workspace_refine_parameter_rows.get(
+            "local_resolution"
+        )
+        if resolution_row is not None:
+            resolution_row.visible = operation == "hr.refine"
         parameters = self._reconstruction_workspace_refine_parameters.get(
             operation
         )
@@ -2041,12 +2079,20 @@ class NativeEditorView:
             controls["strength"].value = parameters.strength
             controls["steps"].value = float(parameters.steps)
             controls["seed"].value = float(parameters.seed)
+            controls["local_resolution"].selected_index = (
+                (None, *_RECONSTRUCTION_RESOLUTIONS).index(
+                    parameters.local_resolution
+                )
+            )
             for key in (
-                    "resize_detail_to_1024", "strength", "steps", "seed"):
+                    "resize_detail_to_1024", "strength", "steps", "seed",
+                    "local_resolution"):
                 controls[key].widget.enabled = bool(
                     not self._reconstruction_workspace_busy
                     and (key != "resize_detail_to_1024"
                          or operation == "texture.refine")
+                    and (key != "local_resolution"
+                         or operation == "hr.refine")
                 )
             seed_random = controls.get("seed_random")
             if seed_random is not None:

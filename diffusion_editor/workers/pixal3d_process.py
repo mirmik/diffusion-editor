@@ -413,7 +413,9 @@ class Pixal3DProcessClient:
             "--refine-seed", str(snapshot.seed),
             "--refine-rescale-t", str(snapshot.rescale_t),
             "--refine-guidance", str(snapshot.guidance_strength),
-            "--resolution", str(generation.resolution),
+            "--resolution", str(
+                snapshot.local_resolution or generation.resolution
+            ),
             "--steps", str(generation.steps),
             "--seed", str(generation.seed),
             "--decimation-target", str(generation.decimation_target),

@@ -193,11 +193,12 @@ fragment. Internal crop/local-camera/sparse/LR-generation/registration stages
 are intentionally hidden from the user-facing graph. HR refine now generates
 the crop independently through the complete local sparse/LR/HR cascade,
 publishes its registered mesh before merge, and shows narrow-band fused
-geometry in the main viewport. The result is deliberately geometry-only;
+geometry in the main viewport. Its local HR resolution is an operation-level
+choice (inherit the base resolution, 1024, 1280, or 1536), independent of the
+already generated base geometry. The result is deliberately geometry-only;
 atomic local texture generation and transfer remain pending.
-Local-detail operations (upscaled conditioning, isolated local geometry,
-registration, fusion, local texture and transfer) remain disabled until their
-resumable runners and artifact contracts are connected.
+Local texture generation and transfer remain disabled until their resumable
+runners and artifact contracts are connected.
 The existing reconstruction panel remains the default during migration.
 See the accepted
 [reconstruction artifact workspace decision](docs/architecture-council/2026-08-11-reconstruction-artifact-workspace.md).

@@ -1495,15 +1495,18 @@ class NativeEditorRoot:
             elif action.startswith(("lr_", "hr_", "texture_")):
                 scope, parameter_key = action.split("_", 1)
                 if parameter_key not in {
-                        "strength", "steps", "seed",
+                        "strength", "steps", "seed", "local_resolution",
                         "resize_detail_to_1024"}:
                     return
                 normalized = (
                     int(value)
-                    if parameter_key in {"steps", "seed"}
+                    if parameter_key in {"steps", "seed", "local_resolution"}
+                    and value is not None
                     else bool(value)
                     if parameter_key == "resize_detail_to_1024"
                     else float(value)
+                    if parameter_key == "strength"
+                    else None
                 )
                 attribute = {
                     "lr": "lr_refine_parameters",
