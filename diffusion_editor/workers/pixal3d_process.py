@@ -365,7 +365,7 @@ class Pixal3DProcessClient:
         low_vram: bool | None = None,
         on_event: Callable[[ReconstructionStageEvent], None] | None = None,
     ) -> tuple[Path, Path]:
-        """Refine HR shape, then regenerate and bake its texture."""
+        """Generate an enlarged local HR shape and fuse decoded geometry."""
         self._validate_runtime()
         if not self._staged:
             raise RuntimeError("masked refinement requires the staged runner")
@@ -413,6 +413,7 @@ class Pixal3DProcessClient:
             "--refine-seed", str(snapshot.seed),
             "--refine-rescale-t", str(snapshot.rescale_t),
             "--refine-guidance", str(snapshot.guidance_strength),
+            "--resolution", str(generation.resolution),
             "--steps", str(generation.steps),
             "--seed", str(generation.seed),
             "--decimation-target", str(generation.decimation_target),

@@ -21,7 +21,11 @@ from diffusion_editor.app import native_root as native_root_module
 from diffusion_editor.app.dialogs import FileDialogKind
 from diffusion_editor.app.generation_panels import GenerationPanelKind
 from diffusion_editor.app.layer_tree import LayerTreeAction, LayerTreeIntent
-from diffusion_editor.app.native_root import NativeEditorRoot, WindowedNativeComposition
+from diffusion_editor.app.native_root import (
+    NativeEditorRoot,
+    WindowedNativeComposition,
+    _is_composite_shape_checkpoint,
+)
 from diffusion_editor.app.native_shell import COMMAND_SPECS
 from diffusion_editor.app.presentation import ViewPorts
 from diffusion_editor.canvas.brush import BrushToolMode
@@ -30,6 +34,20 @@ from diffusion_editor.generation.types import (
     ReconstructionStage,
     ReconstructionStageArtifact,
 )
+
+
+def test_composite_shape_checkpoint_is_not_a_standard_refine_source(tmp_path):
+    standard = tmp_path / "standard.npz"
+    composite = tmp_path / "composite.npz"
+    np.savez_compressed(standard, coords=np.zeros((1, 4), dtype=np.int32))
+    np.savez_compressed(
+        composite,
+        coords=np.zeros((1, 4), dtype=np.int32),
+        composite_kind=np.asarray("enlarged_hr_geometry_v1"),
+    )
+
+    assert _is_composite_shape_checkpoint(standard) is False
+    assert _is_composite_shape_checkpoint(composite) is True
 
 
 class _MemorySettings:

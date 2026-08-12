@@ -35,9 +35,11 @@ from ..generation.reconstruction_workspace import (
     LEGACY_OPERATION_TARGET_STAGES,
     PIXAL3D_OPERATION_PARAMETER_KEYS,
     PIXAL3D_PIPELINE,
+    PIXAL3D_PRESENTED_OPERATION_KEYS,
     ReconstructionWorkspace,
     WorkspaceOperationStatus,
     WorkspacePreviewKind,
+    pixal3d_presented_operations,
 )
 from .native_reconstruction_viewport import (
     RECONSTRUCTION_SHADING_LABELS,
@@ -80,13 +82,9 @@ _WORKSPACE_PARAMETER_LABELS = {
 }
 
 _WORKSPACE_REFINE_PARAMETER_SCOPES = {
-    "lr.refine": ("lr", "LR refine parameters"),
     "hr.refine": ("hr", "HR geometry refine parameters"),
     "texture.refine": ("texture", "Texture refine parameters"),
 }
-
-_WORKSPACE_INTERNAL_GROUP_KEYS = {"local"}
-
 
 def _set_widget_background(widget, color: SrgbColor) -> None:
     style_override = widget.style_override
@@ -1238,7 +1236,8 @@ class NativeEditorView:
         workspace_operation_buttons = {}
         workspace_operation_rows = {}
         for group in PIXAL3D_PIPELINE.groups:
-            if group.key in _WORKSPACE_INTERNAL_GROUP_KEYS:
+            presented_operations = pixal3d_presented_operations(group.key)
+            if not presented_operations:
                 continue
             group_row = self._document.create_hstack(
                 "DiffusionEditorReconstructionWorkspaceGroup"
@@ -1271,7 +1270,7 @@ class NativeEditorView:
             group_row.add_fixed_child(group_button.widget, 30.0)
             group_row.add_flex_child(group_label, 1.0)
             workspace_content.add_fixed_child(group_row, 28.0)
-            for operation in PIXAL3D_PIPELINE.operations_in_group(group.key):
+            for operation in presented_operations:
                 operation_row = self._document.create_hstack(
                     "DiffusionEditorReconstructionWorkspaceOperationRow"
                 )
@@ -1323,6 +1322,7 @@ class NativeEditorView:
         inspector_inputs.stable_id = (
             "diffusion-editor.reconstruction.workspace.inspector.inputs"
         )
+        inspector_inputs.visible = False
         inspector_outputs = self._document.create_label(
             "Outputs: —", "DiffusionEditorReconstructionWorkspaceInspectorText"
         )
@@ -1902,7 +1902,8 @@ class NativeEditorView:
 
     def _refresh_reconstruction_workspace_groups(self) -> None:
         for group in PIXAL3D_PIPELINE.groups:
-            if group.key in _WORKSPACE_INTERNAL_GROUP_KEYS:
+            presented_operations = pixal3d_presented_operations(group.key)
+            if not presented_operations:
                 continue
             expanded = (
                 group.key in self._expanded_reconstruction_workspace_groups
@@ -1910,7 +1911,7 @@ class NativeEditorView:
             button = self.reconstruction_workspace_group_buttons.get(group.key)
             if button is not None:
                 button.set_text("-" if expanded else "+")
-            for operation in PIXAL3D_PIPELINE.operations_in_group(group.key):
+            for operation in presented_operations:
                 operation_row = (
                     self.reconstruction_workspace_operation_rows.get(
                         operation.key
@@ -1942,6 +1943,8 @@ class NativeEditorView:
         self._request_repaint()
 
     def _select_reconstruction_workspace_operation(self, key: str) -> None:
+        if key not in PIXAL3D_PRESENTED_OPERATION_KEYS:
+            return
         try:
             operation = PIXAL3D_PIPELINE.operation(key)
         except KeyError:
@@ -1957,15 +1960,12 @@ class NativeEditorView:
             self.reconstruction_workspace_inspector_description.text = (
                 operation.description
             )
-            inputs = ", ".join(operation.input_roles) or "none"
             outputs = ", ".join(
                 output.label for output in operation.outputs
-            ) or "none"
-            self.reconstruction_workspace_inspector_inputs.text = (
-                f"Inputs: {inputs}"
-            )
+                if output.preview_kind is not WorkspacePreviewKind.NONE
+            ) or "no direct preview"
             self.reconstruction_workspace_inspector_outputs.text = (
-                f"Outputs: {outputs}"
+                f"Preview: {outputs}"
             )
         self._refresh_reconstruction_workspace_variants()
         if self.reconstruction_workspace_refine_source_row is not None:
@@ -2026,7 +2026,7 @@ class NativeEditorView:
             "resize_detail_to_1024"
         )
         if resize_row is not None:
-            resize_row.visible = operation != "lr.refine"
+            resize_row.visible = operation == "texture.refine"
         parameters = self._reconstruction_workspace_refine_parameters.get(
             operation
         )
@@ -2046,7 +2046,7 @@ class NativeEditorView:
                 controls[key].widget.enabled = bool(
                     not self._reconstruction_workspace_busy
                     and (key != "resize_detail_to_1024"
-                         or operation != "lr.refine")
+                         or operation == "texture.refine")
                 )
             seed_random = controls.get("seed_random")
             if seed_random is not None:
@@ -2265,6 +2265,8 @@ class NativeEditorView:
     def _refresh_reconstruction_workspace_operation_buttons(self) -> None:
         workspace = self._reconstruction_workspace_snapshot
         for spec in PIXAL3D_PIPELINE.operations:
+            if spec.key not in PIXAL3D_PRESENTED_OPERATION_KEYS:
+                continue
             operations = (
                 workspace.operations_for_spec(spec.key)
                 if workspace is not None else ()
@@ -2374,7 +2376,11 @@ class NativeEditorView:
             return
         operation_id = self._selected_reconstruction_workspace_operation_id
         artifacts = (
-            workspace.artifacts_for_operation(operation_id)
+            tuple(
+                artifact
+                for artifact in workspace.artifacts_for_operation(operation_id)
+                if artifact.preview_kind is not WorkspacePreviewKind.NONE
+            )
             if workspace is not None and operation_id is not None
             else ()
         )
@@ -2494,10 +2500,21 @@ class NativeEditorView:
         if workspace is not None:
             if self.reconstruction_workspace_status is not None:
                 state = "generating" if busy else "read-through"
+                decision_points = sum(
+                    operation.spec_key in PIXAL3D_PRESENTED_OPERATION_KEYS
+                    for operation in workspace.operations
+                )
+                previews = sum(
+                    artifact.preview_kind is not WorkspacePreviewKind.NONE
+                    for artifact in workspace.artifacts
+                    if workspace.operation(
+                        artifact.producer_operation_id
+                    ).spec_key in PIXAL3D_PRESENTED_OPERATION_KEYS
+                )
                 self.reconstruction_workspace_status.text = (
                     f"Legacy graph adapter · {state} · "
-                    f"{len(workspace.operations)} operations · "
-                    f"{len(workspace.artifacts)} artifacts"
+                    f"{decision_points} decision points · "
+                    f"{previews} previews"
                 )
         elif self.reconstruction_workspace_status is not None:
             self.reconstruction_workspace_status.text = (

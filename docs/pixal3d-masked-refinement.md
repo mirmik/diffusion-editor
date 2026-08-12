@@ -44,77 +44,53 @@ runner writes a session-local, pickle-free NPZ checkpoint containing:
 The checkpoint remains owned by `Pixal3DProcessClient` and is deleted at engine
 shutdown. Project persistence and reopening refinements remain separate work.
 
-## Masked flow
+## Enlarged HR geometry refine
 
-The implementation is adapted from the validated experiment in
-`~/project/Hunyuan3D-Omni-test/refine_pixal3d_shape_latent.py`.
+HR refine treats the selected image region as an independent Pixal3D object:
 
-The image mask is projected onto the existing HR sparse coordinates with the
-same camera transform used by Pixal3D projection conditioning. Given normalized
-base features `x0`, fixed noise `eps`, and flow time `t`, the frozen reference
-trajectory is:
+1. project the soft mask onto the decoded base HR mesh and derive padded robust
+   3D bounds;
+2. crop the masked source, estimate its own camera and run a complete local
+   sparse → LR → HR shape cascade at the requested HR resolution;
+3. fit the decoded local mesh into the selected base bounds;
+4. publish the registered local mesh as `Refine output · before merge`;
+5. retain an ellipsoidal overlap collar, reconstruct one surface with CUDA
+   narrow-band dual contouring and simplify it for the main viewport.
 
-```text
-sigma(t) = sigma_min + (1 - sigma_min) t
-x_ref(t) = (1 - t) x0 + sigma(t) eps
-```
-
-Sampling starts at `strength` rather than pure noise. After each Euler step,
-the predicted features are kept inside the soft token mask and blended with
-`x_ref` outside it. At the end, the fully unselected part is restored exactly
-to `x0`.
-
-After decoding the refined shape latent, the worker continues through a fresh
-`Texture flow`, saves a texture checkpoint, decodes PBR voxels and bakes a
-textured GLB. Geometry refinements may therefore be compared without losing
-the ordinary Pixal3D texture pass.
+The result checkpoint is explicitly marked `enlarged_hr_geometry_v1` and keeps
+the base and local HR latents plus their registration instead of pretending the
+fused surface is one canonical Pixal3D latent. It cannot be used as the source
+of another HR or texture-latent refine. The current result is geometry-only;
+local texture generation and transfer must be connected separately before a
+textured composite can be published.
 
 ## Masked LR refinement
 
-The pipeline can refine an accepted `lr_shape_flow` or `lr_shape_latent`
-session checkpoint before HR coordinates are generated. LR refine is an
-atomic enlarged operation rather than masked diffusion in the original grid:
+LR refine is currently omitted from the user-facing workspace. The ordinary
+LR generation still exposes its decoded 512-resolution preview and resumable
+checkpoint as an approval point before HR.
 
-1. the padded mask crop becomes an independent foreground input;
-2. Pixal3D estimates a local camera and generates new sparse occupancy and LR
-   shape with the whole 32³ LR grid available to the selected part;
-3. the decoded local LR mesh is fitted to robust 3D bounds obtained by
-   projecting the mask onto the base LR mesh;
-4. local sparse coordinates are transformed through canonical space, compressed
-   back into the global LR grid and blended through an ellipsoidal collar;
-5. the merged latent is saved as an ordinary resumable LR checkpoint.
+The enlarged experiment can generate a masked crop independently on the full
+32³ local grid and register its decoded mesh into the base LR geometry. It
+cannot be flattened back into one standard Pixal3D LR latent: inserting even a
+small number of local features changes global decoding and can remove the base
+body. A private composite of base LR, local LR and registration is technically
+possible, but it must be propagated independently through HR and texture before
+it can become a real workflow. Until that continuation exists, exposing LR
+refine would provide a preview which the next stage cannot truthfully consume.
 
-The operation publishes a decoded 512-resolution LR mesh preview and a new
-pickle-free `lr_shape_latent` session checkpoint. Continuing through
-`HR coordinates` uses the normal resume path, so the upsample is derived from
-the most recently completed LR variant rather than from the original latent.
-`Refine output · before merge` shows the registered independently generated LR
-fragment; the main viewport shows the decoded merged checkpoint. `Strength`
-controls the local contribution in the overlap collar, while steps, seed and
-guidance control the independent local generation.
-
-The experimental workspace retains Base LR and each Refined LR result as
-separate session-local variants. The `Generate LR shape` artifact is always the
-unrefined Base LR preview. On `Refine LR shape`, `Refine source` explicitly
-chooses the checkpoint used by the next run and defaults to Base LR; selecting
-another preview does not alter it. This permits several independent refines
-from Base as well as an intentional refine chain from a chosen Refined LR
-variant.
-
-LR, HR geometry and texture refinement store independent sampling parameter
-sets. Each operation therefore has its own strength, step count and seed rather
-than inheriting the values last used by another refine phase. Mask painting is
-intentionally shared: paint/erase mode, brush size, hardness, flow and clear
-live in the separate, always-visible `Mask tools` block near the top of the
-workspace and operate on the same canvas mask.
+HR geometry and texture refinement keep independent sampling parameter sets.
+Mask painting is intentionally shared: paint/erase mode, brush size, hardness,
+flow and clear live in the separate, always-visible `Mask tools` block near the
+top of the workspace and operate on the same canvas mask.
 
 The auxiliary `Refine output · before merge` viewport belongs to the atomic
 enlarged-refine contract: it shows only the independently generated local
 fragment that is subsequently registered and merged into the working model.
 The internal crop, local camera, sparse/LR generation and registration steps
-are not user-facing graph operations. LR uses this contract now. The legacy HR
-and texture paths deliberately publish no substitute artifact while they are
-migrated to equivalent atomic local runners.
+are not user-facing graph operations. The legacy HR and texture paths
+deliberately publish no substitute artifact while they are migrated to
+equivalent atomic local runners.
 
 ## Masked texture refinement
 
@@ -158,11 +134,11 @@ launching node and selected parent run, and never overwrites the base run.
 
 ## Current limitations
 
-- Atomic enlarged LR still has to compress its local result back into the
-  global 32³ sparse grid. Fine geometry is retained only after the accepted LR
-  checkpoint is expanded by the subsequent HR stage.
-- HR geometry and texture refine still use the legacy fixed-grid path and do
-  not yet expose a local before-merge artifact.
+- LR refine is disabled because an enlarged local LR cannot be flattened into
+  the canonical base latent without changing global decoding.
+- Enlarged HR output is geometry-only. Texture generation/transfer for its
+  composite checkpoint and repeated refinement of an existing composite are
+  not connected yet.
 - A 2D projection mask selects every visible-depth token under its pixels; a
   later UI may add depth or canonical-space controls.
 - Texture latent preservation is local, but decoding, UV generation and baking

@@ -19,6 +19,15 @@ import time
 import traceback
 
 
+# This runner is launched by Pixal3D's isolated interpreter as a file, so
+# Python otherwise exposes only ``diffusion_editor/workers`` on sys.path.
+# Project-owned helpers must remain importable independently of the caller's
+# working directory.
+EDITOR_ROOT = Path(__file__).resolve().parents[2]
+if str(EDITOR_ROOT) not in sys.path:
+    sys.path.insert(0, str(EDITOR_ROOT))
+
+
 STAGES = (
     "source_image",
     "sparse_occupancy",
@@ -296,7 +305,11 @@ def _save_session_checkpoint(
     if torch.cuda.is_available():
         payload["cuda_rng_state"] = _tensor_numpy(torch.cuda.get_rng_state())
     for name, value in tensors.items():
-        payload[name] = _tensor_numpy(value)
+        payload[name] = (
+            _tensor_numpy(value)
+            if hasattr(value, "detach")
+            else np.asarray(value)
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp.npz")
     np.savez_compressed(temporary, **payload)
@@ -711,9 +724,9 @@ def _run_lr_refine(
     from PIL import Image
     import trimesh
     from diffusion_editor.generation.local_detail_geometry import (
+        compose_local_detail_mesh,
         fit_local_detail_transform,
         local_roi_bounds,
-        merge_local_lr_latent,
         project_pixal_points,
         sample_mask_bilinear,
     )
@@ -759,6 +772,9 @@ def _run_lr_refine(
     base_mesh = base_meshes[0]
     base_vertices = _tensor_numpy(base_mesh.vertices).astype(
         np.float32, copy=False
+    )
+    base_faces = _tensor_numpy(base_mesh.faces).astype(
+        np.int64, copy=False
     )
     pixels, _depth, valid = project_pixal_points(
         base_vertices,
@@ -857,24 +873,57 @@ def _run_lr_refine(
     generated.apply_transform(_preview_transform())
     generated.export(generated_path)
 
-    merged_coords, merged_feats = merge_local_lr_latent(
-        _tensor_numpy(coords),
-        _tensor_numpy(base_feats),
-        _tensor_numpy(local_lr.coords),
-        _tensor_numpy(local_lr.feats),
-        registration,
+    base_inner_radius = 0.55 + 0.20 * args.refine_strength
+    local_outer_radius = 0.90 + 0.18 * args.refine_strength
+    composed_vertices, composed_faces = compose_local_detail_mesh(
+        base_vertices,
+        base_faces,
+        registered_vertices,
+        _tensor_numpy(local_mesh.faces).astype(np.int64, copy=False),
         bounds,
-        grid_resolution=32,
-        blend_strength=args.refine_strength,
+        base_inner_radius=base_inner_radius,
+        local_outer_radius=local_outer_radius,
     )
-    refined_lr = sp.SparseTensor(
-        feats=torch.from_numpy(merged_feats).to("cuda"),
-        coords=torch.from_numpy(merged_coords).to("cuda"),
+    preview_mesh = trimesh.Trimesh(
+        vertices=composed_vertices,
+        faces=composed_faces,
+        process=False,
     )
+    preview_mesh.remove_unreferenced_vertices()
+    preview_mesh.apply_transform(_preview_transform())
+    preview = Path(args.output)
+    preview_mesh.export(preview)
+
+    # Keep both latent coordinate frames.  Flattening local features into the
+    # base LR grid was shown to alter Pixal3D decoding globally even when most
+    # base tokens remained byte-identical.  Downstream stages must propagate
+    # this private composite representation instead.
     _save_session_checkpoint(
         Path(args.session_checkpoint),
         "lr_shape_latent",
-        {"lr_coords": refined_lr.coords, "lr_feats": refined_lr.feats},
+        {
+            "lr_coords": coords,
+            "lr_feats": base_feats,
+            "composite_local_lr_coords": local_lr.coords,
+            "composite_local_lr_feats": local_lr.feats,
+            "composite_roi_bounds": bounds,
+            "composite_registration_scale": np.asarray(
+                [registration.scale], dtype=np.float64
+            ),
+            "composite_registration_translation": np.asarray(
+                registration.translation, dtype=np.float64
+            ),
+            "composite_local_camera_angle_x": np.asarray(
+                [float(local_camera["camera_angle_x"])], dtype=np.float64
+            ),
+            "composite_local_camera_distance": np.asarray(
+                [float(local_camera["distance"])], dtype=np.float64
+            ),
+            "composite_local_camera_mesh_scale": np.asarray(
+                [float(local_camera.get("mesh_scale", 1.0))], dtype=np.float64
+            ),
+            "composite_local_condition": np.asarray(local_image),
+        },
         target_resolution,
         camera,
         preprocessed,
@@ -891,7 +940,13 @@ def _run_lr_refine(
             },
             "base_tokens": int(len(coords)),
             "local_tokens": int(len(local_lr.coords)),
-            "merged_tokens": int(len(refined_lr.coords)),
+            "base_faces_kept": int(
+                (composed_faces < len(base_vertices)).all(axis=1).sum()
+            ),
+            "local_faces_kept": int(
+                (composed_faces >= len(base_vertices)).all(axis=1).sum()
+            ),
+            "composite_checkpoint": True,
             "artifacts": {
                 "generated_before_merge": generated_path.name,
                 "merged_preview": Path(args.output).name,
@@ -899,8 +954,6 @@ def _run_lr_refine(
         }, indent=2),
         encoding="utf-8",
     )
-    meshes, _ = pipeline.decode_shape_slat(refined_lr, 512)
-    preview = _shape_preview(meshes, Path(args.output))
     reporter.emit(
         "lr_shape_latent", "ready",
         artifact_path=preview, preview_kind="mesh",
@@ -1096,6 +1149,255 @@ def _run_refine(
     )
     reporter.emit(
         "final_mesh", "ready", artifact_path=output, preview_kind="mesh"
+    )
+
+
+def _run_enlarged_hr_refine(
+    args, reporter, upstream, sp, torch, np, pipeline=None
+) -> None:
+    """Generate a full-budget local HR model and fuse decoded geometry."""
+    from PIL import Image
+    import trimesh
+    from diffusion_editor.generation.local_detail_geometry import (
+        compose_local_detail_mesh,
+        fit_local_detail_transform,
+        local_roi_bounds,
+        project_pixal_points,
+        sample_mask_bilinear,
+    )
+    from diffusion_editor.workers.pixal3d_local_detail_runner import (
+        _fuse_overlap_mesh,
+        _generate_local_shape,
+        _simplify_mesh,
+    )
+
+    checkpoint_path = Path(args.refine_checkpoint)
+    with np.load(checkpoint_path, allow_pickle=False) as saved:
+        if int(saved["protocol_version"][0]) != 1:
+            raise ValueError("unsupported Pixal3D refine checkpoint version")
+        if "composite_kind" in saved.files:
+            raise ValueError("refining an already composite HR shape is not supported")
+        expected_model = str(Path(args.model_path).resolve())
+        if str(saved["model_path"].item()) != expected_model:
+            raise ValueError("refine checkpoint belongs to a different model")
+        base_resolution = int(saved["resolution"][0])
+        base_coords = torch.from_numpy(saved["coords"].copy()).to("cuda")
+        base_normalized_feats = torch.from_numpy(
+            saved["normalized_feats"].copy()
+        ).to("cuda").float()
+        base_camera = {
+            "camera_angle_x": float(saved["camera_angle_x"][0]),
+            "distance": float(saved["camera_distance"][0]),
+            "mesh_scale": float(saved["mesh_scale"][0]),
+        }
+
+    pipeline = pipeline or upstream.init_pipeline(
+        args.model_path, low_vram=args.low_vram
+    )
+    artifact_root = Path(args.output).resolve().parent
+    condition_image, mask_image = _preprocess_refine_pair(
+        pipeline,
+        Image.open(args.image),
+        Image.open(args.refine_mask),
+    )
+    preprocessed = artifact_root / "preprocessed.png"
+    condition_image.save(preprocessed)
+    mask_image.save(artifact_root / "preprocessed-mask.png")
+
+    std = torch.tensor(
+        pipeline.shape_slat_normalization["std"], device="cuda"
+    )[None]
+    mean = torch.tensor(
+        pipeline.shape_slat_normalization["mean"], device="cuda"
+    )[None]
+    base_shape = sp.SparseTensor(
+        feats=base_normalized_feats * std + mean,
+        coords=base_coords,
+    )
+    base_meshes, _ = pipeline.decode_shape_slat(
+        base_shape, base_resolution
+    )
+    base_mesh = base_meshes[0]
+    base_vertices = _tensor_numpy(base_mesh.vertices).astype(
+        np.float32, copy=False
+    )
+    base_faces = _tensor_numpy(base_mesh.faces).astype(
+        np.int64, copy=False
+    )
+    pixels, _depth, valid = project_pixal_points(
+        base_vertices,
+        camera_angle_x=base_camera["camera_angle_x"],
+        distance=base_camera["distance"],
+        mesh_scale=base_camera.get("mesh_scale", 1.0),
+        image_size=mask_image.size,
+    )
+    weights = sample_mask_bilinear(np.asarray(mask_image), pixels)
+    weights[~valid] = 0.0
+    bounds = local_roi_bounds(
+        base_vertices,
+        weights,
+        threshold=0.05,
+        quantile=0.01,
+        padding=0.15,
+    )
+
+    crop_box = _detail_crop_box(mask_image)
+    detail_rgb = condition_image.crop(crop_box).convert("RGB")
+    detail_alpha = mask_image.crop(crop_box).convert("L")
+    detail_source = detail_rgb.convert("RGBA")
+    detail_source.putalpha(detail_alpha)
+    detail_source.save(artifact_root / "hr-local-source.png")
+    local_image = pipeline.preprocess_image(detail_source)
+    local_image.save(artifact_root / "hr-local-condition.png")
+    camera_input = artifact_root / "hr-local-camera-input.png"
+    local_image.save(camera_input)
+    moge = upstream.load_moge_model(device="cuda")
+    local_camera = upstream.get_camera_params_wild_moge(
+        str(camera_input), moge, device="cuda"
+    )
+    moge.cpu()
+    del moge
+    torch.cuda.empty_cache()
+
+    reporter.emit("hr_shape_flow", "running", total=args.refine_steps)
+    local_shape, local_resolution = _generate_local_shape(
+        pipeline,
+        local_image,
+        local_camera,
+        resolution=args.resolution,
+        steps=args.refine_steps,
+        seed=args.refine_seed,
+        max_num_tokens=args.max_num_tokens,
+        sp=sp,
+        torch=torch,
+    )
+    reporter.emit(
+        "hr_shape_flow", "ready",
+        progress=args.refine_steps,
+        total=args.refine_steps,
+    )
+    local_meshes, _ = pipeline.decode_shape_slat(
+        local_shape, local_resolution
+    )
+    local_mesh = local_meshes[0]
+    local_vertices = _tensor_numpy(local_mesh.vertices).astype(
+        np.float32, copy=False
+    )
+    local_faces = _tensor_numpy(local_mesh.faces).astype(
+        np.int64, copy=False
+    )
+    registration = fit_local_detail_transform(
+        local_vertices, bounds, quantile=0.01
+    )
+    registered_vertices = registration.apply(local_vertices).astype(
+        np.float32, copy=False
+    )
+
+    generated_path = artifact_root / "hr-refine-generated.glb"
+    generated = trimesh.Trimesh(
+        vertices=registered_vertices,
+        faces=local_faces,
+        process=False,
+    )
+    generated.remove_unreferenced_vertices()
+    generated.apply_transform(_preview_transform())
+    generated.export(generated_path)
+
+    base_inner_radius = 0.55 + 0.20 * args.refine_strength
+    local_outer_radius = 0.90 + 0.18 * args.refine_strength
+    overlap_vertices, overlap_faces = compose_local_detail_mesh(
+        base_vertices,
+        base_faces,
+        registered_vertices,
+        local_faces,
+        bounds,
+        base_inner_radius=base_inner_radius,
+        local_outer_radius=local_outer_radius,
+    )
+    fused_vertices, fused_faces = _fuse_overlap_mesh(
+        overlap_vertices,
+        overlap_faces,
+        resolution=base_resolution,
+        band=1.5,
+        project_back=0.0,
+        torch=torch,
+        np=np,
+    )
+    preview_vertices, preview_faces = _simplify_mesh(
+        fused_vertices,
+        fused_faces,
+        target_faces=args.decimation_target,
+        torch=torch,
+    )
+    output = trimesh.Trimesh(
+        vertices=preview_vertices,
+        faces=preview_faces,
+        process=False,
+    )
+    output.remove_unreferenced_vertices()
+    output.apply_transform(_preview_transform())
+    output.export(Path(args.output))
+
+    local_normalized = (
+        local_shape.feats - mean.to(local_shape.device)
+    ) / std.to(local_shape.device)
+    checkpoint = Path(args.checkpoint)
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        checkpoint,
+        protocol_version=np.asarray([1], dtype=np.int32),
+        composite_kind=np.asarray("enlarged_hr_geometry_v1"),
+        coords=_tensor_numpy(base_coords),
+        normalized_feats=_tensor_numpy(base_normalized_feats),
+        resolution=np.asarray([base_resolution], dtype=np.int32),
+        camera_angle_x=np.asarray(
+            [base_camera["camera_angle_x"]], dtype=np.float64
+        ),
+        camera_distance=np.asarray(
+            [base_camera["distance"]], dtype=np.float64
+        ),
+        mesh_scale=np.asarray(
+            [base_camera.get("mesh_scale", 1.0)], dtype=np.float64
+        ),
+        source_sha256=np.asarray(_file_sha256(preprocessed)),
+        model_path=np.asarray(str(Path(args.model_path).resolve())),
+        local_coords=_tensor_numpy(local_shape.coords),
+        local_normalized_feats=_tensor_numpy(local_normalized),
+        local_resolution=np.asarray([local_resolution], dtype=np.int32),
+        roi_bounds=bounds,
+        registration_scale=np.asarray(
+            [registration.scale], dtype=np.float64
+        ),
+        registration_translation=np.asarray(
+            registration.translation, dtype=np.float64
+        ),
+    )
+    metadata = {
+        "protocol": 1,
+        "kind": "enlarged_hr_geometry_v1",
+        "crop_box": list(crop_box),
+        "base_resolution": base_resolution,
+        "local_resolution": local_resolution,
+        "roi_bounds": bounds.tolist(),
+        "registration": {
+            "scale": registration.scale,
+            "translation": list(registration.translation),
+        },
+        "base_faces": int(len(base_faces)),
+        "local_faces": int(len(local_faces)),
+        "fused_faces": int(len(fused_faces)),
+        "preview_faces": int(len(preview_faces)),
+    }
+    (artifact_root / "hr-local-refine.json").write_text(
+        json.dumps(metadata, indent=2), encoding="utf-8"
+    )
+    reporter.emit(
+        "hr_shape_latent", "ready",
+        artifact_path=Path(args.output), preview_kind="mesh",
+    )
+    reporter.emit(
+        "final_mesh", "ready",
+        artifact_path=Path(args.output), preview_kind="mesh",
     )
 
 
@@ -1350,8 +1652,8 @@ def run(args, runtime: Pixal3DRuntime | None = None) -> None:
         )
         return
     if args.refine_checkpoint:
-        _run_refine(
-            args, reporter, upstream, sp, torch, np, o_voxel,
+        _run_enlarged_hr_refine(
+            args, reporter, upstream, sp, torch, np,
             pipeline=runtime.pipeline,
         )
         return

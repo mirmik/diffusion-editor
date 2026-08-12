@@ -160,14 +160,20 @@ checkpoint after sparse occupancy, LR latent, HR coordinates, HR latent and
 texture latent; running a later operation resumes from that state while the
 source and upstream generation parameters remain compatible. Changing the
 source or an upstream parameter deliberately starts a fresh prefix.
+The stored backend graph remains complete, but the workspace presents only
+current decision points: operations with editable parameters, runnable variant
+choices, or a directly previewable result. Pass-through transforms,
+unimplemented future operations, checkpoints and latents stay available to
+execution/provenance code without appearing as stages or artifact choices.
+Groups with no presented decision point are omitted entirely.
 The operation inspector exposes only parameters used by the selected Pixal3D
 operation. Sparse, LR shape, HR shape and texture sampling have independent
 seed and step overrides; until edited they inherit the Legacy values. A
 downstream override may change after resume without invalidating an accepted
 upstream checkpoint, while changing a completed phase invalidates that prefix.
-Masked LR, HR geometry and texture refinement likewise own independent
-strength, step and seed settings (with distinct default seeds and a contextual
-Random button). Their controls follow the selected refine operation. Paint,
+HR geometry and texture refinement likewise own independent strength, step and
+seed settings (with distinct default seeds and a contextual Random button).
+Their controls follow the selected refine operation. Paint,
 erase, brush size/hardness/flow and mask clearing remain in one separate shared
 `Mask tools` block. This block stays visible near the top of the experimental
 workspace regardless of the currently selected pipeline operation.
@@ -177,20 +183,18 @@ automatic camera estimation by source content. Cancellation, protocol/runtime
 errors, a low-VRAM identity change, or editor shutdown terminates the worker;
 the next request then starts a clean runtime. Custom runner paths retain the
 one-shot subprocess fallback unless persistence is explicitly requested.
-Masked LR refine is connected to the experimental workspace as one atomic
-enlarged operation. It consumes an explicitly selected LR session checkpoint,
-generates the masked crop independently with the complete LR grid, registers
-that local result, publishes it in `Refine output · before merge`, and blends a
-compressed copy into a new `lr_shape_latent` checkpoint that ordinary HR resume
-can consume. Base LR and every Refined LR result remain separate session-local
-variants. `Generate LR shape` always exposes Base LR; `Refine LR shape` exposes
-the refined variants and a separate `Refine source` selector, which defaults to
-Base LR. Preview selection does not silently change the next refine source.
+LR refine is not presented in the workspace. An enlarged local LR result can
+be generated and registered, but flattening it back into Pixal3D's canonical
+LR latent changes global decoding, while a private composite LR representation
+cannot yet continue through the ordinary HR/texture pipeline. The user instead
+approves the ordinary decoded LR preview and continues directly to HR.
 The auxiliary viewport never substitutes a full-model proposal for the local
 fragment. Internal crop/local-camera/sparse/LR-generation/registration stages
-are intentionally hidden from the user-facing graph. HR and texture still use
-their legacy fixed-grid paths and publish no before-merge artifact while their
-atomic local runners are pending.
+are intentionally hidden from the user-facing graph. HR refine now generates
+the crop independently through the complete local sparse/LR/HR cascade,
+publishes its registered mesh before merge, and shows narrow-band fused
+geometry in the main viewport. The result is deliberately geometry-only;
+atomic local texture generation and transfer remain pending.
 Local-detail operations (upscaled conditioning, isolated local geometry,
 registration, fusion, local texture and transfer) remain disabled until their
 resumable runners and artifact contracts are connected.

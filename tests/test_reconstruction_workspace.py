@@ -5,10 +5,12 @@ import pytest
 
 from diffusion_editor.generation.reconstruction_workspace import (
     PIXAL3D_PIPELINE,
+    PIXAL3D_PRESENTED_OPERATION_KEYS,
     ReconstructionWorkspace,
     WorkspaceOperationStatus,
     WorkspacePreviewKind,
     build_legacy_workspace,
+    pixal3d_presented_operations,
 )
 from diffusion_editor.generation.types import (
     RECONSTRUCTION_STAGES,
@@ -71,6 +73,22 @@ def test_pixal_pipeline_exposes_lr_and_local_detail_checkpoints() -> None:
         "overlap_preview",
         "fused_mesh",
     } <= local_outputs
+
+
+def test_presented_pipeline_contains_only_current_decision_points() -> None:
+    assert PIXAL3D_PRESENTED_OPERATION_KEYS == {
+        "source.prepare",
+        "sparse.generate",
+        "lr.generate",
+        "hr.coordinates",
+        "hr.generate",
+        "hr.refine",
+        "texture.generate",
+        "texture.refine",
+        "final.assemble",
+    }
+    assert pixal3d_presented_operations("geometry") == ()
+    assert pixal3d_presented_operations("local") == ()
 
 
 def test_fingerprint_is_stable_and_uses_inputs_parameters_and_protocol() -> None:

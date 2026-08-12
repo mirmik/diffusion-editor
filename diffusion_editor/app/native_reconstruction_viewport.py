@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from io import BytesIO
+from itertools import count
 import math
 
 import numpy as np
@@ -33,6 +34,17 @@ from tgfx._tgfx_native import (
     TcShader,
     tc_shader_ensure_tgfx2,
 )
+
+
+_VIEWPORT_RESOURCE_IDS = count()
+
+
+def _allocate_resource_namespace(label: str) -> str:
+    return f"{str(label)}-{next(_VIEWPORT_RESOURCE_IDS)}"
+
+
+def _mesh_resource_id(namespace: str, mesh_index: int) -> str:
+    return f"diffusion-editor-reconstruction-{namespace}-mesh-{mesh_index}"
 
 
 _VERTEX_SHADER = """#version 450 core
@@ -541,7 +553,11 @@ class NativeReconstructionViewport:
         *,
         graphics_owner,
         request_repaint: Callable[[], None],
+        resource_namespace: str = "viewport",
     ) -> None:
+        self._resource_namespace = _allocate_resource_namespace(
+            resource_namespace
+        )
         self._graphics = Tgfx2Context.from_runtime(graphics_owner)
         self._request_repaint = request_repaint
         self._camera = _OrbitCamera()
@@ -684,7 +700,7 @@ class NativeReconstructionViewport:
                 raise RuntimeError("The first reconstruction viewport supports static GLB meshes only")
             mesh = source.build_mesh(
                 index,
-                f"diffusion-editor-reconstruction-mesh-{index}",
+                _mesh_resource_id(self._resource_namespace, index),
                 name=info.name or f"Reconstruction mesh {index}",
                 convert_to_z_up=True,
             )

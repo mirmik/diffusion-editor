@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import subprocess
 import sys
 import threading
 import time
@@ -23,6 +24,28 @@ from diffusion_editor.generation.types import (
     ReconstructionStageStatus,
     pixal3d_resume_parameters_compatible,
 )
+
+
+def test_staged_runner_bootstraps_editor_root_when_executed_as_file(tmp_path):
+    runner = (
+        Path(__file__).parents[1]
+        / "diffusion_editor/workers/pixal3d_staged_runner.py"
+    ).resolve()
+    probe = (
+        "import runpy,sys; "
+        f"ns=runpy.run_path({str(runner)!r},run_name='worker_probe'); "
+        "root=str(ns['EDITOR_ROOT']); "
+        "assert sys.path[0] == root; "
+        "import diffusion_editor.generation.local_detail_geometry"
+    )
+
+    subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 _FAKE_INFERENCE = r"""
@@ -184,7 +207,9 @@ if args.texture_refine_checkpoint:
 if args.refine_checkpoint:
     Path(args.output).write_bytes(b'glTF-refined')
     Path(args.checkpoint).write_bytes(b'npz-refined')
-    Path(args.texture_checkpoint).write_bytes(b'npz-texture')
+    Path(args.output).with_name('hr-refine-generated.glb').write_bytes(
+        b'glTF-hr-local'
+    )
     with Path(args.events).open('w') as stream:
         stream.write(json.dumps({
             'stage': 'hr_shape_flow',
@@ -540,13 +565,14 @@ def test_staged_client_runs_masked_refine_as_separate_artifact(tmp_path):
     assert condition.is_file()
     assert client.checkpoint_path is not None
     assert client.checkpoint_path.read_bytes() == b"npz-refined"
-    assert client.texture_checkpoint_path is not None
-    assert client.texture_checkpoint_path.read_bytes() == b"npz-texture"
-    assert client.refine_generated_path is None
+    assert client.texture_checkpoint_path is None
+    assert client.refine_generated_path is not None
+    assert client.refine_generated_path.read_bytes() == b"glTF-hr-local"
     assert captured["refine_checkpoint"] == str(base_checkpoint)
     assert captured["refine_strength"] == "0.6"
     assert captured["refine_steps"] == "8"
     assert captured["refine_seed"] == "321"
+    assert captured["resolution"] == "1024"
     assert captured["resize_refine_detail"] is True
     assert [event.stage for event in events] == [
         ReconstructionStage.HR_SHAPE_FLOW,

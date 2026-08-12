@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
+import zipfile
 
 from PIL import Image
 from tcbase import log
@@ -82,6 +83,15 @@ DEFAULT_NATIVE_WIDTH = 1280
 DEFAULT_NATIVE_HEIGHT = 800
 DEFAULT_DISPATCH_LIMIT = 256
 DEFAULT_FONT_RELATIVE_PATH = Path("share/termin/fonts/DroidSans.ttf")
+
+
+def _is_composite_shape_checkpoint(path: str | os.PathLike) -> bool:
+    """Identify geometry-only composite checkpoints without importing NumPy."""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            return "composite_kind.npy" in archive.namelist()
+    except (OSError, zipfile.BadZipFile):
+        return False
 
 
 class NativeComposition(Protocol):
@@ -1643,6 +1653,9 @@ class NativeEditorRoot:
                         parent.backend is ReconstructionBackend.PIXAL3D
                         and parent.checkpoint_path
                         and os.path.isfile(parent.checkpoint_path)
+                        and not _is_composite_shape_checkpoint(
+                            parent.checkpoint_path
+                        )
                         and parent.source_path
                         and os.path.isfile(parent.source_path)
                     )
@@ -1657,6 +1670,9 @@ class NativeEditorRoot:
                         is ReconstructionBackend.PIXAL3D
                         and node.intermediate_shape_checkpoint_path
                         and os.path.isfile(
+                            node.intermediate_shape_checkpoint_path
+                        )
+                        and not _is_composite_shape_checkpoint(
                             node.intermediate_shape_checkpoint_path
                         )
                         and node.intermediate_source_path
@@ -1938,6 +1954,7 @@ class NativeEditorRoot:
             self.composition.document,
             graphics_owner=graphics,
             request_repaint=self.composition.request_repaint,
+            resource_namespace="primary",
         )
         mount(viewport)
         self.reconstruction_viewport = viewport
@@ -1968,6 +1985,7 @@ class NativeEditorRoot:
             self.composition.document,
             graphics_owner=graphics,
             request_repaint=self.composition.request_repaint,
+            resource_namespace="refine",
         )
         mount(viewport)
         self.reconstruction_refine_viewport = viewport

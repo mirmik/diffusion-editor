@@ -581,6 +581,24 @@ LEGACY_OPERATION_TARGET_STAGES = {
     "final.assemble": ReconstructionStage.FINAL_MESH,
 }
 
+# The backend graph remains complete for execution and provenance, while the
+# editor presents only decision points which are currently actionable.  A
+# technical operation must not become UI merely because the backend reports it.
+PIXAL3D_PRESENTED_OPERATION_KEYS = frozenset({
+    *LEGACY_OPERATION_TARGET_STAGES,
+    "hr.refine",
+    "texture.refine",
+})
+
+
+def pixal3d_presented_operations(group_key: str):
+    """Return the user-facing decision points in one pipeline group."""
+    return tuple(
+        operation
+        for operation in PIXAL3D_PIPELINE.operations_in_group(group_key)
+        if operation.key in PIXAL3D_PRESENTED_OPERATION_KEYS
+    )
+
 # Parameters exposed by the experimental inspector for each currently
 # executable Pixal3D operation. Diffusion phases own independent seed/steps;
 # deterministic transform/decode/assembly operations intentionally do not.

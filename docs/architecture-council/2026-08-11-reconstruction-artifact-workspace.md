@@ -44,13 +44,15 @@ The DAG contains:
 - content-derived operation fingerprints used for reuse and targeted
   recomputation.
 
-Large user-facing stages are presentation groups, not storage records. Each
-group can expand into separately executable and inspectable operations. In
-particular, the planned Pixal3D path includes sparse variants, LR generation
-and LR refine, LR-to-HR coordinates, HR generation and refine, local ROI and
-conditioning upscale, isolated local geometry, registration, fusion, geometry
-post-processing, local texture generation, texture transfer, and final
-assembly.
+Large user-facing stages are presentation groups, not storage records. The
+stored graph may contain every internal operation, but its UI projection
+contains only decision points: an operation must expose editable parameters,
+a runnable/acceptable variant, or at least one directly previewable artifact.
+Pass-through transforms, hidden atomic-refine internals and operations which
+are not connected yet remain provenance/execution records rather than empty UI
+stages. Groups without a presented decision point are omitted. As features are
+connected, sparse variants, LR/HR refinement, geometry processing and texture
+operations can enter the projection without changing the underlying DAG.
 
 Advancing between material checkpoints is manual by default through an
 explicit acceptance action. Preview selection never changes the accepted
@@ -131,4 +133,3 @@ expandable pipeline browser.
 - #1488: publish local upscale, geometry, registration, fusion, and texture
   diagnostics.
 - #1430: persist graph metadata and manage project-owned artifacts.
-

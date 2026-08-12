@@ -307,13 +307,29 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar(
         assert view.reconstruction_workspace_mode is False
         assert view.reconstruction_workspace_open.widget.enabled is True
         assert view.reconstruction_workspace_mask_panel.visible is True
-        assert "lr.refine" in view.reconstruction_workspace_operation_buttons
+        assert "lr.refine" not in view.reconstruction_workspace_operation_buttons
         assert "local.upscale" not in (
             view.reconstruction_workspace_operation_buttons
         )
         assert "local.generate_geometry" not in (
             view.reconstruction_workspace_operation_buttons
         )
+        assert "sparse.refine" not in (
+            view.reconstruction_workspace_operation_buttons
+        )
+        assert "geometry.remesh" not in (
+            view.reconstruction_workspace_operation_buttons
+        )
+        assert "geometry.normals" not in (
+            view.reconstruction_workspace_operation_buttons
+        )
+        assert "texture.local_generate" not in (
+            view.reconstruction_workspace_operation_buttons
+        )
+        assert "texture.transfer" not in (
+            view.reconstruction_workspace_operation_buttons
+        )
+        assert "geometry" not in view.reconstruction_workspace_group_buttons
         workspace_statuses = {
             stage: ReconstructionStageStatus.PENDING
             for stage in RECONSTRUCTION_STAGES
@@ -428,24 +444,7 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar(
             "pixal3d_sparse_seed", "pixal3d_lr_seed",
             "pixal3d_hr_seed", "pixal3d_texture_seed",
         }
-        view._select_reconstruction_workspace_operation("lr.refine")
-        assert view.reconstruction_workspace_refine_source_row.visible is True
-        assert view.reconstruction_workspace_refine_source_combo.item_count == 2
-        assert view.reconstruction_workspace_refine_source_combo.item_text(
-            0
-        ) == "Base LR"
-        view._change_reconstruction_workspace_refine_source(1)
-        assert workspace_actions[-1] == (
-            "select_refine_source",
-            "legacy:lr-refined-1:lr.refine:lr_checkpoint",
-        )
-        assert view.reconstruction_workspace_actions[
-            "generate"
-        ].widget.enabled is False
         assert view.reconstruction_workspace_mask_panel.visible is True
-        assert view.reconstruction_workspace_actions[
-            "refine"
-        ].widget.enabled is False
         workspace_refine_actions = []
         view.set_reconstruction_refine_handler(
             lambda action, value:
@@ -672,36 +671,15 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar(
             "paint", "erase", "brush_size", "brush_hardness",
             "brush_flow", "clear",
         }
-        view._select_reconstruction_workspace_operation("lr.refine")
         workspace_refine_controls = (
             view.reconstruction_workspace_refine_parameter_controls
         )
-        assert view.reconstruction_workspace_refine_parameters_title.text == (
-            "LR refine parameters"
-        )
-        assert workspace_refine_controls["strength"].value == pytest.approx(
-            0.5
-        )
-        assert workspace_refine_controls["steps"].value == 13.0
-        assert workspace_refine_controls["seed"].value == 457.0
-        assert view.reconstruction_workspace_refine_parameter_rows[
-            "resize_detail_to_1024"
-        ].visible is False
-        view._change_reconstruction_workspace_refine_parameter("steps", 17)
-        assert refine_actions[-1] == ("lr_steps", 17)
-        view._randomize_reconstruction_workspace_refine_seed()
-        assert refine_actions[-1] == ("lr_seed", 987654321)
-        assert view.reconstruction_workspace_actions[
-            "refine"
-        ].widget.enabled is True
-        view._run_reconstruction_workspace_refine()
-        assert refine_actions[-1] == ("run_lr", None)
         view._select_reconstruction_workspace_operation("hr.refine")
         assert workspace_refine_controls["steps"].value == 12.0
         assert workspace_refine_controls["seed"].value == 456.0
         assert view.reconstruction_workspace_refine_parameter_rows[
             "resize_detail_to_1024"
-        ].visible is True
+        ].visible is False
         assert view.reconstruction_workspace_actions[
             "refine"
         ].widget.enabled is True

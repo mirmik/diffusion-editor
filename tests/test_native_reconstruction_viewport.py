@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from diffusion_editor.app.native_reconstruction_viewport import (
+    _allocate_resource_namespace,
     RECONSTRUCTION_SHADING_MODES,
     _FRAGMENT_SHADER,
     _OrbitCamera,
@@ -14,9 +15,18 @@ from diffusion_editor.app.native_reconstruction_viewport import (
     _TEXTURED_FRAGMENT_SHADER,
     _decode_texture,
     _draw_constants,
+    _mesh_resource_id,
     _should_fit_camera,
     _wireframe_indices,
 )
+
+
+def test_reconstruction_viewports_get_distinct_mesh_resource_namespaces() -> None:
+    first = _allocate_resource_namespace("primary")
+    second = _allocate_resource_namespace("refine")
+
+    assert first != second
+    assert _mesh_resource_id(first, 0) != _mesh_resource_id(second, 0)
 
 
 def test_fit_resets_camera_to_pixal3d_front() -> None:
