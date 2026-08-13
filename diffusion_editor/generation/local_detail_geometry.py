@@ -204,7 +204,8 @@ def compose_local_detail_mesh(
         *,
         base_inner_radius: float = 0.72,
         local_outer_radius: float = 1.08,
-) -> tuple[np.ndarray, np.ndarray]:
+        include_counts: bool = False,
+) -> tuple[np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, int, int]:
     """Build the honest base-plus-local preview used before final fusion."""
     base = np.asarray(base_vertices)
     local = np.asarray(local_vertices)
@@ -224,4 +225,11 @@ def compose_local_detail_mesh(
         base_indices[keep_base],
         local_indices[keep_local] + len(base),
     ), axis=0)
+    if include_counts:
+        return (
+            vertices,
+            faces,
+            int(keep_base.sum()),
+            int(keep_local.sum()),
+        )
     return vertices, faces

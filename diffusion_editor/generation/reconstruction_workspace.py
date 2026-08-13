@@ -426,7 +426,8 @@ PIXAL3D_PIPELINE = BackendPipelineDefinition(
                 _port("hr_mask_projection", "HR mask projection",
                       WorkspaceArtifactKind.MASK, WorkspacePreviewKind.IMAGE),
             ),
-            "hr_shape", "Create a global or masked HR variant.",
+            "hr_shape",
+            "Replace the selected HR core and preserve an unwelded overlap collar.",
         ),
         PipelineOperationSpec(
             "local.prepare_roi", "Prepare mask and 3D ROI", "local",

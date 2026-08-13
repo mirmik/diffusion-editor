@@ -364,6 +364,28 @@ def test_root_refine_entry_point_uses_active_run_checkpoint(tmp_path) -> None:
     assert captured_parameters == node.refine_parameters
     assert captured_generation_parameters == node.generation_parameters
 
+    composite_checkpoint = tmp_path / "composite.npz"
+    np.savez_compressed(
+        composite_checkpoint,
+        composite_kind=np.asarray("enlarged_hr_geometry_v1"),
+    )
+    composite_run = ReconstructionRun(
+        "composite-run",
+        ReconstructionRunKind.MASKED_REFINE,
+        str(tmp_path / "composite.glb"),
+        str(source),
+        checkpoint_path=str(composite_checkpoint),
+        parent_run_id=parent.run_id,
+    )
+    node.runs = (*node.runs, composite_run)
+    node.active_run_id = composite_run.run_id
+
+    root._start_selected_reconstruction_refine(node)
+
+    assert controller.captured[2] == str(checkpoint)
+    assert root._reconstruction_parent_run_id == parent.run_id
+    node.active_run_id = parent.run_id
+
     texture_event = root.start_reconstruction_texture_refine(
         node,
         Image.new("RGB", (10, 8)),

@@ -340,6 +340,9 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar(
         workspace_statuses[ReconstructionStage.SPARSE_OCCUPANCY] = (
             ReconstructionStageStatus.READY
         )
+        workspace_statuses[ReconstructionStage.HR_SHAPE_LATENT] = (
+            ReconstructionStageStatus.READY
+        )
         workspace = build_legacy_workspace(
             ReconstructionParameters(),
             workspace_statuses,
@@ -354,6 +357,12 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar(
                 ReconstructionStageArtifact(
                     ReconstructionStage.SPARSE_OCCUPANCY,
                     "/tmp/sparse.glb",
+                    "mesh",
+                ),
+                ReconstructionStage.HR_SHAPE_LATENT:
+                ReconstructionStageArtifact(
+                    ReconstructionStage.HR_SHAPE_LATENT,
+                    "/tmp/base-hr.glb",
                     "mesh",
                 ),
             },
@@ -423,6 +432,15 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar(
             "preview_artifact",
             "legacy:current:sparse.generate:sparse_occupancy",
         )]
+        view._select_reconstruction_workspace_operation("hr.generate")
+        assert workspace_actions[-2:] == [
+            ("select_operation", "hr.generate"),
+            (
+                "preview_artifact",
+                "legacy:current:hr.generate:hr_shape_latent",
+            ),
+        ]
+        view._select_reconstruction_workspace_operation("sparse.generate")
         assert view.reconstruction_workspace_actions[
             "generate"
         ].widget.enabled is True

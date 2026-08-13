@@ -2011,6 +2011,7 @@ class NativeEditorView:
         self._refresh_reconstruction_workspace_actions()
         if self._reconstruction_workspace_handler is not None:
             self._reconstruction_workspace_handler("select_operation", key)
+            self._preview_reconstruction_workspace_artifact()
         self._request_repaint()
 
     def set_reconstruction_workspace_handler(self, handler) -> None:
@@ -2073,6 +2074,10 @@ class NativeEditorView:
         controls = self.reconstruction_workspace_refine_parameter_controls
         self._syncing_reconstruction_refine = True
         try:
+            controls["strength"].label = (
+                "Replacement extent"
+                if operation == "hr.refine" else "Strength"
+            )
             controls["resize_detail_to_1024"].checked = (
                 parameters.resize_detail_to_1024
             )

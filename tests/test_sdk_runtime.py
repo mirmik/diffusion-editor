@@ -67,15 +67,21 @@ def _write_wheel(
             archive.writestr(member, payload)
 
 
-def _make_sdk(tmp_path: Path, *, stale_tgfx: bool = False) -> Path:
+def _make_sdk(
+    tmp_path: Path,
+    *,
+    stale_tgfx: bool = False,
+    manifest_schema: int = 3,
+) -> Path:
     sdk = tmp_path / "sdk"
     (sdk / "lib").mkdir(parents=True)
     (sdk / "wheels").mkdir()
     (sdk / "lib/python3.14t/site-packages").mkdir(parents=True)
+    core_version = "0.1.0+sdk-core" if manifest_schema == 4 else NATIVE_VERSION
     versions = {
-        "tcbase": NATIVE_VERSION,
+        "tcbase": core_version,
         "tgfx": NATIVE_VERSION,
-        "termin-dispatch": NATIVE_VERSION,
+        "termin-dispatch": core_version,
         "termin-display": NATIVE_VERSION,
         "termin-gui-native": NATIVE_VERSION,
         "termin-mcp": "0.1.0",
@@ -83,7 +89,7 @@ def _make_sdk(tmp_path: Path, *, stale_tgfx: bool = False) -> Path:
         "termin-scene": NATIVE_VERSION,
     }
     payload = {
-        "schema": 3,
+        "schema": manifest_schema,
         "python_abi": {
             "version": TARGET_ABI.version,
             "soabi": TARGET_ABI.soabi,
@@ -99,11 +105,11 @@ def _make_sdk(tmp_path: Path, *, stale_tgfx: bool = False) -> Path:
     (sdk / "python-runtime-manifest.json").write_text(
         json.dumps(payload), encoding="utf-8"
     )
-    _write_wheel(sdk, "tcbase", NATIVE_VERSION)
+    _write_wheel(sdk, "tcbase", core_version)
     _write_wheel(
         sdk,
         "termin-dispatch",
-        NATIVE_VERSION,
+        core_version,
         "termin-nanobind",
         "tcbase",
     )
@@ -249,16 +255,27 @@ def test_manifest_rejects_missing_free_threading_markers(tmp_path: Path):
         _load(sdk)
 
 
-def test_legacy_manifest_is_rejected(tmp_path: Path):
+@pytest.mark.parametrize("schema", [1, 5])
+def test_legacy_or_unknown_manifest_is_rejected(tmp_path: Path, schema: int):
     sdk = _make_sdk(tmp_path)
     manifest = sdk / "python-runtime-manifest.json"
     payload = json.loads(manifest.read_text(encoding="utf-8"))
-    payload["schema"] = 1
+    payload["schema"] = schema
     payload["python_abi"] = "3.14"
     manifest.write_text(json.dumps(payload), encoding="utf-8")
 
-    with pytest.raises(SdkContractError, match="schema must be 3"):
+    with pytest.raises(SdkContractError, match="schema must be one of 3, 4"):
         _load(sdk)
+
+
+def test_composed_schema_4_accepts_multiple_native_build_ids(tmp_path: Path):
+    sdk = _make_sdk(tmp_path, manifest_schema=4)
+    contract = _load(sdk)
+
+    assert contract.version("tcbase") == "0.1.0+sdk-core"
+    assert contract.version("tgfx") == NATIVE_VERSION
+    assert "tcbase==0.1.0+sdk-core" in termin_requirement_closure(contract)
+    assert f"tgfx=={NATIVE_VERSION}" in termin_requirement_closure(contract)
 
 
 def test_native_cp314_wheel_is_rejected_for_cp314t_sdk(tmp_path: Path):

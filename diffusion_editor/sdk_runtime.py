@@ -28,6 +28,7 @@ from zipfile import BadZipFile, ZipFile
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_STATE_FILE = PROJECT_ROOT / ".termin-sdk"
 RUNTIME_MANIFEST = "python-runtime-manifest.json"
+SUPPORTED_RUNTIME_MANIFEST_SCHEMAS = frozenset({3, 4})
 DIRECT_TERMIN_DISTRIBUTIONS = (
     "tcbase",
     "termin-dispatch",
@@ -139,6 +140,7 @@ class WheelMetadata:
 @dataclass(frozen=True)
 class SdkContract:
     root: Path
+    manifest_schema: int
     python_abi: PythonAbiIdentity
     site_packages: Path
     versions: dict[str, str]
@@ -219,9 +221,14 @@ def _read_contract(
     except (OSError, json.JSONDecodeError) as exc:
         raise SdkContractError(f"Cannot read {manifest_path}: {exc}") from exc
 
-    if payload.get("schema") != 3:
+    schema = payload.get("schema")
+    if schema not in SUPPORTED_RUNTIME_MANIFEST_SCHEMAS:
+        supported = ", ".join(
+            str(value) for value in sorted(SUPPORTED_RUNTIME_MANIFEST_SCHEMAS)
+        )
         raise SdkContractError(
-            f"{RUNTIME_MANIFEST} schema must be 3; legacy manifests are unsupported"
+            f"{RUNTIME_MANIFEST} schema must be one of {supported}; "
+            "legacy or unknown manifests are unsupported"
         )
     python_abi = PythonAbiIdentity.from_mapping(
         payload.get("python_abi"),
@@ -261,6 +268,7 @@ def _read_contract(
 
     contract = SdkContract(
         root=root,
+        manifest_schema=schema,
         python_abi=python_abi,
         site_packages=site_packages,
         versions=versions,
@@ -269,16 +277,21 @@ def _read_contract(
     for name in DIRECT_TERMIN_DISTRIBUTIONS:
         contract.version(name)
 
-    native_build_ids = {
-        local
-        for name in ("tcbase", "tgfx", "termin-display")
-        if (local := _native_sdk_build_id(contract.version(name))) is not None
-    }
-    if len(native_build_ids) != 1:
-        raise SdkContractError(
-            "SDK manifest mixes native binding build IDs: "
-            + (", ".join(sorted(native_build_ids)) or "none found")
-        )
+    # Schema 3 described a monolithic SDK, so every native binding had to carry
+    # one build ID.  Schema 4 describes a composed SDK: packages supplied by
+    # termin-core and by the product SDK intentionally have different IDs.
+    # Their exact versions and payloads are still pinned and checked below.
+    if schema == 3:
+        native_build_ids = {
+            local
+            for name in ("tcbase", "tgfx", "termin-display")
+            if (local := _native_sdk_build_id(contract.version(name))) is not None
+        }
+        if len(native_build_ids) != 1:
+            raise SdkContractError(
+                "SDK manifest mixes native binding build IDs: "
+                + (", ".join(sorted(native_build_ids)) or "none found")
+            )
     return contract
 
 
@@ -517,16 +530,17 @@ def _selected_termin_wheels(contract: SdkContract) -> dict[str, WheelMetadata]:
             if dependency in contract.termin_distributions and dependency not in selected:
                 pending.append(dependency)
 
-    native_build_ids = {
-        build_id
-        for wheel in selected.values()
-        if (build_id := _native_sdk_build_id(wheel.version)) is not None
-    }
-    if len(native_build_ids) != 1:
-        raise SdkContractError(
-            "SDK wheel dependency closure mixes native build IDs: "
-            + (", ".join(sorted(native_build_ids)) or "none found")
-        )
+    if contract.manifest_schema == 3:
+        native_build_ids = {
+            build_id
+            for wheel in selected.values()
+            if (build_id := _native_sdk_build_id(wheel.version)) is not None
+        }
+        if len(native_build_ids) != 1:
+            raise SdkContractError(
+                "SDK wheel dependency closure mixes native build IDs: "
+                + (", ".join(sorted(native_build_ids)) or "none found")
+            )
     return selected
 
 

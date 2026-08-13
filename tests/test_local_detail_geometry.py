@@ -55,6 +55,26 @@ def test_roi_bounds_rejects_empty_selection_and_pads_selected_geometry():
         local_roi_bounds(points, np.zeros(4))
 
 
+def test_registration_size_excludes_the_overlap_collar():
+    points = np.asarray((
+        (-0.1, 0.2, -0.05),
+        (0.1, 0.2, 0.05),
+        (-0.1, 0.4, 0.05),
+        (0.1, 0.4, -0.05),
+    ))
+    registration_bounds = local_roi_bounds(
+        points, np.ones(4), quantile=0.0, padding=0.0
+    )
+    overlap_bounds = local_roi_bounds(
+        points, np.ones(4), quantile=0.0, padding=0.15
+    )
+
+    np.testing.assert_allclose(
+        overlap_bounds[1] - overlap_bounds[0],
+        (registration_bounds[1] - registration_bounds[0]) * 1.3,
+    )
+
+
 def test_local_transform_is_uniform_and_invertible():
     local = np.asarray((
         (-0.5, -0.25, -0.1),
@@ -124,3 +144,28 @@ def test_composed_local_preview_keeps_base_exterior_and_local_core():
     assert composed_faces.shape == (3, 3)
     assert (composed_faces[0] < 4).all()
     assert (composed_faces[1:] >= 4).all()
+
+
+def test_composed_local_preview_reports_kept_surface_counts():
+    vertices = np.asarray((
+        (-1.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0),
+        (1.0, 0.0, 0.0),
+        (0.8, 0.1, 0.0),
+    ), dtype=np.float32)
+    faces = np.asarray(((0, 1, 3), (1, 2, 3)), dtype=np.int64)
+    bounds = np.asarray(((-1.0, -1.0, -1.0), (1.0, 1.0, 1.0)))
+
+    _vertices, composed, base_count, local_count = compose_local_detail_mesh(
+        vertices,
+        faces,
+        vertices,
+        faces,
+        bounds,
+        base_inner_radius=0.3,
+        local_outer_radius=0.7,
+        include_counts=True,
+    )
+
+    assert (base_count, local_count) == (1, 2)
+    assert len(composed) == base_count + local_count

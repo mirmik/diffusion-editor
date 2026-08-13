@@ -192,8 +192,10 @@ The auxiliary viewport never substitutes a full-model proposal for the local
 fragment. Internal crop/local-camera/sparse/LR-generation/registration stages
 are intentionally hidden from the user-facing graph. HR refine now generates
 the crop independently through the complete local sparse/LR/HR cascade,
-publishes its registered mesh before merge, and shows narrow-band fused
-geometry in the main viewport. Its local HR resolution is an operation-level
+publishes its registered mesh before merge, and shows a lossless base/local
+composition in the main viewport. The overlap collar is intentionally not yet
+welded: preserving the accepted local core takes precedence over hiding the
+temporary seam. Its local HR resolution is an operation-level
 choice (inherit the base resolution, 1024, 1280, or 1536), independent of the
 already generated base geometry. The result is deliberately geometry-only;
 atomic local texture generation and transfer remain pending.

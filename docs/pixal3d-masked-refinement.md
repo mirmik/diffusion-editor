@@ -54,13 +54,23 @@ HR refine treats the selected image region as an independent Pixal3D object:
    sparse → LR → HR shape cascade at the requested HR resolution;
 3. fit the decoded local mesh into the selected base bounds;
 4. publish the registered local mesh as `Refine output · before merge`;
-5. retain an ellipsoidal overlap collar, reconstruct one surface with CUDA
-   narrow-band dual contouring and simplify it for the main viewport.
+5. retain an ellipsoidal overlap collar and publish the base exterior plus
+   local core/collar without remeshing or decimation.
 
 The experimental inspector exposes the local HR resolution independently of
 the base model: `Same as base`, 1024, 1280, or 1536. Changing it affects the
 independently generated local fragment; fusion still uses the base model's
 spatial resolution.
+
+Registration and fusion use two deliberately different bounds. The generated
+fragment is scaled to the unpadded selected geometry. A 15% collar on each side
+is added only for overlap; it must not enlarge the inserted fragment.
+
+The current composition deliberately leaves that collar unwelded. Base and
+local triangles outside the eventual seam preserve their original surface;
+no global dual contouring or final simplification is
+performed. The resulting GLB is correspondingly large. Collar welding is a
+separate future operation and must not alter the accepted local core.
 
 The result checkpoint is explicitly marked `enlarged_hr_geometry_v1` and keeps
 the base and local HR latents plus their registration instead of pretending the

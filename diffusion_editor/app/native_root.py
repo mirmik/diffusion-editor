@@ -94,6 +94,28 @@ def _is_composite_shape_checkpoint(path: str | os.PathLike) -> bool:
         return False
 
 
+def _hr_refine_source_run(node: ReconstructionLayer):
+    """Return the nearest non-composite HR ancestor of the active run."""
+    runs = {run.run_id: run for run in node.runs}
+    candidate = node.active_run or node.base_run
+    visited = set()
+    while candidate is not None and candidate.run_id not in visited:
+        visited.add(candidate.run_id)
+        checkpoint = candidate.checkpoint_path
+        if checkpoint and not _is_composite_shape_checkpoint(checkpoint):
+            return candidate
+        candidate = runs.get(candidate.parent_run_id or "")
+    fallback = node.base_run
+    if (
+        fallback is not None
+        and fallback.run_id not in visited
+        and fallback.checkpoint_path
+        and not _is_composite_shape_checkpoint(fallback.checkpoint_path)
+    ):
+        return fallback
+    return None
+
+
 class NativeComposition(Protocol):
     """Rendering/input owner consumed by :class:`NativeEditorRoot`."""
 
@@ -954,6 +976,14 @@ class NativeEditorRoot:
         if self.application.layer_stack.find_layer_by_id(node.id) is not node:
             raise ValueError("reconstruction node does not belong to the document")
         parent = node.active_run or node.base_run
+        if base_checkpoint_path:
+            parent = next(
+                (
+                    run for run in node.runs
+                    if run.checkpoint_path == base_checkpoint_path
+                ),
+                parent,
+            )
         if (
             parent is not None
             and parent.backend is not ReconstructionBackend.PIXAL3D
@@ -1058,7 +1088,7 @@ class NativeEditorRoot:
     def _start_selected_reconstruction_refine(
             self, node: ReconstructionLayer) -> None:
         stack = self.application.layer_stack
-        parent = node.active_run or node.base_run
+        parent = _hr_refine_source_run(node)
         source_path = (
             parent.source_path if parent is not None
             else node.intermediate_source_path
@@ -1298,7 +1328,11 @@ class NativeEditorRoot:
                 )
             if event.result.source_path:
                 node.intermediate_source_path = event.result.source_path
-            if event.result.checkpoint_path:
+            if (
+                    event.result.checkpoint_path
+                    and not _is_composite_shape_checkpoint(
+                        event.result.checkpoint_path
+                    )):
                 node.intermediate_shape_checkpoint_path = (
                     event.result.checkpoint_path
                 )
@@ -1643,6 +1677,7 @@ class NativeEditorRoot:
             )
             if callable(update_refine):
                 parent = node.active_run or node.base_run
+                hr_refine_source = _hr_refine_source_run(node)
                 selected_backend = (
                     parent.backend
                     if parent
@@ -1651,21 +1686,14 @@ class NativeEditorRoot:
                 refine_supported = (
                     selected_backend is ReconstructionBackend.PIXAL3D
                 )
-                if parent is not None:
+                if hr_refine_source is not None:
                     can_refine = bool(
-                        parent.backend is ReconstructionBackend.PIXAL3D
-                        and parent.checkpoint_path
-                        and os.path.isfile(parent.checkpoint_path)
-                        and not _is_composite_shape_checkpoint(
-                            parent.checkpoint_path
-                        )
-                        and parent.source_path
-                        and os.path.isfile(parent.source_path)
-                    )
-                    can_texture_refine = bool(
-                        can_refine
-                        and parent.texture_checkpoint_path
-                        and os.path.isfile(parent.texture_checkpoint_path)
+                        hr_refine_source.backend
+                        is ReconstructionBackend.PIXAL3D
+                        and hr_refine_source.checkpoint_path
+                        and os.path.isfile(hr_refine_source.checkpoint_path)
+                        and hr_refine_source.source_path
+                        and os.path.isfile(hr_refine_source.source_path)
                     )
                 else:
                     can_refine = bool(
@@ -1687,6 +1715,19 @@ class NativeEditorRoot:
                         and os.path.isfile(
                             node.intermediate_texture_checkpoint_path
                         )
+                    )
+                if parent is not None:
+                    can_texture_refine = bool(
+                        parent.backend is ReconstructionBackend.PIXAL3D
+                        and parent.checkpoint_path
+                        and os.path.isfile(parent.checkpoint_path)
+                        and not _is_composite_shape_checkpoint(
+                            parent.checkpoint_path
+                        )
+                        and parent.texture_checkpoint_path
+                        and os.path.isfile(parent.texture_checkpoint_path)
+                        and parent.source_path
+                        and os.path.isfile(parent.source_path)
                     )
                 lr_source = node.selected_lr_refine_source
                 can_lr_refine = bool(

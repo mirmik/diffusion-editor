@@ -27,7 +27,6 @@ EDITOR_ROOT = Path(__file__).resolve().parents[2]
 if str(EDITOR_ROOT) not in sys.path:
     sys.path.insert(0, str(EDITOR_ROOT))
 
-
 STAGES = (
     "source_image",
     "sparse_occupancy",
@@ -1166,9 +1165,7 @@ def _run_enlarged_hr_refine(
         sample_mask_bilinear,
     )
     from diffusion_editor.workers.pixal3d_local_detail_runner import (
-        _fuse_overlap_mesh,
         _generate_local_shape,
-        _simplify_mesh,
     )
 
     checkpoint_path = Path(args.refine_checkpoint)
@@ -1233,7 +1230,14 @@ def _run_enlarged_hr_refine(
     )
     weights = sample_mask_bilinear(np.asarray(mask_image), pixels)
     weights[~valid] = 0.0
-    bounds = local_roi_bounds(
+    registration_bounds = local_roi_bounds(
+        base_vertices,
+        weights,
+        threshold=0.05,
+        quantile=0.01,
+        padding=0.0,
+    )
+    overlap_bounds = local_roi_bounds(
         base_vertices,
         weights,
         threshold=0.05,
@@ -1287,7 +1291,7 @@ def _run_enlarged_hr_refine(
         np.int64, copy=False
     )
     registration = fit_local_detail_transform(
-        local_vertices, bounds, quantile=0.01
+        local_vertices, registration_bounds, quantile=0.01
     )
     registered_vertices = registration.apply(local_vertices).astype(
         np.float32, copy=False
@@ -1305,33 +1309,27 @@ def _run_enlarged_hr_refine(
 
     base_inner_radius = 0.55 + 0.20 * args.refine_strength
     local_outer_radius = 0.90 + 0.18 * args.refine_strength
-    overlap_vertices, overlap_faces = compose_local_detail_mesh(
+    (
+        overlap_vertices,
+        overlap_faces,
+        base_faces_kept,
+        local_faces_kept,
+    ) = compose_local_detail_mesh(
         base_vertices,
         base_faces,
         registered_vertices,
         local_faces,
-        bounds,
+        overlap_bounds,
         base_inner_radius=base_inner_radius,
         local_outer_radius=local_outer_radius,
+        include_counts=True,
     )
-    fused_vertices, fused_faces = _fuse_overlap_mesh(
-        overlap_vertices,
-        overlap_faces,
-        resolution=base_resolution,
-        band=1.5,
-        project_back=0.0,
-        torch=torch,
-        np=np,
-    )
-    preview_vertices, preview_faces = _simplify_mesh(
-        fused_vertices,
-        fused_faces,
-        target_faces=args.decimation_target,
-        torch=torch,
-    )
+    # Preserve both accepted surfaces verbatim.  Welding the open overlap
+    # collar is a separate operation; global remeshing here destroyed the
+    # local core and made replacement strength semantically meaningless.
     output = trimesh.Trimesh(
-        vertices=preview_vertices,
-        faces=preview_faces,
+        vertices=overlap_vertices,
+        faces=overlap_faces,
         process=False,
     )
     output.remove_unreferenced_vertices()
@@ -1364,7 +1362,8 @@ def _run_enlarged_hr_refine(
         local_coords=_tensor_numpy(local_shape.coords),
         local_normalized_feats=_tensor_numpy(local_normalized),
         local_resolution=np.asarray([local_resolution], dtype=np.int32),
-        roi_bounds=bounds,
+        roi_bounds=overlap_bounds,
+        registration_bounds=registration_bounds,
         registration_scale=np.asarray(
             [registration.scale], dtype=np.float64
         ),
@@ -1378,15 +1377,19 @@ def _run_enlarged_hr_refine(
         "crop_box": list(crop_box),
         "base_resolution": base_resolution,
         "local_resolution": local_resolution,
-        "roi_bounds": bounds.tolist(),
+        "roi_bounds": overlap_bounds.tolist(),
+        "registration_bounds": registration_bounds.tolist(),
         "registration": {
             "scale": registration.scale,
             "translation": list(registration.translation),
         },
         "base_faces": int(len(base_faces)),
         "local_faces": int(len(local_faces)),
-        "fused_faces": int(len(fused_faces)),
-        "preview_faces": int(len(preview_faces)),
+        "base_faces_kept": base_faces_kept,
+        "local_faces_kept": local_faces_kept,
+        "composed_faces": int(len(overlap_faces)),
+        "fusion_mode": "unwelded_overlap_v1",
+        "decimation_applied": False,
     }
     (artifact_root / "hr-local-refine.json").write_text(
         json.dumps(metadata, indent=2), encoding="utf-8"
