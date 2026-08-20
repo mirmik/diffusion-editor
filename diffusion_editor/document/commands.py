@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from numbers import Integral
 from typing import Callable, Protocol
 
@@ -15,6 +15,7 @@ from .reconstruction import ReconstructionLayer, ReconstructionStatus
 from ..generation.types import (
     RECONSTRUCTION_STAGES,
     ReconstructionBackend,
+    ReconstructionRefinePlacement,
     ReconstructionRun,
     ReconstructionRunKind,
     ReconstructionStage,
@@ -223,6 +224,11 @@ class PublishReconstructionResultCommand:
     parent_run_id: str | None = None
     backend: ReconstructionBackend = ReconstructionBackend.PIXAL3D
     refine_generated_path: str | None = None
+    refine_placement: ReconstructionRefinePlacement = (
+        ReconstructionRefinePlacement()
+    )
+    refine_placement_pivot: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    refine_placement_accepted: bool = False
     run_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     label: str = "Publish 3D Reconstruction"
 
@@ -269,6 +275,13 @@ class PublishReconstructionResultCommand:
                 if stage in stage_artifacts
             ),
             refine_generated_path=self.refine_generated_path,
+            refine_placement=self.refine_placement,
+            refine_placement_pivot=tuple(
+                map(float, self.refine_placement_pivot)
+            ),
+            refine_placement_accepted=bool(
+                self.refine_placement_accepted
+            ),
         )
         runs = (
             (run,)
@@ -294,6 +307,56 @@ class PublishReconstructionResultCommand:
                 "stage_statuses": stage_statuses,
                 "stage_artifacts": stage_artifacts,
             },
+        )
+
+
+@dataclass(frozen=True)
+class SetReconstructionRefinePlacementCommand:
+    layer: ReconstructionLayer
+    run_id: str
+    placement: ReconstructionRefinePlacement
+    label: str = "Place Refined 3D Fragment"
+
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
+        if layer_stack.find_layer_by_id(self.layer.id) is not self.layer:
+            raise ValueError("reconstruction node does not belong to the layer stack")
+        index = next(
+            (
+                index
+                for index, run in enumerate(self.layer.runs)
+                if run.run_id == self.run_id
+            ),
+            None,
+        )
+        if index is None:
+            raise ValueError("refine run does not belong to the reconstruction")
+        old_run = self.layer.runs[index]
+        if old_run.refine_generated_path is None:
+            raise ValueError("reconstruction run has no local refine fragment")
+        if old_run.refine_placement == self.placement:
+            return None
+        new_run = replace(
+            old_run,
+            refine_placement=self.placement,
+            refine_placement_accepted=False,
+        )
+
+        def assign(run: ReconstructionRun) -> None:
+            runs = list(self.layer.runs)
+            runs[index] = run
+            self.layer.runs = tuple(runs)
+            layer_stack.publish_change(
+                DocumentChangeKind.TRANSFORM,
+                layers=(self.layer,),
+                operation="place refined 3D fragment",
+            )
+
+        assign(new_run)
+        return CommandDelta(
+            lambda: assign(old_run),
+            lambda: assign(new_run),
+            len(repr(old_run.refine_placement).encode("utf-8"))
+            + len(repr(self.placement).encode("utf-8")),
         )
 
 

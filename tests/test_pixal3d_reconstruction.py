@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 from PIL import Image
+import numpy as np
 import pytest
 
 from diffusion_editor.engines.reconstruction_engine import ReconstructionEngine
@@ -19,6 +20,8 @@ from diffusion_editor.workers.pixal3d_process import Pixal3DProcessClient
 from diffusion_editor.workers.pixal3d_staged_runner import Pixal3DRuntime
 from diffusion_editor.generation.types import (
     ReconstructionParameters,
+    ReconstructionRefinePlacement,
+    ReconstructionRefineFusionRequest,
     ReconstructionRefineParameters,
     ReconstructionStage,
     ReconstructionStageStatus,
@@ -155,6 +158,10 @@ parser.add_argument('--session-checkpoint')
 parser.add_argument('--resume-checkpoint')
 parser.add_argument('--lr-refine-checkpoint')
 parser.add_argument('--refine-checkpoint')
+parser.add_argument('--refine-fusion-checkpoint')
+parser.add_argument('--placement-translation', nargs=3)
+parser.add_argument('--placement-orientation', nargs=4)
+parser.add_argument('--placement-scale')
 parser.add_argument('--texture-refine-checkpoint')
 parser.add_argument('--refine-mask')
 parser.add_argument('--refine-strength')
@@ -216,6 +223,26 @@ if args.refine_checkpoint:
             'status': 'ready',
             'progress': int(args.refine_steps),
             'total': int(args.refine_steps),
+        }) + '\n')
+        stream.write(json.dumps({
+            'stage': 'final_mesh',
+            'status': 'ready',
+            'artifact_path': args.output,
+            'preview_kind': 'mesh',
+        }) + '\n')
+    raise SystemExit(0)
+if args.refine_fusion_checkpoint:
+    Path(args.output).write_bytes(b'glTF-fused')
+    Path(args.checkpoint).write_bytes(b'npz-fused')
+    Path(args.output).with_name('hr-refine-generated.glb').write_bytes(
+        b'glTF-hr-local'
+    )
+    with Path(args.events).open('w') as stream:
+        stream.write(json.dumps({
+            'stage': 'hr_shape_latent',
+            'status': 'ready',
+            'artifact_path': args.output,
+            'preview_kind': 'mesh',
         }) + '\n')
         stream.write(json.dumps({
             'stage': 'final_mesh',
@@ -582,6 +609,55 @@ def test_staged_client_runs_masked_refine_as_separate_artifact(tmp_path):
     client.shutdown()
 
 
+def test_staged_client_fuses_positioned_proposal_without_refine_sampling(
+        tmp_path):
+    root = tmp_path / "pixal3d"
+    root.mkdir()
+    runner = tmp_path / "staged.py"
+    runner.write_text(_FAKE_STAGED_RUNNER)
+    model = tmp_path / "model"
+    model.mkdir()
+    proposal = tmp_path / "proposal.npz"
+    proposal.write_bytes(b"npz-proposal")
+    source = tmp_path / "source.png"
+    source.write_bytes(b"png")
+    client = Pixal3DProcessClient(
+        python=sys.executable,
+        root=root,
+        model_path=model,
+        runner_path=runner,
+        staged=True,
+    )
+    placement = ReconstructionRefinePlacement(
+        translation=(0.1, -0.2, 0.3),
+        orientation=(0.0, 0.0, 0.0, 1.0),
+        scale=1.25,
+    )
+    events = []
+
+    output, returned_source = client.fuse_refine(
+        proposal,
+        source,
+        placement,
+        threading.Event(),
+        on_event=events.append,
+    )
+
+    captured = json.loads(output.with_name("parameters.json").read_text())
+    assert output.read_bytes() == b"glTF-fused"
+    assert returned_source == source
+    assert captured["refine_fusion_checkpoint"] == str(proposal)
+    assert captured["placement_translation"] == ["0.1", "-0.2", "0.3"]
+    assert captured["placement_scale"] == "1.25"
+    assert client.checkpoint_path.read_bytes() == b"npz-fused"
+    assert client.refine_generated_path.read_bytes() == b"glTF-hr-local"
+    assert [event.stage for event in events] == [
+        ReconstructionStage.HR_SHAPE_LATENT,
+        ReconstructionStage.FINAL_MESH,
+    ]
+    client.shutdown()
+
+
 def test_staged_client_runs_masked_lr_refine_to_resume_checkpoint(tmp_path):
     root = tmp_path / "pixal3d"
     root.mkdir()
@@ -736,6 +812,79 @@ def test_reconstruction_controller_snapshots_refine_inputs() -> None:
     assert engine.request.parameters.strength == 0.6
     assert engine.request.conditioning_image is not condition
     assert engine.request.mask_image is not mask
+
+
+def test_reconstruction_controller_snapshots_refine_fusion_placement() -> None:
+    class Engine:
+        is_busy = False
+        request = None
+        job_id = None
+
+        def submit_refine_fusion_request(self, request, *, job_id=None):
+            self.request = request
+            self.job_id = job_id
+            return True
+
+    engine = Engine()
+    controller = ReconstructionController(engine)
+    placement = ReconstructionRefinePlacement(
+        translation=(0.1, 0.2, 0.3), scale=1.1
+    )
+
+    event = controller.start_refine_fusion(
+        "/tmp/proposal.npz", "/tmp/source.png", placement
+    )
+
+    assert event.status and "Fusing" in event.status
+    assert engine.job_id.startswith("reconstruction_refine_fusion_")
+    assert engine.request.proposal_checkpoint_path == "/tmp/proposal.npz"
+    assert engine.request.source_path == "/tmp/source.png"
+    assert engine.request.placement == placement
+
+
+def test_reconstruction_engine_marks_fused_placement_as_accepted(tmp_path):
+    checkpoint = tmp_path / "accepted.npz"
+    np.savez_compressed(
+        checkpoint,
+        composite_kind=np.asarray("enlarged_hr_geometry_v1"),
+        registration_bounds=np.asarray(((0.0, 0.0, 0.0), (2.0, 4.0, 6.0))),
+    )
+    output = tmp_path / "fused.glb"
+    output.write_bytes(b"glTF")
+    local = tmp_path / "local.glb"
+    local.write_bytes(b"glTF-local")
+
+    class Client:
+        artifacts = ()
+        conditioning_path = None
+        checkpoint_path = checkpoint
+        refine_generated_path = local
+
+        def fuse_refine(
+            self, proposal, source, placement, cancel, **kwargs
+        ):
+            return output, Path(source)
+
+        def shutdown(self, timeout=2.0):
+            pass
+
+    placement = ReconstructionRefinePlacement(
+        translation=(0.1, 0.2, 0.3), scale=1.2
+    )
+    engine = ReconstructionEngine(Client())
+    request = ReconstructionRefineFusionRequest(
+        str(checkpoint), str(tmp_path / "source.png"), placement
+    )
+
+    result = engine._run_refine_fusion(
+        request, threading.Event(), lambda _event: None
+    )
+
+    assert result.refine_placement == placement
+    assert result.refine_placement_accepted is True
+    assert result.refine_placement_pivot == pytest.approx((-1.0, 3.0, 2.0))
+    assert result.refine_generated_path == str(local)
+    engine.shutdown()
 
 
 def test_reconstruction_controller_snapshots_lr_refine_inputs() -> None:

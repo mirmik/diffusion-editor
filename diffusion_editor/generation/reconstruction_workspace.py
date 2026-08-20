@@ -866,7 +866,17 @@ def build_legacy_workspace(
                         artifact_id=(
                             f"legacy:{run_id}:{spec_key}:hr_checkpoint"
                         ),
-                        metadata={"verified_content_hash": False},
+                        metadata={
+                            "verified_content_hash": False,
+                            "run_id": run.run_id,
+                            "refine_placement": run.refine_placement.to_dict(),
+                            "refine_placement_pivot": list(
+                                run.refine_placement_pivot
+                            ),
+                            "refine_placement_accepted": (
+                                run.refine_placement_accepted
+                            ),
+                        },
                     )
                     preceding_outputs.append(checkpoint.artifact_id)
                     published_any = True
@@ -881,7 +891,17 @@ def build_legacy_workspace(
                             f"legacy:{run_id}:{spec_key}:"
                             "refine_generated_mesh"
                         ),
-                        metadata={"verified_content_hash": False},
+                        metadata={
+                            "verified_content_hash": False,
+                            "run_id": run.run_id,
+                            "refine_placement": run.refine_placement.to_dict(),
+                            "refine_placement_pivot": list(
+                                run.refine_placement_pivot
+                            ),
+                            "refine_placement_accepted": (
+                                run.refine_placement_accepted
+                            ),
+                        },
                     )
                     preceding_outputs.append(generated.artifact_id)
                     published_any = True

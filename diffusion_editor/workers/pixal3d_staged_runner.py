@@ -1370,6 +1370,17 @@ def _run_enlarged_hr_refine(
         registration_translation=np.asarray(
             registration.translation, dtype=np.float64
         ),
+        base_inner_radius=np.asarray(
+            [base_inner_radius], dtype=np.float64
+        ),
+        local_outer_radius=np.asarray(
+            [local_outer_radius], dtype=np.float64
+        ),
+        placement_translation=np.zeros(3, dtype=np.float64),
+        placement_orientation=np.asarray(
+            (0.0, 0.0, 0.0, 1.0), dtype=np.float64
+        ),
+        placement_scale=np.ones(1, dtype=np.float64),
     )
     metadata = {
         "protocol": 1,
@@ -1390,6 +1401,203 @@ def _run_enlarged_hr_refine(
         "composed_faces": int(len(overlap_faces)),
         "fusion_mode": "unwelded_overlap_v1",
         "decimation_applied": False,
+    }
+    (artifact_root / "hr-local-refine.json").write_text(
+        json.dumps(metadata, indent=2), encoding="utf-8"
+    )
+    reporter.emit(
+        "hr_shape_latent", "ready",
+        artifact_path=Path(args.output), preview_kind="mesh",
+    )
+    reporter.emit(
+        "final_mesh", "ready",
+        artifact_path=Path(args.output), preview_kind="mesh",
+    )
+
+
+def _run_enlarged_hr_fusion(
+    args, reporter, upstream, sp, torch, np, pipeline=None
+) -> None:
+    """Recompose an existing local proposal without rerunning diffusion."""
+    import trimesh
+    from diffusion_editor.generation.local_detail_geometry import (
+        apply_engine_refine_placement_to_pixal_points,
+        compose_local_detail_mesh,
+    )
+    from diffusion_editor.generation.types import ReconstructionRefinePlacement
+
+    proposal_path = Path(args.refine_fusion_checkpoint)
+    with np.load(proposal_path, allow_pickle=False) as saved:
+        if int(saved["protocol_version"][0]) != 1:
+            raise ValueError("unsupported Pixal3D refine checkpoint version")
+        if str(saved["composite_kind"].item()) != "enlarged_hr_geometry_v1":
+            raise ValueError("fusion checkpoint is not an enlarged HR proposal")
+        expected_model = str(Path(args.model_path).resolve())
+        if str(saved["model_path"].item()) != expected_model:
+            raise ValueError("fusion checkpoint belongs to a different model")
+        checkpoint_payload = {
+            name: saved[name].copy() for name in saved.files
+        }
+        base_coords = torch.from_numpy(saved["coords"].copy()).to("cuda")
+        base_normalized_feats = torch.from_numpy(
+            saved["normalized_feats"].copy()
+        ).to("cuda").float()
+        base_resolution = int(saved["resolution"][0])
+        local_coords = torch.from_numpy(saved["local_coords"].copy()).to(
+            "cuda"
+        )
+        local_normalized_feats = torch.from_numpy(
+            saved["local_normalized_feats"].copy()
+        ).to("cuda").float()
+        local_resolution = int(saved["local_resolution"][0])
+        registration_scale = float(saved["registration_scale"][0])
+        registration_translation = np.asarray(
+            saved["registration_translation"], dtype=np.float64
+        )
+        registration_bounds = np.asarray(
+            saved["registration_bounds"], dtype=np.float64
+        )
+        overlap_bounds = np.asarray(saved["roi_bounds"], dtype=np.float64)
+        base_inner_radius = float(
+            saved["base_inner_radius"][0]
+            if "base_inner_radius" in saved.files
+            else 0.62
+        )
+        local_outer_radius = float(
+            saved["local_outer_radius"][0]
+            if "local_outer_radius" in saved.files
+            else 0.963
+        )
+
+    placement = ReconstructionRefinePlacement(
+        tuple(args.placement_translation),
+        tuple(args.placement_orientation),
+        args.placement_scale,
+    )
+    pipeline = pipeline or upstream.init_pipeline(
+        args.model_path, low_vram=args.low_vram
+    )
+    std = torch.tensor(
+        pipeline.shape_slat_normalization["std"], device="cuda"
+    )[None]
+    mean = torch.tensor(
+        pipeline.shape_slat_normalization["mean"], device="cuda"
+    )[None]
+    base_shape = sp.SparseTensor(
+        feats=base_normalized_feats * std + mean,
+        coords=base_coords,
+    )
+    local_shape = sp.SparseTensor(
+        feats=local_normalized_feats * std + mean,
+        coords=local_coords,
+    )
+    base_meshes, _ = pipeline.decode_shape_slat(base_shape, base_resolution)
+    local_meshes, _ = pipeline.decode_shape_slat(
+        local_shape, local_resolution
+    )
+    base_mesh = base_meshes[0]
+    local_mesh = local_meshes[0]
+    base_vertices = _tensor_numpy(base_mesh.vertices).astype(
+        np.float32, copy=False
+    )
+    base_faces = _tensor_numpy(base_mesh.faces).astype(
+        np.int64, copy=False
+    )
+    local_vertices = _tensor_numpy(local_mesh.vertices).astype(
+        np.float32, copy=False
+    )
+    local_faces = _tensor_numpy(local_mesh.faces).astype(
+        np.int64, copy=False
+    )
+    registered_vertices = (
+        local_vertices * registration_scale + registration_translation
+    ).astype(np.float32, copy=False)
+    pivot = registration_bounds.mean(axis=0)
+    placed_vertices = apply_engine_refine_placement_to_pixal_points(
+        registered_vertices, placement, pivot
+    )
+
+    artifact_root = Path(args.output).resolve().parent
+    generated_path = artifact_root / "hr-refine-generated.glb"
+    generated = trimesh.Trimesh(
+        # Keep this artifact in its automatically registered pose.  The
+        # accepted placement remains explicit in the document and viewport;
+        # only the composed output below bakes the delta into geometry.
+        vertices=registered_vertices,
+        faces=local_faces,
+        process=False,
+    )
+    generated.remove_unreferenced_vertices()
+    generated.apply_transform(_preview_transform())
+    generated.export(generated_path)
+    bounds_corners = np.asarray([
+        (x, y, z)
+        for x in overlap_bounds[:, 0]
+        for y in overlap_bounds[:, 1]
+        for z in overlap_bounds[:, 2]
+    ], dtype=np.float64)
+    placed_bounds_corners = apply_engine_refine_placement_to_pixal_points(
+        bounds_corners, placement, pivot
+    )
+    placed_overlap_bounds = np.stack((
+        placed_bounds_corners.min(axis=0),
+        placed_bounds_corners.max(axis=0),
+    ))
+    (
+        overlap_vertices,
+        overlap_faces,
+        base_faces_kept,
+        local_faces_kept,
+    ) = compose_local_detail_mesh(
+        base_vertices,
+        base_faces,
+        placed_vertices,
+        local_faces,
+        placed_overlap_bounds,
+        base_inner_radius=base_inner_radius,
+        local_outer_radius=local_outer_radius,
+        include_counts=True,
+    )
+    output = trimesh.Trimesh(
+        vertices=overlap_vertices,
+        faces=overlap_faces,
+        process=False,
+    )
+    output.remove_unreferenced_vertices()
+    output.apply_transform(_preview_transform())
+    output.export(Path(args.output))
+
+    checkpoint_payload.update({
+        "placement_translation": np.asarray(
+            placement.translation, dtype=np.float64
+        ),
+        "placement_orientation": np.asarray(
+            placement.orientation, dtype=np.float64
+        ),
+        "placement_scale": np.asarray([placement.scale], dtype=np.float64),
+        "base_inner_radius": np.asarray(
+            [base_inner_radius], dtype=np.float64
+        ),
+        "local_outer_radius": np.asarray(
+            [local_outer_radius], dtype=np.float64
+        ),
+    })
+    checkpoint = Path(args.checkpoint)
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(checkpoint, **checkpoint_payload)
+    metadata = {
+        "protocol": 1,
+        "kind": "enlarged_hr_geometry_v1",
+        "source_checkpoint": str(proposal_path),
+        "placement": placement.to_dict(),
+        "placement_space": "termin_z_up_delta",
+        "registration_bounds": registration_bounds.tolist(),
+        "roi_bounds": overlap_bounds.tolist(),
+        "placed_roi_bounds": placed_overlap_bounds.tolist(),
+        "base_faces_kept": base_faces_kept,
+        "local_faces_kept": local_faces_kept,
+        "composed_faces": int(len(overlap_faces)),
+        "fusion_mode": "unwelded_overlap_v1",
     }
     (artifact_root / "hr-local-refine.json").write_text(
         json.dumps(metadata, indent=2), encoding="utf-8"
@@ -1642,6 +1850,12 @@ def run(args, runtime: Pixal3DRuntime | None = None) -> None:
     from PIL import Image
 
     reporter = StageReporter(Path(args.events))
+    if args.refine_fusion_checkpoint:
+        _run_enlarged_hr_fusion(
+            args, reporter, upstream, sp, torch, np,
+            pipeline=runtime.pipeline,
+        )
+        return
     if args.lr_refine_checkpoint:
         _run_lr_refine(
             args, reporter, upstream, sp, torch, np,
@@ -2110,6 +2324,16 @@ def _job_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resume-checkpoint")
     parser.add_argument("--lr-refine-checkpoint")
     parser.add_argument("--refine-checkpoint")
+    parser.add_argument("--refine-fusion-checkpoint")
+    parser.add_argument(
+        "--placement-translation", nargs=3, type=float,
+        default=(0.0, 0.0, 0.0),
+    )
+    parser.add_argument(
+        "--placement-orientation", nargs=4, type=float,
+        default=(0.0, 0.0, 0.0, 1.0),
+    )
+    parser.add_argument("--placement-scale", type=float, default=1.0)
     parser.add_argument("--texture-refine-checkpoint")
     parser.add_argument("--refine-mask")
     parser.add_argument("--refine-strength", type=float, default=0.35)

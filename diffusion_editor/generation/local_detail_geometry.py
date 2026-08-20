@@ -3,14 +3,148 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
+from pathlib import Path
 
 import numpy as np
+
+from .types import ReconstructionRefinePlacement
 
 
 _PIXAL_TO_CAMERA_BASIS = np.asarray(
     ((1.0, 0.0, 0.0), (0.0, 0.0, -1.0), (0.0, 1.0, 0.0)),
     dtype=np.float64,
 )
+
+# Raw Pixal geometry is first exported with the runner's 180-degree Y
+# correction and is then converted by Termin from glTF Y-up to engine Z-up.
+# Keep the resulting proper rotation explicit so placement authored in the
+# viewport can be conjugated back into Pixal's canonical coordinates.
+_ENGINE_FROM_PIXAL_PREVIEW = np.asarray(
+    ((-1.0, 0.0, 0.0), (0.0, 0.0, 1.0), (0.0, 1.0, 0.0)),
+    dtype=np.float64,
+)
+
+
+def quaternion_from_euler_degrees(
+        x_degrees: float,
+        y_degrees: float,
+        z_degrees: float,
+) -> tuple[float, float, float, float]:
+    """Build an XYZ quaternion for the numeric local-fragment controls."""
+    x, y, z = map(
+        lambda value: math.radians(float(value)) * 0.5,
+        (x_degrees, y_degrees, z_degrees),
+    )
+    sx, cx = math.sin(x), math.cos(x)
+    sy, cy = math.sin(y), math.cos(y)
+    sz, cz = math.sin(z), math.cos(z)
+    return ReconstructionRefinePlacement(
+        orientation=(
+            sx * cy * cz + cx * sy * sz,
+            cx * sy * cz - sx * cy * sz,
+            cx * cy * sz + sx * sy * cz,
+            cx * cy * cz - sx * sy * sz,
+        )
+    ).orientation
+
+
+def euler_degrees_from_quaternion(
+        orientation: tuple[float, float, float, float],
+) -> tuple[float, float, float]:
+    """Return stable XYZ angles for the placement inspector."""
+    x, y, z, w = ReconstructionRefinePlacement(
+        orientation=orientation
+    ).orientation
+    sin_x_cos_y = 2.0 * (w * x - y * z)
+    cos_x_cos_y = 1.0 - 2.0 * (x * x + y * y)
+    x_angle = math.atan2(sin_x_cos_y, cos_x_cos_y)
+    sin_y = 2.0 * (w * y + z * x)
+    y_angle = math.asin(max(-1.0, min(1.0, sin_y)))
+    sin_z_cos_y = 2.0 * (w * z - x * y)
+    cos_z_cos_y = 1.0 - 2.0 * (y * y + z * z)
+    z_angle = math.atan2(sin_z_cos_y, cos_z_cos_y)
+    return tuple(map(math.degrees, (x_angle, y_angle, z_angle)))
+
+
+def _quaternion_rotation_matrix(
+        orientation: tuple[float, float, float, float],
+) -> np.ndarray:
+    x, y, z, w = ReconstructionRefinePlacement(
+        orientation=orientation
+    ).orientation
+    return np.asarray((
+        (1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w),
+         2.0 * (x * z + y * w)),
+        (2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z),
+         2.0 * (y * z - x * w)),
+        (2.0 * (x * z - y * w), 2.0 * (y * z + x * w),
+         1.0 - 2.0 * (x * x + y * y)),
+    ), dtype=np.float64)
+
+
+def refine_placement_matrix(
+        placement: ReconstructionRefinePlacement,
+        pivot: tuple[float, float, float],
+) -> np.ndarray:
+    """Return the engine-space pivoted delta used by the live viewport."""
+    pivot_value = np.asarray(pivot, dtype=np.float64)
+    if pivot_value.shape != (3,) or not np.all(np.isfinite(pivot_value)):
+        raise ValueError("refine placement pivot must contain three finite values")
+    rotation = _quaternion_rotation_matrix(placement.orientation)
+    linear = rotation * placement.scale
+    translation = (
+        np.asarray(placement.translation, dtype=np.float64)
+        + pivot_value
+        - linear @ pivot_value
+    )
+    result = np.eye(4, dtype=np.float64)
+    result[:3, :3] = linear
+    result[:3, 3] = translation
+    return result
+
+
+def pixal_preview_point_to_engine(point) -> np.ndarray:
+    value = np.asarray(point, dtype=np.float64)
+    if value.shape != (3,):
+        raise ValueError("point must contain three components")
+    return _ENGINE_FROM_PIXAL_PREVIEW @ value
+
+
+def refine_placement_pivot_from_checkpoint(
+        path: str | Path,
+) -> tuple[float, float, float]:
+    """Read the registered fragment center and expose it in engine Z-up."""
+    with np.load(Path(path), allow_pickle=False) as saved:
+        if str(saved.get("composite_kind", np.asarray("")).item()) != (
+                "enlarged_hr_geometry_v1"):
+            raise ValueError("checkpoint is not an enlarged HR refine proposal")
+        bounds = np.asarray(saved["registration_bounds"], dtype=np.float64)
+    if bounds.shape != (2, 3) or not np.all(np.isfinite(bounds)):
+        raise ValueError("refine checkpoint has invalid registration bounds")
+    return tuple(map(float, pixal_preview_point_to_engine(bounds.mean(axis=0))))
+
+
+def apply_engine_refine_placement_to_pixal_points(
+        points: np.ndarray,
+        placement: ReconstructionRefinePlacement,
+        pivot_pixal: tuple[float, float, float] | np.ndarray,
+) -> np.ndarray:
+    """Apply a Z-up viewport delta to registered Pixal-space vertices."""
+    values = np.asarray(points)
+    if values.ndim != 2 or values.shape[1] != 3:
+        raise ValueError("points must have shape [N, 3]")
+    pivot = np.asarray(pivot_pixal, dtype=np.float64)
+    pivot_engine = pixal_preview_point_to_engine(pivot)
+    engine_matrix = refine_placement_matrix(placement, tuple(pivot_engine))
+    basis = _ENGINE_FROM_PIXAL_PREVIEW
+    pixal_linear = basis.T @ engine_matrix[:3, :3] @ basis
+    pixal_translation = basis.T @ engine_matrix[:3, 3]
+    transformed = (
+        values.astype(np.float64, copy=False) @ pixal_linear.T
+        + pixal_translation
+    )
+    return transformed.astype(values.dtype, copy=False)
 
 
 @dataclass(frozen=True)

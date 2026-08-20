@@ -12,6 +12,8 @@ from ..engines.reconstruction_engine import ReconstructionEngine
 from .types import (
     RECONSTRUCTION_BACKEND_LABELS,
     ReconstructionRefineParameters,
+    ReconstructionRefineFusionRequest,
+    ReconstructionRefinePlacement,
     ReconstructionRefineRequest,
     ReconstructionRequest,
     ReconstructionParameters,
@@ -104,6 +106,35 @@ class ReconstructionController:
             return ReconstructionControllerEvent()
         self._active_job_id = job_id
         return ReconstructionControllerEvent(status="Refining 3D geometry with Pixal3D...")
+
+    def start_refine_fusion(
+        self,
+        proposal_checkpoint_path: str,
+        source_path: str,
+        placement: ReconstructionRefinePlacement,
+        *,
+        generation_parameters: ReconstructionParameters | None = None,
+    ) -> ReconstructionControllerEvent:
+        """Fuse a positioned local proposal without another diffusion pass."""
+        if self.is_busy:
+            return ReconstructionControllerEvent()
+        job_id = f"reconstruction_refine_fusion_{uuid.uuid4().hex}"
+        request = ReconstructionRefineFusionRequest(
+            proposal_checkpoint_path=str(proposal_checkpoint_path),
+            source_path=str(source_path),
+            placement=placement,
+            generation_parameters=(
+                generation_parameters or ReconstructionParameters()
+            ),
+        )
+        if not self._engine.submit_refine_fusion_request(
+            request, job_id=job_id
+        ):
+            return ReconstructionControllerEvent()
+        self._active_job_id = job_id
+        return ReconstructionControllerEvent(
+            status="Fusing positioned local 3D refinement..."
+        )
 
     def start_lr_refine(
         self,

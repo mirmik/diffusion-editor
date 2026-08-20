@@ -3,13 +3,69 @@ import pytest
 
 from diffusion_editor.generation.local_detail_geometry import (
     LocalDetailTransform,
+    apply_engine_refine_placement_to_pixal_points,
     compose_local_detail_mesh,
+    euler_degrees_from_quaternion,
     fit_local_detail_transform,
     local_roi_bounds,
     overlap_face_masks,
+    quaternion_from_euler_degrees,
+    refine_placement_matrix,
+    refine_placement_pivot_from_checkpoint,
     project_pixal_points,
     sample_mask_bilinear,
 )
+from diffusion_editor.generation.types import ReconstructionRefinePlacement
+
+
+def test_refine_placement_quaternion_roundtrips_numeric_controls():
+    quaternion = quaternion_from_euler_degrees(-25.0, 15.0, 80.0)
+
+    assert euler_degrees_from_quaternion(quaternion) == pytest.approx(
+        (-25.0, 15.0, 80.0)
+    )
+
+
+def test_refine_placement_matrix_scales_and_rotates_around_fragment_pivot():
+    placement = ReconstructionRefinePlacement(
+        translation=(1.0, -2.0, 0.5),
+        orientation=quaternion_from_euler_degrees(0.0, 0.0, 90.0),
+        scale=2.0,
+    )
+    pivot = np.asarray((2.0, 3.0, 4.0))
+    matrix = refine_placement_matrix(placement, tuple(pivot))
+
+    transformed_pivot = matrix @ np.append(pivot, 1.0)
+    np.testing.assert_allclose(
+        transformed_pivot[:3], pivot + placement.translation
+    )
+
+
+def test_viewport_translation_is_conjugated_back_to_pixal_coordinates():
+    points = np.asarray(((0.0, 0.0, 0.0),), dtype=np.float32)
+    placement = ReconstructionRefinePlacement(
+        translation=(1.0, 2.0, 3.0)
+    )
+
+    transformed = apply_engine_refine_placement_to_pixal_points(
+        points, placement, (0.0, 0.0, 0.0)
+    )
+
+    np.testing.assert_allclose(transformed, ((-1.0, 3.0, 2.0),))
+    assert transformed.dtype == np.float32
+
+
+def test_refine_pivot_is_restored_from_composite_checkpoint(tmp_path):
+    checkpoint = tmp_path / "proposal.npz"
+    np.savez_compressed(
+        checkpoint,
+        composite_kind=np.asarray("enlarged_hr_geometry_v1"),
+        registration_bounds=np.asarray(((0.0, 0.0, 0.0), (2.0, 4.0, 6.0))),
+    )
+
+    assert refine_placement_pivot_from_checkpoint(checkpoint) == pytest.approx(
+        (-1.0, 3.0, 2.0)
+    )
 
 
 def test_pixal_projection_places_origin_at_image_center():

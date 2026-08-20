@@ -33,6 +33,7 @@ from ..document.commands import (
     ClearSelectionCommand,
     PublishReconstructionResultCommand,
     SelectReconstructionRunCommand,
+    SetReconstructionRefinePlacementCommand,
 )
 from ..document.reconstruction import ReconstructionLayer, ReconstructionStatus
 from ..document.tool import DiffusionTool, InstructTool, LamaTool
@@ -42,10 +43,15 @@ from ..generation.types import (
     ReconstructionBackend,
     ReconstructionLrVariant,
     ReconstructionParameters,
+    ReconstructionRefinePlacement,
     ReconstructionRunKind,
     ReconstructionStage,
     ReconstructionStageStatus,
     pixal3d_resume_parameters_compatible,
+)
+from ..generation.local_detail_geometry import (
+    euler_degrees_from_quaternion,
+    quaternion_from_euler_degrees,
 )
 from ..generation.reconstruction_workspace import (
     LEGACY_OPERATION_TARGET_STAGES,
@@ -342,6 +348,8 @@ class NativeEditorRoot:
         self.reconstruction_viewport = None
         self.reconstruction_refine_viewport = None
         self._presented_refine_artifact_path: str | None = None
+        self._presented_refine_reference_path: str | None = None
+        self._presented_refine_run_id: str | None = None
         self._reconstruction_job_node_id: str | None = None
         self._reconstruction_parent_run_id: str | None = None
         self._presented_reconstruction_id: str | None = None
@@ -400,6 +408,15 @@ class NativeEditorRoot:
                 )
                 if callable(set_refine_handler):
                     set_refine_handler(self._handle_reconstruction_refine)
+                set_refine_placement_handler = getattr(
+                    self.view,
+                    "set_reconstruction_refine_placement_handler",
+                    None,
+                )
+                if callable(set_refine_placement_handler):
+                    set_refine_placement_handler(
+                        self._handle_reconstruction_refine_placement
+                    )
                 set_workspace_handler = getattr(
                     self.view, "set_reconstruction_workspace_handler", None
                 )
@@ -1416,6 +1433,13 @@ class NativeEditorRoot:
                         refine_generated_path=(
                             event.result.refine_generated_path
                         ),
+                        refine_placement=event.result.refine_placement,
+                        refine_placement_pivot=(
+                            event.result.refine_placement_pivot
+                        ),
+                        refine_placement_accepted=(
+                            event.result.refine_placement_accepted
+                        ),
                     )
                 )
                 if (
@@ -2052,7 +2076,16 @@ class NativeEditorRoot:
         )
         if callable(set_visible):
             set_visible(False)
+        update_placement = getattr(
+            getattr(self, "view", None),
+            "update_reconstruction_refine_placement",
+            None,
+        )
+        if callable(update_placement):
+            update_placement(None)
         self._presented_refine_artifact_path = None
+        self._presented_refine_reference_path = None
+        self._presented_refine_run_id = None
         viewport = getattr(self, "reconstruction_refine_viewport", None)
         if viewport is not None:
             viewport.clear_model()
@@ -2100,9 +2133,191 @@ class NativeEditorRoot:
         )
         if callable(set_visible):
             set_visible(True)
-        if path != self._presented_refine_artifact_path:
-            viewport.load_glb(path)
+        application = getattr(self, "application", None)
+        layer_stack = getattr(application, "layer_stack", None)
+        node = getattr(layer_stack, "active_layer", None)
+        run = None
+        if isinstance(node, ReconstructionLayer) and operation is not None:
+            prefix = "legacy:"
+            suffix = f":{operation.spec_key}"
+            operation_id_value = operation.operation_id
+            if (
+                    operation_id_value.startswith(prefix)
+                    and operation_id_value.endswith(suffix)):
+                run_id = operation_id_value[
+                    len(prefix):-len(suffix)
+                ]
+                run = next(
+                    (item for item in node.runs if item.run_id == run_id),
+                    None,
+                )
+        reference = None
+        if run is not None:
+            runs_by_id = {item.run_id: item for item in node.runs}
+            reference = runs_by_id.get(run.parent_run_id or "")
+            visited = set()
+            while (
+                    reference is not None
+                    and reference.kind is ReconstructionRunKind.MASKED_REFINE
+                    and reference.run_id not in visited):
+                visited.add(reference.run_id)
+                ancestor = runs_by_id.get(reference.parent_run_id or "")
+                if ancestor is None:
+                    break
+                reference = ancestor
+            if reference is None:
+                reference = node.base_run
+        reference_path = (
+            reference.glb_path
+            if reference is not None
+            and os.path.isfile(reference.glb_path)
+            else None
+        )
+        if (
+                path != getattr(
+                    self, "_presented_refine_artifact_path", None
+                )
+                or reference_path != getattr(
+                    self, "_presented_refine_reference_path", None
+                )):
+            load_comparison = getattr(
+                viewport, "load_comparison_glbs", None
+            )
+            if reference_path is not None and callable(load_comparison):
+                load_comparison(reference_path, path)
+            else:
+                viewport.load_glb(path)
             self._presented_refine_artifact_path = path
+            self._presented_refine_reference_path = reference_path
+        if run is not None:
+            bind_placement = getattr(viewport, "bind_refine_placement", None)
+            if callable(bind_placement):
+                bind_placement(
+                    run.refine_placement,
+                    run.refine_placement_pivot,
+                    lambda placement, run_id=run.run_id:
+                    self._commit_reconstruction_refine_placement(
+                        run_id, placement
+                    ),
+                )
+            self._presented_refine_run_id = run.run_id
+            update_placement = getattr(
+                self.view,
+                "update_reconstruction_refine_placement",
+                None,
+            )
+            if callable(update_placement):
+                controller = self.reconstruction_controller
+                update_placement(
+                    run.refine_placement,
+                    busy=bool(controller and controller.is_busy),
+                    accepted=run.refine_placement_accepted,
+                )
+
+    def _commit_reconstruction_refine_placement(
+        self,
+        run_id: str,
+        placement: ReconstructionRefinePlacement,
+    ) -> None:
+        node = self.application.layer_stack.active_layer
+        if not isinstance(node, ReconstructionLayer):
+            return
+        self.application.document.execute(
+            SetReconstructionRefinePlacementCommand(
+                node, run_id, placement
+            )
+        )
+        self._refresh_reconstruction_panel(node)
+
+    def _handle_reconstruction_refine_placement(
+            self, action: str, value=None) -> None:
+        node = self.application.layer_stack.active_layer
+        run_id = self._presented_refine_run_id
+        controller = self.reconstruction_controller
+        if (
+                not isinstance(node, ReconstructionLayer)
+                or run_id is None
+                or (controller is not None and controller.is_busy)):
+            return
+        run = next(
+            (item for item in node.runs if item.run_id == run_id),
+            None,
+        )
+        if run is None or run.refine_generated_path is None:
+            return
+        if action == "accept":
+            self._accept_reconstruction_refine_placement(node, run)
+            return
+        placement = run.refine_placement
+        if action == "reset":
+            next_placement = ReconstructionRefinePlacement()
+        else:
+            translation = list(placement.translation)
+            rotations = list(
+                euler_degrees_from_quaternion(placement.orientation)
+            )
+            if action in {"x", "y", "z"}:
+                translation[{"x": 0, "y": 1, "z": 2}[action]] = float(value)
+            elif action in {"rx", "ry", "rz"}:
+                rotations[{"rx": 0, "ry": 1, "rz": 2}[action]] = float(value)
+            elif action != "scale":
+                return
+            next_placement = ReconstructionRefinePlacement(
+                tuple(translation),
+                quaternion_from_euler_degrees(*rotations),
+                float(value) if action == "scale" else placement.scale,
+            )
+        self._commit_reconstruction_refine_placement(run.run_id, next_placement)
+        viewport = getattr(self, "reconstruction_refine_viewport", None)
+        preview_placement = getattr(
+            viewport, "preview_refine_placement", None
+        )
+        if callable(preview_placement):
+            preview_placement(
+                next_placement, pivot=run.refine_placement_pivot
+            )
+
+    def _accept_reconstruction_refine_placement(
+        self,
+        node: ReconstructionLayer,
+        run,
+    ) -> None:
+        controller = self.reconstruction_controller
+        if controller is None or controller.is_busy:
+            return
+        checkpoint_path = run.checkpoint_path
+        source_path = run.source_path
+        if not checkpoint_path or not os.path.isfile(checkpoint_path):
+            self.application.set_status(
+                "Cannot fuse refine placement: proposal checkpoint is missing"
+            )
+            return
+        if not _is_composite_shape_checkpoint(checkpoint_path):
+            self.application.set_status(
+                "Cannot fuse refine placement: checkpoint is not a local proposal"
+            )
+            return
+        if not source_path or not os.path.isfile(source_path):
+            self.application.set_status(
+                "Cannot fuse refine placement: source image is missing"
+            )
+            return
+        event = controller.start_refine_fusion(
+            checkpoint_path,
+            source_path,
+            run.refine_placement,
+            generation_parameters=node.generation_parameters,
+        )
+        if event.status and event.error is None:
+            self._reconstruction_job_node_id = node.id
+            self._reconstruction_parent_run_id = run.run_id
+            self._set_reconstruction_status(
+                node, ReconstructionStatus.GENERATING
+            )
+            self.application.set_status(event.status)
+        elif event.status:
+            self.application.set_status(event.status)
+        self._refresh_reconstruction_panel(node)
 
     def _on_snapshot_applied(self) -> None:
         if self.canvas_edit_coordinator is not None:

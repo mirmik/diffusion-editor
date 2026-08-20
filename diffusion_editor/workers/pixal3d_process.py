@@ -28,6 +28,7 @@ from .pixal3d_protocol import (
 
 from ..generation.types import (
     ReconstructionParameters,
+    ReconstructionRefinePlacement,
     ReconstructionRefineParameters,
     ReconstructionStage,
     ReconstructionStageArtifact,
@@ -449,6 +450,85 @@ class Pixal3DProcessClient:
         if refine_generated.is_file():
             self._refine_generated_path = refine_generated
         return output_path, condition_path
+
+    def fuse_refine(
+        self,
+        proposal_checkpoint_path: str | Path,
+        source_path: str | Path,
+        placement: ReconstructionRefinePlacement,
+        cancel: threading.Event,
+        *,
+        generation_parameters: ReconstructionParameters | None = None,
+        on_event: Callable[[ReconstructionStageEvent], None] | None = None,
+    ) -> tuple[Path, Path]:
+        """Fuse a placed HR proposal without rerunning diffusion sampling."""
+        self._validate_runtime()
+        if not self._staged:
+            raise RuntimeError("refine placement fusion requires the staged runner")
+        proposal_checkpoint = Path(proposal_checkpoint_path)
+        if not proposal_checkpoint.is_file():
+            raise RuntimeError(
+                f"refine proposal checkpoint not found: {proposal_checkpoint}"
+            )
+        source = Path(source_path)
+        if not source.is_file():
+            raise RuntimeError(f"refine proposal source not found: {source}")
+        generation = generation_parameters or ReconstructionParameters()
+        artifact_root = Path(tempfile.mkdtemp(
+            prefix="diffusion-editor-pixal3d-refine-fusion-"
+        ))
+        self._artifact_roots.append(artifact_root)
+        output_path = artifact_root / "refined.glb"
+        checkpoint_path = artifact_root / "shape-checkpoint.npz"
+        events_path = artifact_root / "events.jsonl"
+        log_path = artifact_root / "pixal3d.log"
+        self._artifacts = [ReconstructionStageArtifact(
+            ReconstructionStage.SOURCE_IMAGE, str(source), "image"
+        )]
+        self._checkpoint_path = None
+        self._texture_checkpoint_path = None
+        self._conditioning_path = source
+        self._refine_generated_path = None
+        command = [
+            str(self._python), str(self._runner_path),
+            "--pixal3d-root", str(self._root),
+            "--image", str(source),
+            "--output", str(output_path),
+            "--events", str(events_path),
+            "--model_path", str(self._model_path),
+            "--checkpoint", str(checkpoint_path),
+            "--refine-fusion-checkpoint", str(proposal_checkpoint),
+            "--placement-translation",
+            *map(str, placement.translation),
+            "--placement-orientation",
+            *map(str, placement.orientation),
+            "--placement-scale", str(placement.scale),
+            "--decimation-target", str(generation.decimation_target),
+            "--texture-size", str(generation.texture_size),
+        ]
+        if generation.low_vram:
+            command.append("--low_vram")
+        if self._persistent:
+            self._run_persistent_command(
+                command, events_path, cancel, on_event,
+                low_vram=generation.low_vram,
+            )
+        else:
+            self._run_command(command, log_path, events_path, cancel, on_event)
+        if not output_path.is_file() or output_path.stat().st_size == 0:
+            raise RuntimeError("Pixal3D refine fusion completed without a GLB")
+        if not checkpoint_path.is_file():
+            raise RuntimeError(
+                "Pixal3D refine fusion completed without a checkpoint"
+            )
+        self._checkpoint_path = checkpoint_path
+        refine_generated = artifact_root / "hr-refine-generated.glb"
+        if not refine_generated.is_file():
+            raise RuntimeError(
+                "Pixal3D refine fusion produced no placed local fragment"
+            )
+        self._refine_generated_path = refine_generated
+        return output_path, source
 
     def refine_texture(
         self,

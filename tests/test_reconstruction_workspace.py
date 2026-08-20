@@ -16,6 +16,7 @@ from diffusion_editor.generation.types import (
     RECONSTRUCTION_STAGES,
     ReconstructionParameters,
     ReconstructionLrVariant,
+    ReconstructionRefinePlacement,
     ReconstructionRun,
     ReconstructionRunKind,
     ReconstructionStage,
@@ -264,6 +265,10 @@ def test_legacy_projection_exposes_refine_runs_as_stage_local_variants() -> None
             "mesh",
         ),),
         refine_generated_path="/tmp/refined-generated.glb",
+        refine_placement=ReconstructionRefinePlacement(
+            translation=(0.1, 0.2, 0.3), scale=1.1
+        ),
+        refine_placement_pivot=(0.5, 0.6, 0.7),
     )
     workspace = build_legacy_workspace(
         ReconstructionParameters(), {}, {}, (base, refined), "refined"
@@ -288,6 +293,13 @@ def test_legacy_projection_exposes_refine_runs_as_stage_local_variants() -> None
         if item.role == "refine_generated_mesh"
     )
     assert generated.path == "/tmp/refined-generated.glb"
+    metadata = json.loads(generated.metadata_json)
+    assert metadata["refine_placement"] == {
+        "translation": [0.1, 0.2, 0.3],
+        "orientation": [0.0, 0.0, 0.0, 1.0],
+        "scale": 1.1,
+    }
+    assert metadata["refine_placement_pivot"] == [0.5, 0.6, 0.7]
 
 
 def test_legacy_projection_keeps_base_and_refined_lr_previews_separate() -> None:

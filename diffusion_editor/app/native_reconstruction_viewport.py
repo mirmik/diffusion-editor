@@ -35,6 +35,9 @@ from tgfx._tgfx_native import (
     tc_shader_ensure_tgfx2,
 )
 
+from ..generation.local_detail_geometry import refine_placement_matrix
+from ..generation.types import ReconstructionRefinePlacement
+
 
 _VIEWPORT_RESOURCE_IDS = count()
 
@@ -316,6 +319,7 @@ class _MeshRenderItem:
     color: tuple[float, float, float, float] = (0.34, 0.72, 0.95, 1.0)
     has_normals: bool = False
     wire_mesh: object | None = None
+    editable: bool = True
 
 
 def _wireframe_indices(triangles: np.ndarray) -> np.ndarray:
@@ -566,13 +570,19 @@ class NativeReconstructionViewport:
         self._dirty = True
         self._closed = False
         self._mesh_items: list[_MeshRenderItem] = []
+        self._model_transform = np.eye(4, dtype=np.float32)
+        self._refine_placement = ReconstructionRefinePlacement()
+        self._refine_placement_pivot = (0.0, 0.0, 0.0)
+        self._refine_placement_handler: (
+            Callable[[ReconstructionRefinePlacement], None] | None
+        ) = None
         self._point_cloud = PointCloud()
         self._point_cloud_renderer = PointCloudRenderer()
         self._point_cloud_style = PointCloudStyle()
         self._point_cloud_style.size_px = 5.0
         self._point_cloud_style.shape = PointCloudShape.Circle
         self._point_cloud_draw_params = PointCloudDrawParams()
-        self._glb_document = None
+        self._glb_documents = []
         self._color_texture = None
         self._depth_texture = None
         self._texture_size = (0, 0)
@@ -674,66 +684,67 @@ class NativeReconstructionViewport:
         self._light_direction = self._camera.direction_from_target()
         self.invalidate()
 
+    @property
+    def refine_placement(self) -> ReconstructionRefinePlacement:
+        return self._refine_placement
+
+    def bind_refine_placement(
+        self,
+        placement: ReconstructionRefinePlacement,
+        pivot: tuple[float, float, float],
+        handler: Callable[[ReconstructionRefinePlacement], None] | None,
+    ) -> None:
+        """Bind a delta to only the editable mesh group in this viewport."""
+        self._refine_placement_handler = handler
+        self.preview_refine_placement(placement, pivot=pivot)
+
+    def preview_refine_placement(
+        self,
+        placement: ReconstructionRefinePlacement,
+        *,
+        pivot: tuple[float, float, float] | None = None,
+    ) -> None:
+        self._require_open()
+        if pivot is not None:
+            self._refine_placement_pivot = tuple(map(float, pivot))
+        self._refine_placement = placement
+        self._model_transform = np.asarray(
+            refine_placement_matrix(
+                placement, self._refine_placement_pivot
+            ),
+            dtype=np.float32,
+        )
+        self.invalidate()
+
+    def commit_refine_placement(
+        self, placement: ReconstructionRefinePlacement
+    ) -> None:
+        self.preview_refine_placement(placement)
+        if self._refine_placement_handler is not None:
+            self._refine_placement_handler(placement)
+
     def clear_model(self) -> None:
         self._require_open()
         self._destroy_model_textures()
         self._mesh_items.clear()
         self._point_cloud.release(self._graphics.context)
-        self._glb_document = None
+        self._glb_documents.clear()
+        self._model_transform = np.eye(4, dtype=np.float32)
         self.invalidate()
 
     def load_glb(
             self, path: str, *, fit_camera: bool | None = None
     ) -> tuple[int, int, int]:
         self._require_open()
-        from ..native_glb import NativeGLBDocument
-
         had_model = bool(self._mesh_items) or not self._point_cloud.empty
-        source = NativeGLBDocument(path)
-        mesh_items = []
-        vertices = 0
-        indices = 0
-        bounds_min = None
-        bounds_max = None
-        for index, info in enumerate(source.meshes):
-            if info.skinned:
-                raise RuntimeError("The first reconstruction viewport supports static GLB meshes only")
-            mesh = source.build_mesh(
-                index,
-                _mesh_resource_id(self._resource_namespace, index),
-                name=info.name or f"Reconstruction mesh {index}",
-                convert_to_z_up=True,
-            )
-            texture = None
-            color = (0.34, 0.72, 0.95, 1.0)
-            base_color = source.base_color_texture(index)
-            if base_color is not None:
-                width, height, pixels = _decode_texture(base_color.payload)
-                texture = self._graphics.create_texture_rgba8(
-                    width, height, pixels, TextureEncoding.SRGB
-                )
-                color = base_color.factor
-            mesh_items.append(_MeshRenderItem(
-                mesh,
-                texture,
-                color,
-                has_normals=mesh.vertex_normals is not None,
-            ))
-            vertices += int(mesh.vertex_count)
-            indices += int(mesh.index_count)
-            payload = np.asarray(mesh.mesh.get_vertices_buffer(), dtype=np.float32)
-            stride = int(mesh.stride) // 4
-            if stride >= 3 and payload.size >= stride:
-                positions = payload.reshape(-1, stride)[:, :3]
-                local_min = positions.min(axis=0)
-                local_max = positions.max(axis=0)
-                bounds_min = local_min if bounds_min is None else np.minimum(bounds_min, local_min)
-                bounds_max = local_max if bounds_max is None else np.maximum(bounds_max, local_max)
+        source, mesh_items, vertices, indices, bounds_min, bounds_max = (
+            self._read_glb_items(path, editable=True, mesh_offset=0)
+        )
         if not mesh_items:
             raise RuntimeError("Generated GLB contains no meshes")
         self._destroy_model_textures()
         self._point_cloud.release(self._graphics.context)
-        self._glb_document = source
+        self._glb_documents = [source]
         self._mesh_items = mesh_items
         if (
             bounds_min is not None
@@ -744,6 +755,63 @@ class NativeReconstructionViewport:
             self._light_direction = self._camera.direction_from_target()
         self.invalidate()
         return vertices, indices // 3, len(mesh_items)
+
+    def load_comparison_glbs(
+        self,
+        reference_path: str,
+        editable_path: str,
+        *,
+        fit_camera: bool | None = None,
+    ) -> tuple[int, int, int]:
+        """Load a fixed base reference and a separately transformable fragment."""
+        self._require_open()
+        had_model = bool(self._mesh_items) or not self._point_cloud.empty
+        (
+            reference,
+            reference_items,
+            reference_vertices,
+            reference_indices,
+            reference_min,
+            reference_max,
+        ) = self._read_glb_items(
+            reference_path,
+            editable=False,
+            mesh_offset=0,
+            fallback_color=(0.34, 0.38, 0.44, 1.0),
+        )
+        (
+            editable,
+            editable_items,
+            editable_vertices,
+            editable_indices,
+            editable_min,
+            editable_max,
+        ) = self._read_glb_items(
+            editable_path,
+            editable=True,
+            mesh_offset=len(reference_items),
+            fallback_color=(0.95, 0.55, 0.18, 1.0),
+        )
+        if not reference_items or not editable_items:
+            raise RuntimeError("Refine comparison requires base and local meshes")
+        self._destroy_model_textures()
+        self._point_cloud.release(self._graphics.context)
+        self._glb_documents = [reference, editable]
+        # Draw the proposal first.  With the normal depth test, coincident
+        # base fragments then fail the equal-depth test instead of hiding the
+        # orange local surface at its automatic registration pose.
+        self._mesh_items = [*editable_items, *reference_items]
+        bounds_min = np.minimum(reference_min, editable_min)
+        bounds_max = np.maximum(reference_max, editable_max)
+        if _should_fit_camera(had_model, fit_camera):
+            self._camera.fit(bounds_min, bounds_max)
+            self._light_direction = self._camera.direction_from_target()
+        self.invalidate()
+        return (
+            reference_vertices + editable_vertices,
+            (reference_indices + editable_indices) // 3,
+            len(self._mesh_items),
+        )
 
     def load_point_cloud(
             self, path: str, *, fit_camera: bool | None = None
@@ -759,7 +827,7 @@ class NativeReconstructionViewport:
             raise RuntimeError("Termin failed to upload the reconstruction point cloud")
         self._destroy_model_textures()
         self._mesh_items.clear()
-        self._glb_document = None
+        self._glb_documents.clear()
         if _should_fit_camera(had_model, fit_camera):
             self._camera.fit(data.positions.min(axis=0), data.positions.max(axis=0))
             self._light_direction = self._camera.direction_from_target()
@@ -800,12 +868,17 @@ class NativeReconstructionViewport:
         mvp = self._camera.mvp(width, height)
         display_mode = _SHADING_MODE_IDS[self._shading_mode]
         for item in self._mesh_items:
+            item_mvp = (
+                mvp @ self._model_transform
+                if item.editable
+                else mvp
+            )
             if self._shading_mode == "wireframe":
                 if item.wire_mesh is None:
                     continue
                 ctx.bind_shader(self._vertex_shader, self._fragment_shader)
                 self._set_draw_state(
-                    mvp,
+                    item_mvp,
                     (0.72, 0.80, 0.95, 1.0),
                     self._light_direction,
                     _SHADING_MODE_IDS["unlit"],
@@ -836,7 +909,7 @@ class NativeReconstructionViewport:
                 ctx.use_shader_resource_layout(self._textured_shader)
                 ctx.bind_texture_by_name("u_base_color_texture", item.texture)
             self._set_draw_state(
-                mvp,
+                item_mvp,
                 item.color,
                 self._light_direction,
                 display_mode,
@@ -879,7 +952,78 @@ class NativeReconstructionViewport:
         self._depth_texture = None
         self._destroy_model_textures()
         self._mesh_items.clear()
-        self._glb_document = None
+        self._glb_documents.clear()
+
+    def _read_glb_items(
+        self,
+        path: str,
+        *,
+        editable: bool,
+        mesh_offset: int,
+        fallback_color: tuple[float, float, float, float] = (
+            0.34, 0.72, 0.95, 1.0
+        ),
+    ):
+        from ..native_glb import NativeGLBDocument
+
+        source = NativeGLBDocument(path)
+        mesh_items = []
+        vertices = 0
+        indices = 0
+        bounds_min = None
+        bounds_max = None
+        for index, info in enumerate(source.meshes):
+            if info.skinned:
+                raise RuntimeError(
+                    "The reconstruction viewport supports static GLB meshes only"
+                )
+            mesh = source.build_mesh(
+                index,
+                _mesh_resource_id(
+                    self._resource_namespace, mesh_offset + index
+                ),
+                name=info.name or f"Reconstruction mesh {index}",
+                convert_to_z_up=True,
+            )
+            texture = None
+            color = fallback_color
+            base_color = source.base_color_texture(index)
+            if base_color is not None:
+                width, height, pixels = _decode_texture(base_color.payload)
+                texture = self._graphics.create_texture_rgba8(
+                    width, height, pixels, TextureEncoding.SRGB
+                )
+                color = base_color.factor
+            mesh_items.append(_MeshRenderItem(
+                mesh,
+                texture,
+                color,
+                has_normals=mesh.vertex_normals is not None,
+                editable=editable,
+            ))
+            vertices += int(mesh.vertex_count)
+            indices += int(mesh.index_count)
+            payload = np.asarray(
+                mesh.mesh.get_vertices_buffer(), dtype=np.float32
+            )
+            stride = int(mesh.stride) // 4
+            if stride >= 3 and payload.size >= stride:
+                positions = payload.reshape(-1, stride)[:, :3]
+                local_min = positions.min(axis=0)
+                local_max = positions.max(axis=0)
+                bounds_min = (
+                    local_min
+                    if bounds_min is None
+                    else np.minimum(bounds_min, local_min)
+                )
+                bounds_max = (
+                    local_max
+                    if bounds_max is None
+                    else np.maximum(bounds_max, local_max)
+                )
+        return (
+            source, mesh_items, vertices, indices, bounds_min, bounds_max
+        )
 
     def _destroy_model_textures(self) -> None:
         for item in self._mesh_items:

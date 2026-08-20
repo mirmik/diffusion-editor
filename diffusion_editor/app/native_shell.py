@@ -26,10 +26,14 @@ from ..generation.types import (
     RECONSTRUCTION_STAGE_LABELS,
     ReconstructionParameters,
     ReconstructionBackend,
+    ReconstructionRefinePlacement,
     ReconstructionRefineParameters,
     ReconstructionRunKind,
     ReconstructionStage,
     ReconstructionStageStatus,
+)
+from ..generation.local_detail_geometry import (
+    euler_degrees_from_quaternion,
 )
 from ..generation.reconstruction_workspace import (
     LEGACY_OPERATION_TARGET_STAGES,
@@ -361,6 +365,9 @@ class NativeEditorView:
         self.canvas_view = None
         self.reconstruction_viewport = None
         self.reconstruction_refine_viewport = None
+        self.reconstruction_refine_placement_panel = None
+        self.reconstruction_refine_placement_controls = {}
+        self.reconstruction_refine_placement_actions = {}
         self.reconstruction_views_splitter = None
         self.reconstruction_refine_view_container = None
         self._reconstruction_refine_view_visible = False
@@ -380,8 +387,10 @@ class NativeEditorView:
         self._reconstruction_stage_handler = None
         self._reconstruction_parameter_handler = None
         self._reconstruction_refine_handler = None
+        self._reconstruction_refine_placement_handler = None
         self._syncing_reconstruction_parameters = False
         self._syncing_reconstruction_refine = False
+        self._syncing_reconstruction_refine_placement = False
         self.reconstruction_parameter_controls = {}
         self.reconstruction_parameter_widgets = {}
         self.reconstruction_seed_buttons = {}
@@ -1885,6 +1894,83 @@ class NativeEditorView:
         )
         container.add_preferred_child(title)
         container.add_flex_child(viewport_view.widget, 1.0)
+        placement_panel = self._document.create_vstack(
+            "DiffusionEditorReconstructionRefinePlacement"
+        )
+        placement_panel.stable_id = (
+            "diffusion-editor.reconstruction.refine-placement"
+        )
+        placement_panel.set_layout_spacing(3.0)
+        placement_title = self._document.create_label(
+            "Place local fragment",
+            "DiffusionEditorReconstructionWorkspaceInspectorTitle",
+        )
+        placement_panel.add_preferred_child(placement_title)
+        placement_controls = {}
+
+        def add_placement_row(specs):
+            row = self._document.create_hstack(
+                "DiffusionEditorReconstructionRefinePlacementRow"
+            )
+            row.set_layout_spacing(4.0)
+            for key, label, value, minimum, maximum, step, decimals in specs:
+                caption = self._document.create_label(
+                    label,
+                    "DiffusionEditorReconstructionWorkspaceInspectorText",
+                )
+                control = self._document.create_spin_box(float(value))
+                control.widget.stable_id = (
+                    "diffusion-editor.reconstruction.refine-placement."
+                    f"{key}"
+                )
+                control.set_range(float(minimum), float(maximum))
+                control.step = float(step)
+                control.decimals = int(decimals)
+                self._connections.append(control.connect_changed(
+                    lambda changed, key=key:
+                    self._change_reconstruction_refine_placement(
+                        key, float(changed)
+                    )
+                ))
+                placement_controls[key] = control
+                row.add_preferred_child(caption)
+                row.add_flex_child(control.widget, 1.0)
+            placement_panel.add_preferred_child(row)
+
+        add_placement_row((
+            ("x", "X", 0.0, -10.0, 10.0, 0.005, 4),
+            ("y", "Y", 0.0, -10.0, 10.0, 0.005, 4),
+            ("z", "Z", 0.0, -10.0, 10.0, 0.005, 4),
+        ))
+        add_placement_row((
+            ("rx", "RX°", 0.0, -180.0, 180.0, 0.5, 2),
+            ("ry", "RY°", 0.0, -180.0, 180.0, 0.5, 2),
+            ("rz", "RZ°", 0.0, -180.0, 180.0, 0.5, 2),
+            ("scale", "S", 1.0, 0.1, 10.0, 0.005, 4),
+        ))
+        action_row = self._document.create_hstack(
+            "DiffusionEditorReconstructionRefinePlacementActions"
+        )
+        action_row.set_layout_spacing(4.0)
+        reset = self._document.create_button("Reset")
+        reset.widget.stable_id = (
+            "diffusion-editor.reconstruction.refine-placement.reset"
+        )
+        accept = self._document.create_button("Accept placement")
+        accept.widget.stable_id = (
+            "diffusion-editor.reconstruction.refine-placement.accept"
+        )
+        self._connections.append(reset.connect_clicked(
+            lambda: self._activate_reconstruction_refine_placement("reset")
+        ))
+        self._connections.append(accept.connect_clicked(
+            lambda: self._activate_reconstruction_refine_placement("accept")
+        ))
+        action_row.add_flex_child(reset.widget, 1.0)
+        action_row.add_flex_child(accept.widget, 1.0)
+        placement_panel.add_preferred_child(action_row)
+        placement_panel.visible = False
+        container.add_preferred_child(placement_panel)
         splitter = self._document.create_splitter(
             True,
             "DiffusionEditorReconstructionViewsSplitter",
@@ -1899,12 +1985,75 @@ class NativeEditorView:
         self.reconstruction_refine_viewport = viewport_view
         self.reconstruction_views_splitter = splitter
         self.reconstruction_refine_view_container = container
+        self.reconstruction_refine_placement_panel = placement_panel
+        self.reconstruction_refine_placement_controls = placement_controls
+        self.reconstruction_refine_placement_actions = {
+            "reset": reset,
+            "accept": accept,
+        }
         if self.reconstruction_shading_combo is not None:
             index = self.reconstruction_shading_combo.selected_index
             if 0 <= index < len(RECONSTRUCTION_SHADING_MODES):
                 viewport_view.set_shading_mode(
                     RECONSTRUCTION_SHADING_MODES[index]
                 )
+        self._request_repaint()
+
+    def set_reconstruction_refine_placement_handler(self, handler) -> None:
+        self._reconstruction_refine_placement_handler = handler
+
+    def _change_reconstruction_refine_placement(
+            self, key: str, value: float) -> None:
+        if (
+                self._syncing_reconstruction_refine_placement
+                or self._reconstruction_refine_placement_handler is None):
+            return
+        self._reconstruction_refine_placement_handler(key, float(value))
+
+    def _activate_reconstruction_refine_placement(self, action: str) -> None:
+        if self._reconstruction_refine_placement_handler is not None:
+            self._reconstruction_refine_placement_handler(action, None)
+
+    def update_reconstruction_refine_placement(
+        self,
+        placement: ReconstructionRefinePlacement | None,
+        *,
+        busy: bool = False,
+        accepted: bool = False,
+    ) -> None:
+        panel = self.reconstruction_refine_placement_panel
+        controls = self.reconstruction_refine_placement_controls
+        if panel is None:
+            return
+        panel.visible = placement is not None
+        if placement is None:
+            self._request_repaint()
+            return
+        rotations = euler_degrees_from_quaternion(placement.orientation)
+        values = {
+            "x": placement.translation[0],
+            "y": placement.translation[1],
+            "z": placement.translation[2],
+            "rx": rotations[0],
+            "ry": rotations[1],
+            "rz": rotations[2],
+            "scale": placement.scale,
+        }
+        self._syncing_reconstruction_refine_placement = True
+        try:
+            for key, value in values.items():
+                controls[key].value = float(value)
+                controls[key].widget.enabled = not busy
+            self.reconstruction_refine_placement_actions[
+                "reset"
+            ].widget.enabled = (
+                not busy and placement != ReconstructionRefinePlacement()
+            )
+            self.reconstruction_refine_placement_actions[
+                "accept"
+            ].widget.enabled = not busy and not accepted
+        finally:
+            self._syncing_reconstruction_refine_placement = False
         self._request_repaint()
 
     def set_reconstruction_refine_view_visible(self, visible: bool) -> None:

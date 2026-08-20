@@ -22,6 +22,7 @@ from diffusion_editor.generation.types import (
     ReconstructionLrVariant,
     ReconstructionParameters,
     ReconstructionBackend,
+    ReconstructionRefinePlacement,
     ReconstructionRefineParameters,
     ReconstructionRun,
     ReconstructionRunKind,
@@ -299,6 +300,30 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar(
         view.mount_canvas(MountedView(canvas))
         view.mount_reconstruction_viewport(mounted_viewport)
         view.mount_reconstruction_refine_viewport(mounted_refine_viewport)
+        placement_events = []
+        view.set_reconstruction_refine_placement_handler(
+            lambda action, value: placement_events.append((action, value))
+        )
+        placement = ReconstructionRefinePlacement(
+            translation=(0.1, -0.2, 0.3), scale=1.25
+        )
+        view.update_reconstruction_refine_placement(placement)
+        assert view.reconstruction_refine_placement_panel.visible is True
+        assert view.reconstruction_refine_placement_controls[
+            "x"
+        ].value == pytest.approx(0.1)
+        assert view.reconstruction_refine_placement_controls[
+            "scale"
+        ].value == pytest.approx(1.25)
+        view._change_reconstruction_refine_placement("z", 0.4)
+        view._activate_reconstruction_refine_placement("accept")
+        assert placement_events == [("z", 0.4), ("accept", None)]
+        view.update_reconstruction_refine_placement(
+            placement, accepted=True
+        )
+        assert view.reconstruction_refine_placement_actions[
+            "accept"
+        ].widget.enabled is False
         assert view._reconstruction_refine_view_visible is False
         view.set_reconstruction_refine_view_visible(True)
         assert view._reconstruction_refine_view_visible is True

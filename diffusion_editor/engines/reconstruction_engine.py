@@ -9,12 +9,16 @@ from ..generation.types import (
     ReconstructionBackend,
     ReconstructionLrRefineRequest,
     ReconstructionRefineRequest,
+    ReconstructionRefineFusionRequest,
     ReconstructionRequest,
     ReconstructionResult,
     ReconstructionRunKind,
     ReconstructionStage,
     ReconstructionStageEvent,
     ReconstructionTextureRefineRequest,
+)
+from ..generation.local_detail_geometry import (
+    refine_placement_pivot_from_checkpoint,
 )
 from ..workers.pixal3d_process import Pixal3DProcessClient
 from ..workers.hi3dgen_process import Hi3DGenProcessClient
@@ -160,6 +164,32 @@ class ReconstructionEngine:
             on_error=lambda _exc: log.exception("Pixal3D refinement failed"),
         )
 
+    def submit_refine_fusion_request(
+        self,
+        request: ReconstructionRefineFusionRequest,
+        *,
+        job_id: str | None = None,
+    ) -> bool:
+        """Accept one positioned HR proposal without sampling it again."""
+        def emit(event: ReconstructionStageEvent) -> None:
+            from ..generation.types import EnginePollEvent
+
+            self._tasks.emit(EnginePollEvent(
+                task_type="reconstruction",
+                meta=event,
+                job_id=job_id,
+            ))
+
+        return self._tasks.submit(
+            "reconstruction",
+            lambda cancel: self._run_refine_fusion(request, cancel, emit),
+            job_id=job_id,
+            name="pixal3d-refine-fusion",
+            on_error=lambda _exc: log.exception(
+                "Pixal3D placed refinement fusion failed"
+            ),
+        )
+
     def submit_lr_refine_request(
         self,
         request: ReconstructionLrRefineRequest,
@@ -224,6 +254,14 @@ class ReconstructionEngine:
             generation_parameters=request.generation_parameters,
             on_event=emit,
         )
+        checkpoint_path = (
+            str(self._client.checkpoint_path)
+            if self._client.checkpoint_path else None
+        )
+        pivot = (
+            refine_placement_pivot_from_checkpoint(checkpoint_path)
+            if checkpoint_path else (0.0, 0.0, 0.0)
+        )
         return ReconstructionResult(
             glb_path=str(glb_path),
             source_path=str(condition_path),
@@ -233,10 +271,7 @@ class ReconstructionEngine:
                 str(self._client.conditioning_path)
                 if self._client.conditioning_path else None
             ),
-            checkpoint_path=(
-                str(self._client.checkpoint_path)
-                if self._client.checkpoint_path else None
-            ),
+            checkpoint_path=checkpoint_path,
             texture_checkpoint_path=(
                 str(self._client.texture_checkpoint_path)
                 if self._client.texture_checkpoint_path else None
@@ -245,6 +280,45 @@ class ReconstructionEngine:
                 str(self._client.refine_generated_path)
                 if self._client.refine_generated_path else None
             ),
+            refine_placement_pivot=pivot,
+            backend=ReconstructionBackend.PIXAL3D,
+        )
+
+    def _run_refine_fusion(
+        self, request, cancel, emit
+    ) -> ReconstructionResult:
+        glb_path, source_path = self._client.fuse_refine(
+            request.proposal_checkpoint_path,
+            request.source_path,
+            request.placement,
+            cancel,
+            generation_parameters=request.generation_parameters,
+            on_event=emit,
+        )
+        checkpoint_path = (
+            str(self._client.checkpoint_path)
+            if self._client.checkpoint_path else None
+        )
+        pivot = refine_placement_pivot_from_checkpoint(
+            checkpoint_path or request.proposal_checkpoint_path
+        )
+        return ReconstructionResult(
+            glb_path=str(glb_path),
+            source_path=str(source_path),
+            artifacts=tuple(self._client.artifacts),
+            kind=ReconstructionRunKind.MASKED_REFINE,
+            conditioning_path=(
+                str(self._client.conditioning_path)
+                if self._client.conditioning_path else None
+            ),
+            checkpoint_path=checkpoint_path,
+            refine_generated_path=(
+                str(self._client.refine_generated_path)
+                if self._client.refine_generated_path else None
+            ),
+            refine_placement=request.placement,
+            refine_placement_pivot=pivot,
+            refine_placement_accepted=True,
             backend=ReconstructionBackend.PIXAL3D,
         )
 

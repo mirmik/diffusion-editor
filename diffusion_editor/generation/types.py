@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import math
 from typing import Literal
 
 import numpy as np
@@ -479,6 +480,59 @@ class ReconstructionRefineParameters:
 
 
 @dataclass(frozen=True)
+class ReconstructionRefinePlacement:
+    """User-authored delta applied to one registered local refine fragment."""
+
+    translation: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    orientation: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0)
+    scale: float = 1.0
+
+    def __post_init__(self) -> None:
+        translation = tuple(float(value) for value in self.translation)
+        orientation = tuple(float(value) for value in self.orientation)
+        scale = float(self.scale)
+        if len(translation) != 3 or not all(map(math.isfinite, translation)):
+            raise ValueError(
+                "refine placement translation must contain three finite values"
+            )
+        if len(orientation) != 4 or not all(map(math.isfinite, orientation)):
+            raise ValueError(
+                "refine placement orientation must contain four finite values"
+            )
+        norm = math.sqrt(sum(value * value for value in orientation))
+        if norm <= 1.0e-12:
+            raise ValueError("refine placement orientation must be non-zero")
+        if not math.isfinite(scale) or scale <= 0.0:
+            raise ValueError("refine placement scale must be finite and positive")
+        object.__setattr__(self, "translation", translation)
+        object.__setattr__(
+            self,
+            "orientation",
+            tuple(value / norm for value in orientation),
+        )
+        object.__setattr__(self, "scale", scale)
+
+    def to_dict(self) -> dict:
+        return {
+            "translation": list(self.translation),
+            "orientation": list(self.orientation),
+            "scale": self.scale,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: object) -> "ReconstructionRefinePlacement":
+        if not isinstance(payload, dict):
+            return cls()
+        return cls(
+            translation=tuple(payload.get("translation", (0.0, 0.0, 0.0))),
+            orientation=tuple(
+                payload.get("orientation", (0.0, 0.0, 0.0, 1.0))
+            ),
+            scale=payload.get("scale", 1.0),
+        )
+
+
+@dataclass(frozen=True)
 class ReconstructionRun:
     run_id: str
     kind: ReconstructionRunKind
@@ -496,6 +550,11 @@ class ReconstructionRun:
     stage_progress: tuple[tuple[int, int], ...] = ()
     stage_artifacts: tuple["ReconstructionStageArtifact", ...] = ()
     refine_generated_path: str | None = None
+    refine_placement: ReconstructionRefinePlacement = (
+        ReconstructionRefinePlacement()
+    )
+    refine_placement_pivot: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    refine_placement_accepted: bool = False
 
 
 @dataclass(frozen=True)
@@ -623,6 +682,14 @@ class ReconstructionRefineRequest:
 
 
 @dataclass(frozen=True)
+class ReconstructionRefineFusionRequest:
+    proposal_checkpoint_path: str
+    source_path: str
+    placement: ReconstructionRefinePlacement = ReconstructionRefinePlacement()
+    generation_parameters: ReconstructionParameters = ReconstructionParameters()
+
+
+@dataclass(frozen=True)
 class ReconstructionLrRefineRequest:
     conditioning_image: Image.Image
     mask_image: Image.Image
@@ -681,6 +748,11 @@ class ReconstructionResult:
     resume_checkpoint_path: str | None = None
     backend: ReconstructionBackend = ReconstructionBackend.PIXAL3D
     refine_generated_path: str | None = None
+    refine_placement: ReconstructionRefinePlacement = (
+        ReconstructionRefinePlacement()
+    )
+    refine_placement_pivot: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    refine_placement_accepted: bool = False
 
 
 @dataclass(frozen=True)

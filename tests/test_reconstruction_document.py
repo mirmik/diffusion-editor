@@ -10,6 +10,7 @@ from diffusion_editor.document.commands import (
     AddReconstructionLayerCommand,
     PublishReconstructionResultCommand,
     SelectReconstructionRunCommand,
+    SetReconstructionRefinePlacementCommand,
 )
 from diffusion_editor.document.document_service import DocumentService
 from diffusion_editor.document.history import HistoryManager
@@ -31,6 +32,7 @@ from diffusion_editor.generation.types import (
     ReconstructionLrVariant,
     ReconstructionParameters,
     ReconstructionRefineParameters,
+    ReconstructionRefinePlacement,
     ReconstructionRun,
     ReconstructionRunKind,
     ReconstructionResult,
@@ -216,7 +218,6 @@ def test_refined_run_is_appended_without_replacing_base(tmp_path) -> None:
         artifact.stage: artifact.path
         for artifact in node.active_run.stage_artifacts
     }[ReconstructionStage.HR_SHAPE_LATENT] == str(refined_hr)
-
     node.selected_preview_stage = ReconstructionStage.HR_SHAPE_LATENT
     node.preview_stage_pinned = True
 
@@ -266,6 +267,112 @@ def test_refined_run_is_appended_without_replacing_base(tmp_path) -> None:
     assert node.active_run is refined_run
     assert node.selected_preview_stage is ReconstructionStage.HR_SHAPE_LATENT
     assert loaded == [str(refined_hr)]
+
+
+def test_refine_fragment_placement_is_document_owned_and_undoable(
+        tmp_path) -> None:
+    stack, document = _document()
+    document.execute(AddReconstructionLayerCommand("Character reconstruction"))
+    node = stack.active_layer
+    assert isinstance(node, ReconstructionLayer)
+    merged = tmp_path / "merged.glb"
+    generated = tmp_path / "generated.glb"
+    merged.write_bytes(b"merged")
+    generated.write_bytes(b"local")
+    document.execute(PublishReconstructionResultCommand(
+        node,
+        str(merged),
+        10,
+        4,
+        1,
+        run_kind=ReconstructionRunKind.MASKED_REFINE,
+        refine_generated_path=str(generated),
+        refine_placement_pivot=(0.5, 1.0, 1.5),
+    ))
+    run = node.active_run
+    assert run is not None
+    placement = ReconstructionRefinePlacement(
+        translation=(0.1, -0.2, 0.3), scale=1.1
+    )
+
+    document.execute(SetReconstructionRefinePlacementCommand(
+        node, run.run_id, placement
+    ))
+
+    assert node.active_run.refine_placement == placement
+    assert node.active_run.refine_placement_accepted is False
+    document.undo()
+    assert node.active_run.refine_placement == ReconstructionRefinePlacement()
+    document.redo()
+    assert node.active_run.refine_placement == placement
+
+
+def test_accept_refine_placement_starts_fuse_only_continuation(tmp_path) -> None:
+    stack, document = _document()
+    document.execute(AddReconstructionLayerCommand("Character reconstruction"))
+    node = stack.active_layer
+    assert isinstance(node, ReconstructionLayer)
+    checkpoint = tmp_path / "proposal.npz"
+    np.savez_compressed(
+        checkpoint,
+        composite_kind=np.asarray("enlarged_hr_geometry_v1"),
+    )
+    source = tmp_path / "source.png"
+    source.write_bytes(b"png")
+    generated = tmp_path / "generated.glb"
+    generated.write_bytes(b"glTF")
+    placement = ReconstructionRefinePlacement(
+        translation=(0.1, -0.2, 0.3), scale=1.1
+    )
+    document.execute(PublishReconstructionResultCommand(
+        node,
+        str(tmp_path / "merged.glb"),
+        10,
+        4,
+        1,
+        source_path=str(source),
+        checkpoint_path=str(checkpoint),
+        run_kind=ReconstructionRunKind.MASKED_REFINE,
+        refine_generated_path=str(generated),
+        refine_placement=placement,
+    ))
+    run = node.active_run
+    assert run is not None
+
+    class Application:
+        layer_stack = stack
+        status = ""
+
+        def set_status(self, value):
+            self.status = value
+
+    class Controller:
+        is_busy = False
+        captured = None
+
+        def start_refine_fusion(
+            self, proposal, source_path, accepted_placement, *,
+            generation_parameters,
+        ):
+            self.captured = (
+                proposal, source_path, accepted_placement,
+                generation_parameters,
+            )
+            return ReconstructionControllerEvent(status="Fusing")
+
+    root = NativeEditorRoot.__new__(NativeEditorRoot)
+    root.application = Application()
+    root.reconstruction_controller = Controller()
+    root._refresh_reconstruction_panel = lambda _node: None
+
+    root._accept_reconstruction_refine_placement(node, run)
+
+    assert root.reconstruction_controller.captured[:3] == (
+        str(checkpoint), str(source), placement
+    )
+    assert root._reconstruction_job_node_id == node.id
+    assert root._reconstruction_parent_run_id == run.run_id
+    assert node.reconstruction_status is ReconstructionStatus.GENERATING
 
 
 def test_root_refine_entry_point_uses_active_run_checkpoint(tmp_path) -> None:
