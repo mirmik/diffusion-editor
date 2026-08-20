@@ -1,24 +1,12 @@
-"""Minimal cgltf binding loaded directly from the selected Termin SDK.
-
-The current high-level ``termin-glb`` distribution declares the complete
-editor asset stack, including legacy tcgui.  Diffusion Editor only needs the
-native ``NativeDocument -> tmesh`` boundary, so this module loads that single
-extension from the trusted SDK wheelhouse until Termin provides a split wheel.
-"""
+"""Minimal facade over the installed Termin native cgltf binding."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-import importlib.util
 from pathlib import Path
-import tempfile
-import zipfile
-
-from .sdk_runtime import resolve_sdk
 
 
 _native_module = None
-_extraction_root: tempfile.TemporaryDirectory[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -40,38 +28,12 @@ class NativeBaseColorTexture:
 
 
 def _load_native_module():
-    global _native_module, _extraction_root
+    global _native_module
     if _native_module is not None:
         return _native_module
 
-    wheelhouse = resolve_sdk() / "wheels"
-    wheels = sorted(wheelhouse.glob("termin_glb-*.whl"))
-    if len(wheels) != 1:
-        raise RuntimeError(
-            "Expected exactly one termin_glb wheel in the selected SDK, got "
-            f"{len(wheels)} in {wheelhouse}"
-        )
-    with zipfile.ZipFile(wheels[0]) as archive:
-        members = [
-            name
-            for name in archive.namelist()
-            if name.startswith("termin/glb/_glb_native")
-            and (name.endswith(".so") or name.endswith(".pyd"))
-        ]
-        if len(members) != 1:
-            raise RuntimeError(
-                f"termin_glb wheel contains {len(members)} native bindings"
-            )
-        _extraction_root = tempfile.TemporaryDirectory(
-            prefix="diffusion-editor-glb-binding-"
-        )
-        extracted = Path(archive.extract(members[0], _extraction_root.name))
+    from termin.glb import _glb_native as module
 
-    spec = importlib.util.spec_from_file_location("_glb_native", extracted)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Cannot load cgltf binding from {extracted}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
     info = module.backend_info()
     if info.get("name") != "cgltf":
         raise RuntimeError(f"Unexpected Termin GLB backend: {info!r}")

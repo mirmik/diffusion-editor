@@ -56,6 +56,7 @@ def test_main_process_lock_excludes_unavailable_native_ml_stack():
         "tcbase",
         "termin-dispatch",
         "termin-display",
+        "termin-glb-native",
         "termin-gui-native",
         "termin-mcp",
         "tgfx",

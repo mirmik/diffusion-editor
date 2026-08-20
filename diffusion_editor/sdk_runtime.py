@@ -32,6 +32,7 @@ SUPPORTED_RUNTIME_MANIFEST_SCHEMAS = frozenset({3, 4})
 DIRECT_TERMIN_DISTRIBUTIONS = (
     "tcbase",
     "termin-dispatch",
+    "termin-glb-native",
     "termin-gui-native",
     "tgfx",
     "termin-display",
@@ -666,6 +667,7 @@ def verify_imports(contract: SdkContract) -> None:
     import termin.gui_native
     import termin.gui_native.window
     import termin.mcp
+    from termin.glb import _glb_native
     from termin.dispatch import Dispatcher
     from termin.display.window import WindowedGraphicsSession
     from termin.gui_native import OffscreenGuiComposition
@@ -687,6 +689,8 @@ def verify_imports(contract: SdkContract) -> None:
         raise SdkContractError(
             "Tgfx2Context.from_runtime is required by the windowed graphics contract"
         )
+    if _glb_native.backend_info().get("name") != "cgltf":
+        raise SdkContractError("termin-glb-native must provide the cgltf backend")
     for composition in (GuiWindowAdapter, OffscreenGuiComposition):
         if not callable(getattr(composition, "set_unhandled_key_handler", None)):
             raise SdkContractError(
@@ -699,6 +703,7 @@ def verify_imports(contract: SdkContract) -> None:
         termin.dispatch,
         termin.display,
         termin.display.window,
+        _glb_native,
         termin.gui_native,
         termin.gui_native.window,
         termin.mcp,

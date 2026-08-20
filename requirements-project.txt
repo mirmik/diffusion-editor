@@ -6,6 +6,7 @@
 tcbase
 termin-dispatch
 termin-display
+termin-glb-native
 termin-gui-native
 termin-mcp
 tgfx
