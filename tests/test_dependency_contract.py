@@ -105,6 +105,8 @@ def test_model_workers_share_one_exact_binary_only_lock_and_installer():
         "transformers==5.14.1",
         "accelerate==1.14.0",
         "peft==0.20.0",
+        "gguf==0.17.1",
+        "sentencepiece==0.2.1",
         "safetensors==0.8.0",
         "tokenizers==0.22.2",
     )
@@ -143,6 +145,14 @@ def test_model_workers_share_one_exact_binary_only_lock_and_installer():
         assert "2.10.0+cu128" in installer
         assert "0.25.0+cu128" in installer
         assert "ML_ACCELERATOR_RESOLVED" in installer
+        assert "requirements-workers-sensenova.txt" in installer
+        assert "sensenova-u1" in installer
+
+    sensenova_overlay = _requirements(
+        "requirements-workers-sensenova.txt")
+    assert len(sensenova_overlay) == 1
+    assert sensenova_overlay[0].startswith(
+        "sensenova-u1 @ https://github.com/OpenSenseNova/SenseNova-U1/")
 
     shell_installer = (PROJECT_ROOT / "setup-workers.sh").read_text(
         encoding="utf-8"

@@ -31,6 +31,9 @@ dtype, device, offload, VAE tiling или LoRA вызывает reload.
   По умолчанию используются 4 шага при найденной Lightning LoRA, иначе 40.
 - `flux2-klein-4b` — `Flux2KleinPipeline`, быстрый distilled профиль с четырьмя
   шагами.
+- `sensenova-u1.5-8b-mot-preview` — standalone `sensenova_u1` image-to-image
+  runtime с отдельными config/tokenizer и GGUF checkpoint. Локальный Q8 профиль
+  по умолчанию использует проверенные 8 шагов и output budget 1 MP.
 - `instruct-pix2pix` — совместимый legacy-профиль; он не удалён.
 
 Production worker импортирует только Diffusers/Transformers и не импортирует
@@ -57,6 +60,18 @@ processor, tokenizer, scheduler и VAE. Чтобы вернуться к пол�
 Это соответствует автоматической перестановке компонентов в проверенном
 ComfyUI workflow, но не включает послойную выгрузку transformer.
 
+SenseNova загружается через официальный `sensenova_u1`, а не через ComfyUI
+custom node. Параметр `Config / tokenizer directory` указывает на локальную
+директорию U1.5 либо Hugging Face ID, а `GGUF checkpoint` — на фактические
+квантованные веса. Доступны `full`, `fast`, `balanced` и `low` VRAM modes из
+официального layer-offload runtime. GGUF identity и effective parameters
+попадают в provenance.
+
+Upstream metadata `sensenova-u1` фиксирует reference Torch/Pillow строже, чем
+общий worker runtime. Поэтому пакет устанавливается без зависимостей в
+provider overlay внутри `.venv-workers`; совместимые `gguf`, `sentencepiece`,
+Torch, Transformers и Diffusers остаются частью проверяемого общего lock.
+
 ## Добавление следующей модели
 
 1. Добавить `ImageEditProfile` и перечислить все пользовательские и runtime
@@ -79,6 +94,17 @@ Opt-in проверка не входит в обычный pytest и не ск�
   --input input.png --output /tmp/flux-edit.png \
   --prompt "change only the car body" \
   --model /path/to/diffusers-pipeline --local-files-only
+```
+
+Локальный SenseNova Q8 smoke:
+
+```bash
+./venv/bin/python scripts/smoke-image-edit.py \
+  --profile sensenova-u1.5-8b-mot-preview \
+  --worker-python ./.venv-workers/bin/python \
+  --input input.png --output /tmp/sensenova-edit.png \
+  --prompt "repaint only the car body in deep crimson red" \
+  --steps 8 --seed 42015 --target-megapixels 1
 ```
 
 Без `--model` используется upstream model ID профиля. В таком режиме Diffusers

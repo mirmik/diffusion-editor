@@ -23,6 +23,12 @@ def _arguments() -> argparse.Namespace:
         choices=[profile.stable_id for profile in image_edit_profiles()],
         required=True,
     )
+    parser.add_argument(
+        "--preload-profile",
+        choices=[profile.stable_id for profile in image_edit_profiles()],
+        default=None,
+        help="Load this profile first to exercise backend switching/unload.",
+    )
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--prompt", required=True)
@@ -40,6 +46,15 @@ def _arguments() -> argparse.Namespace:
         default=None,
     )
     parser.add_argument("--lora-path", default=None)
+    parser.add_argument("--gguf-checkpoint", default=None)
+    parser.add_argument("--target-megapixels", type=float, default=None)
+    parser.add_argument("--cfg-scale", type=float, default=None)
+    parser.add_argument("--img-cfg-scale", type=float, default=None)
+    parser.add_argument("--timestep-shift", type=float, default=None)
+    parser.add_argument("--vram-mode", default=None)
+    parser.add_argument("--attention-backend", default=None)
+    parser.add_argument("--width", type=int, default=None)
+    parser.add_argument("--height", type=int, default=None)
     return parser.parse_args()
 
 
@@ -61,6 +76,15 @@ def main() -> int:
         "dtype": args.dtype,
         "device": args.device,
         "lora_path": args.lora_path,
+        "gguf_checkpoint": args.gguf_checkpoint,
+        "target_megapixels": args.target_megapixels,
+        "cfg_scale": args.cfg_scale,
+        "img_cfg_scale": args.img_cfg_scale,
+        "timestep_shift": args.timestep_shift,
+        "vram_mode": args.vram_mode,
+        "attention_backend": args.attention_backend,
+        "width": args.width,
+        "height": args.height,
     }.items():
         if value is not None and key in parameters:
             overrides[key] = value
@@ -68,6 +92,18 @@ def main() -> int:
     cancel = threading.Event()
     client = MlProcessClient(python=args.worker_python)
     try:
+        if args.preload_profile is not None:
+            preload = image_edit_profile(args.preload_profile)
+            print(f"Preloading {preload.title}...")
+            client.request(
+                "load_image_edit",
+                {
+                    "profile_id": preload.stable_id,
+                    "parameters": preload.defaults(),
+                },
+                cancel,
+                on_progress=print,
+            )
         loaded = client.request(
             "load_image_edit",
             {"profile_id": profile.stable_id, "parameters": parameters},

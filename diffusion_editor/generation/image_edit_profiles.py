@@ -12,6 +12,7 @@ from typing import Any, Iterable
 LEGACY_INSTRUCT_PROFILE_ID = "instruct-pix2pix"
 QWEN_IMAGE_EDIT_PROFILE_ID = "qwen-image-edit-2511"
 FLUX2_KLEIN_PROFILE_ID = "flux2-klein-4b"
+SENSENOVA_U15_PROFILE_ID = "sensenova-u1.5-8b-mot-preview"
 DEFAULT_IMAGE_EDIT_PROFILE_ID = QWEN_IMAGE_EDIT_PROFILE_ID
 
 
@@ -176,6 +177,25 @@ _FLUX_MODEL = os.environ.get(
     "DIFFUSION_EDITOR_FLUX2_KLEIN_MODEL",
     "black-forest-labs/FLUX.2-klein-4B",
 )
+_DEFAULT_SENSENOVA_MODEL = Path(
+    "~/soft/ComfyUI/models/sensenova/"
+    "SenseNova-U1.5-8B-MoT-Preview"
+).expanduser()
+_DEFAULT_SENSENOVA_GGUF = Path(
+    "~/soft/ComfyUI/models/gguf/"
+    "SenseNova-U1.5-8B-MoT-Preview-Q8.gguf"
+).expanduser()
+_SENSENOVA_MODEL = os.environ.get(
+    "DIFFUSION_EDITOR_SENSENOVA_MODEL",
+    str(_DEFAULT_SENSENOVA_MODEL)
+    if _DEFAULT_SENSENOVA_MODEL.is_dir()
+    else "sensenova/SenseNova-U1.5-8B-MoT-Preview",
+)
+_SENSENOVA_GGUF = os.environ.get(
+    "DIFFUSION_EDITOR_SENSENOVA_GGUF",
+    str(_DEFAULT_SENSENOVA_GGUF)
+    if _DEFAULT_SENSENOVA_GGUF.is_file() else "",
+)
 _DEFAULT_QWEN_LORA = Path(
     "~/soft/ComfyUI/models/loras/"
     "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
@@ -328,6 +348,132 @@ _PROFILES = (
                 "9,18,27", "Conditioning",
             ),
         ) + _runtime_parameters(_FLUX_MODEL),
+    ),
+    ImageEditProfile(
+        stable_id=SENSENOVA_U15_PROFILE_ID,
+        title="SenseNova U1.5 8B MoT (Q8)",
+        provider="sensenova_u1.it2i",
+        model_id=_SENSENOVA_MODEL,
+        description=(
+            "Unified multimodal GGUF editor with strong instruction "
+            "following and material rendering."
+        ),
+        parameters=(
+            ImageEditParameter(
+                "prompt", "Prompt", ParameterKind.TEXT, "", "Conditioning",
+                placeholder="Describe the requested edit",
+            ),
+            ImageEditParameter(
+                "cfg_scale", "CFG scale", ParameterKind.FLOAT,
+                4.0, "Sampling", 0.0, 20.0, 0.1, 2,
+            ),
+            ImageEditParameter(
+                "img_cfg_scale", "Image CFG scale", ParameterKind.FLOAT,
+                1.0, "Sampling", 0.0, 20.0, 0.1, 2,
+            ),
+            ImageEditParameter(
+                "cfg_norm", "CFG normalization", ParameterKind.CHOICE,
+                "none", "Sampling",
+                choices=(
+                    _choice("none"), _choice("global"), _choice("channel"),
+                ),
+            ),
+            ImageEditParameter(
+                "timestep_shift", "Timestep shift", ParameterKind.FLOAT,
+                3.0, "Sampling", 0.0, 20.0, 0.1, 2,
+            ),
+            ImageEditParameter(
+                "cfg_interval_start", "CFG interval start",
+                ParameterKind.FLOAT, 0.0, "Sampling", 0.0, 1.0, 0.05, 2,
+            ),
+            ImageEditParameter(
+                "cfg_interval_end", "CFG interval end",
+                ParameterKind.FLOAT, 1.0, "Sampling", 0.0, 1.0, 0.05, 2,
+            ),
+            ImageEditParameter(
+                "steps", "Steps", ParameterKind.INTEGER,
+                8, "Sampling", 1, 100, 1,
+            ),
+            ImageEditParameter(
+                "seed", "Seed", ParameterKind.INTEGER, -1, "Sampling",
+                -1, 2**32 - 1, 1,
+            ),
+            ImageEditParameter(
+                "width", "Width (0 = auto)", ParameterKind.INTEGER,
+                0, "Output", 0, 8192, 32,
+            ),
+            ImageEditParameter(
+                "height", "Height (0 = auto)", ParameterKind.INTEGER,
+                0, "Output", 0, 8192, 32,
+            ),
+            ImageEditParameter(
+                "target_megapixels", "Auto-size megapixels",
+                ParameterKind.FLOAT, 1.0, "Output", 0.25, 32.0, 0.25, 2,
+            ),
+            ImageEditParameter(
+                "model", "Config / tokenizer directory",
+                ParameterKind.STRING, _SENSENOVA_MODEL, "Model",
+                placeholder="Hugging Face ID or local directory",
+                load_time=True,
+            ),
+            ImageEditParameter(
+                "gguf_checkpoint", "GGUF checkpoint",
+                ParameterKind.STRING, _SENSENOVA_GGUF, "Model",
+                placeholder="Absolute path to SenseNova GGUF weights",
+                load_time=True,
+            ),
+            ImageEditParameter(
+                "dtype", "Compute dtype", ParameterKind.CHOICE,
+                "bfloat16", "Runtime",
+                choices=(
+                    _choice("bfloat16"), _choice("float16"),
+                    _choice("float32"),
+                ),
+                load_time=True,
+            ),
+            ImageEditParameter(
+                "device", "Device", ParameterKind.CHOICE,
+                "cuda", "Runtime",
+                choices=(_choice("cuda"), _choice("cpu")),
+                load_time=True,
+            ),
+            ImageEditParameter(
+                "attention_backend", "Attention backend",
+                ParameterKind.CHOICE, "auto", "Runtime",
+                choices=(
+                    _choice("auto"), _choice("sdpa"), _choice("flash"),
+                ),
+                load_time=True,
+            ),
+            ImageEditParameter(
+                "vram_mode", "VRAM mode", ParameterKind.CHOICE,
+                "full", "Runtime",
+                choices=tuple(_choice(value) for value in (
+                    "full", "fast", "balanced", "low")),
+                load_time=True,
+            ),
+            ImageEditParameter(
+                "fast_vram_fraction", "Fast VRAM fraction",
+                ParameterKind.FLOAT, 0.9, "Runtime", 0.1, 1.0, 0.05, 2,
+                load_time=True,
+            ),
+            ImageEditParameter(
+                "fast_vram_headroom_gib", "Fast VRAM headroom (GiB)",
+                ParameterKind.FLOAT, 2.0, "Runtime", 0.0, 64.0, 0.5, 1,
+                load_time=True,
+            ),
+            ImageEditParameter(
+                "fast_activation_reserve_gib",
+                "Fast activation reserve (GiB)",
+                ParameterKind.FLOAT, 4.0, "Runtime", 0.0, 64.0, 0.5, 1,
+                load_time=True,
+            ),
+            ImageEditParameter(
+                "fast_vram_budget_gib", "Fast VRAM budget (GiB, 0 = auto)",
+                ParameterKind.FLOAT, 0.0, "Runtime", 0.0, 128.0, 0.5, 1,
+                load_time=True,
+            ),
+        ),
     ),
     ImageEditProfile(
         stable_id=LEGACY_INSTRUCT_PROFILE_ID,

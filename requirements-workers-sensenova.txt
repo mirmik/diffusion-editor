@@ -1,0 +1,5 @@
+# Installed into an isolated provider overlay because the upstream package's
+# reference-environment metadata pins Torch/Pillow versions that are stricter
+# than its runtime compatibility. Keep this aligned with the verified ComfyUI
+# node release without exposing ComfyUI itself to the production worker.
+sensenova-u1 @ https://github.com/OpenSenseNova/SenseNova-U1/archive/refs/tags/comfyui-v0.2.0.tar.gz

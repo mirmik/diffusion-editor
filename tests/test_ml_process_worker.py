@@ -21,6 +21,7 @@ from diffusion_editor.generation.types import (
 from diffusion_editor.generation.image_edit_profiles import (
     FLUX2_KLEIN_PROFILE_ID,
     QWEN_IMAGE_EDIT_PROFILE_ID,
+    SENSENOVA_U15_PROFILE_ID,
     image_edit_profile,
 )
 from diffusion_editor.grounding.types import GroundingParams, GroundingRequest
@@ -150,7 +151,11 @@ def test_fake_worker_smokes_all_three_model_families_without_main_imports():
 
 @pytest.mark.parametrize(
     "profile_id",
-    [QWEN_IMAGE_EDIT_PROFILE_ID, FLUX2_KLEIN_PROFILE_ID],
+    [
+        QWEN_IMAGE_EDIT_PROFILE_ID,
+        FLUX2_KLEIN_PROFILE_ID,
+        SENSENOVA_U15_PROFILE_ID,
+    ],
 )
 def test_fake_worker_smokes_image_edit_profiles(profile_id):
     client = _client()

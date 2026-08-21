@@ -31,6 +31,8 @@ fsspec==2026.6.0
     # via
     #   huggingface-hub
     #   torch
+gguf==0.17.1
+    # via -r requirements-workers.in
 h11==0.16.0
     # via httpcore
 hf-xet==1.5.2
@@ -168,6 +170,8 @@ scipy==1.17.1
     #   pymatting
     #   rembg
     #   scikit-image
+sentencepiece==0.2.1
+    # via -r requirements-workers.in
 setuptools==83.0.0
     # via torch
 shellingham==1.5.4

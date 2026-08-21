@@ -10,6 +10,7 @@ from diffusion_editor.generation.image_edit_profiles import (
     FLUX2_KLEIN_PROFILE_ID,
     LEGACY_INSTRUCT_PROFILE_ID,
     QWEN_IMAGE_EDIT_PROFILE_ID,
+    SENSENOVA_U15_PROFILE_ID,
     all_image_edit_parameters,
     image_edit_profile,
     image_edit_profiles,
@@ -34,6 +35,7 @@ def test_builtin_profiles_are_stable_and_declarative():
     assert [profile.stable_id for profile in profiles] == [
         QWEN_IMAGE_EDIT_PROFILE_ID,
         FLUX2_KLEIN_PROFILE_ID,
+        SENSENOVA_U15_PROFILE_ID,
         LEGACY_INSTRUCT_PROFILE_ID,
     ]
     assert profiles[0].primary
@@ -60,6 +62,21 @@ def test_qwen_prefers_installed_scaled_fp8_components():
         defaults["transformer_checkpoint"])
     assert image_edit_profile(
         FLUX2_KLEIN_PROFILE_ID).defaults()["cpu_offload"] is False
+
+
+def test_sensenova_prefers_installed_config_and_gguf():
+    profile = image_edit_profile(SENSENOVA_U15_PROFILE_ID)
+    defaults = profile.defaults()
+
+    assert profile.provider == "sensenova_u1.it2i"
+    assert defaults["model"]
+    assert defaults["gguf_checkpoint"]
+    assert defaults["gguf_checkpoint"].endswith(
+        "SenseNova-U1.5-8B-MoT-Preview-Q8.gguf")
+    assert defaults["steps"] == 8
+    assert defaults["cfg_scale"] == 4.0
+    assert defaults["img_cfg_scale"] == 1.0
+    assert defaults["target_megapixels"] == 1.0
 
 
 def test_pre_fp8_qwen_store_adopts_new_component_offload_default():

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+import gc
 import os
 import json
 from pathlib import Path
@@ -26,6 +28,7 @@ from ..generation.image_edit_profiles import (
     FLUX2_KLEIN_PROFILE_ID,
     LEGACY_INSTRUCT_PROFILE_ID,
     QWEN_IMAGE_EDIT_PROFILE_ID,
+    SENSENOVA_U15_PROFILE_ID,
     image_edit_profile,
     parse_float_list,
     parse_int_tuple,
@@ -168,6 +171,7 @@ class RealMlBackend:
         }
 
     def unload_diffusion(self) -> None:
+        pipe = self._diffusion_pipe
         self._diffusion_pipe = None
         self._diffusion_path = None
         self._diffusion_mode = None
@@ -177,12 +181,31 @@ class RealMlBackend:
         self._diffusion_dtype = None
         self._ip_adapter_loaded = False
         self._ip_adapter_identity = None
+        del pipe
+        self._release_accelerator_memory()
+
+    @staticmethod
+    def _release_accelerator_memory() -> None:
+        """Drop cyclic model references before returning cached CUDA blocks."""
+
+        gc.collect()
         try:
             import torch
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
         except ImportError:
             pass
+
+    def unload_image_edit(self) -> None:
+        pipe = self._instruct_pipe
+        self._instruct_pipe = None
+        self._instruct_identity = None
+        self._instruct_warnings = ()
+        self._instruct_device = None
+        self._instruct_dtype = None
+        self._image_edit_profile_id = None
+        del pipe
+        self._release_accelerator_memory()
 
     def load_ip_adapter(self) -> dict[str, Any]:
         if self._diffusion_pipe is None:
@@ -354,7 +377,7 @@ class RealMlBackend:
         device = self._device(str(parameters["device"]))
         dtype = self._configured_dtype(str(parameters["dtype"]), device)
         model = str(parameters["model"])
-        revision = str(parameters["revision"]).strip() or None
+        revision = str(parameters.get("revision", "")).strip() or None
         if Path(model).expanduser().exists():
             candidate = Path(model).expanduser().absolute()
             model_path = str(candidate)
@@ -377,12 +400,38 @@ class RealMlBackend:
                 "huggingface", model, revision=revision)
             identity_warnings = enforce_model_identity_policy(
                 identity, ModelIdentityPolicy.WARN.value)
+        if profile_id == SENSENOVA_U15_PROFILE_ID:
+            config_identity = identity
+            config_warnings = identity_warnings
+            gguf_checkpoint = str(
+                parameters["gguf_checkpoint"]).strip()
+            if not gguf_checkpoint:
+                raise ValueError(
+                    "SenseNova GGUF checkpoint path cannot be empty")
+            identity, identity_warnings = resolve_local_model_identity(
+                gguf_checkpoint,
+                policy=ModelIdentityPolicy.WARN,
+            )
+            identity = replace(
+                identity,
+                extensions=FrozenJsonObject.capture({
+                    "config_identity": config_identity.to_dict(),
+                }),
+            )
+            identity_warnings = tuple(
+                [*identity_warnings, *config_warnings])
+        # A second heavyweight pipeline must never overlap the currently
+        # loaded one in RAM/VRAM.  Keep the backend truthfully unloaded if any
+        # part of the new load fails after this point.
+        self.unload_image_edit()
         load_kwargs: dict[str, Any] = {
             "torch_dtype": dtype,
-            "local_files_only": bool(parameters["local_files_only"]),
+            "local_files_only": bool(
+                parameters.get("local_files_only", False)),
         }
         if revision is not None:
             load_kwargs["revision"] = revision
+        component_mode = "upstream"
         if profile_id == QWEN_IMAGE_EDIT_PROFILE_ID:
             transformer_path = str(
                 parameters["transformer_checkpoint"]).strip()
@@ -393,14 +442,14 @@ class RealMlBackend:
                     "Qwen local FP8 loading requires both Transformer "
                     "checkpoint and Text encoder checkpoint"
                 )
-            component_mode = "upstream"
             if transformer_path:
                 transformer, text_encoder = self._load_qwen_fp8_components(
                     model,
                     transformer_path=transformer_path,
                     text_encoder_path=text_encoder_path,
                     revision=revision,
-                    local_files_only=bool(parameters["local_files_only"]),
+                    local_files_only=bool(
+                        parameters.get("local_files_only", False)),
                 )
                 load_kwargs.update(
                     transformer=transformer,
@@ -423,6 +472,26 @@ class RealMlBackend:
                 )
         elif profile_id == FLUX2_KLEIN_PROFILE_ID:
             pipe = Flux2KleinPipeline.from_pretrained(model, **load_kwargs)
+        elif profile_id == SENSENOVA_U15_PROFILE_ID:
+            from .sensenova_image_edit import SenseNovaImageEditPipeline
+
+            pipe = SenseNovaImageEditPipeline(
+                model_path=model,
+                gguf_checkpoint=str(parameters["gguf_checkpoint"]),
+                device=device,
+                dtype=str(parameters["dtype"]),
+                attention_backend=str(parameters["attention_backend"]),
+                vram_mode=str(parameters["vram_mode"]),
+                fast_vram_fraction=float(
+                    parameters["fast_vram_fraction"]),
+                fast_vram_headroom_gib=float(
+                    parameters["fast_vram_headroom_gib"]),
+                fast_activation_reserve_gib=float(
+                    parameters["fast_activation_reserve_gib"]),
+                fast_vram_budget_gib=float(
+                    parameters["fast_vram_budget_gib"]),
+            )
+            component_mode = "gguf"
         elif profile_id == LEGACY_INSTRUCT_PROFILE_ID:
             pipe = StableDiffusionInstructPix2PixPipeline.from_pretrained(
                 model, safety_checker=None, **load_kwargs)
@@ -430,14 +499,15 @@ class RealMlBackend:
                 pipe.scheduler.config)
         else:  # protected by image_edit_profile; keeps type narrowing explicit
             raise ValueError(f"Unsupported image edit profile: {profile_id}")
-        if bool(parameters["vae_tiling"]):
-            pipe.vae.enable_tiling()
-        if bool(parameters["cpu_offload"]):
-            if device != "cuda":
-                raise ValueError("CPU offload requires the CUDA device")
-            pipe.enable_model_cpu_offload()
-        else:
-            pipe.to(device)
+        if profile_id != SENSENOVA_U15_PROFILE_ID:
+            if bool(parameters["vae_tiling"]):
+                pipe.vae.enable_tiling()
+            if bool(parameters["cpu_offload"]):
+                if device != "cuda":
+                    raise ValueError("CPU offload requires the CUDA device")
+                pipe.enable_model_cpu_offload()
+            else:
+                pipe.to(device)
         self._instruct_pipe = pipe
         self._instruct_identity = identity
         self._instruct_warnings = identity_warnings
@@ -451,11 +521,7 @@ class RealMlBackend:
             "device": device,
             "dtype": self._instruct_dtype,
             "pipeline": type(pipe).__name__,
-            "component_mode": (
-                component_mode
-                if profile_id == QWEN_IMAGE_EDIT_PROFILE_ID
-                else "upstream"
-            ),
+            "component_mode": component_mode,
             "model_identity": identity.to_dict(),
             "warnings": list(identity_warnings),
         }
@@ -541,6 +607,11 @@ class RealMlBackend:
         profile = image_edit_profile(profile_id)
         parameters = profile.normalize(data.get("parameters"))
         seed = self._resolve_seed(int(parameters["seed"]))
+        if profile_id == SENSENOVA_U15_PROFILE_ID:
+            result = self._instruct_pipe.edit(image, parameters, seed)
+            provenance = self._image_edit_provenance(
+                profile_id, parameters, seed, result.size)
+            return result, seed, provenance.to_dict()
         generator = torch.Generator(device="cpu").manual_seed(seed)
         kwargs: dict[str, Any] = {
             "prompt": str(parameters["prompt"]),
@@ -721,12 +792,23 @@ class RealMlBackend:
             runtime=FrozenJsonObject.capture({
                 "pipeline": type(self._instruct_pipe).__name__,
                 "model_profile_id": profile_id,
-                "scheduler": type(self._instruct_pipe.scheduler).__name__,
+                "scheduler": (
+                    type(self._instruct_pipe.scheduler).__name__
+                    if getattr(self._instruct_pipe, "scheduler", None)
+                    is not None else None
+                ),
                 "device": self._instruct_device,
                 "dtype": self._instruct_dtype,
                 "torch_version": self._package_version("torch"),
                 "diffusers_version": self._package_version("diffusers"),
                 "transformers_version": self._package_version("transformers"),
+                "sensenova_u1_version": self._package_version(
+                    "sensenova-u1"),
+                "gguf_version": self._package_version("gguf"),
+                "provider_runtime": (
+                    self._instruct_pipe.runtime_info
+                    if hasattr(self._instruct_pipe, "runtime_info") else {}
+                ),
             }),
             warnings=self._instruct_warnings,
         )

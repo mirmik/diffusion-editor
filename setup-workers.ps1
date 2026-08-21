@@ -12,6 +12,7 @@ $Bootstrap = if ($env:WORKERS_BOOTSTRAP_PYTHON) {
 $BootstrapArgs = if ($env:WORKERS_BOOTSTRAP_PYTHON) { @() } else { @("-3.11") }
 $Accelerator = if ($env:ML_ACCELERATOR) { $env:ML_ACCELERATOR } else { "auto" }
 $WorkersPython = Join-Path $WorkersVenv "Scripts/python.exe"
+$SenseNovaOverlay = Join-Path $WorkersVenv "share/diffusion-editor/sensenova-u1"
 
 if ($Accelerator -eq "auto") {
     $NvidiaSmi = Get-Command nvidia-smi -ErrorAction SilentlyContinue
@@ -86,17 +87,30 @@ if ($Accelerator -eq "cpu") {
         "torchvision==$($env:ML_TORCHVISION_VERSION)"
 }
 
+& $WorkersPython -m pip install --upgrade --no-deps `
+    --target $SenseNovaOverlay `
+    -r requirements-workers-sensenova.txt
+
 & $WorkersPython -m pip check
 $env:ML_ACCELERATOR_RESOLVED = $Accelerator
+$PreviousPythonPath = $env:PYTHONPATH
+$env:PYTHONPATH = if ($PreviousPythonPath) {
+    "$SenseNovaOverlay$([IO.Path]::PathSeparator)$PreviousPythonPath"
+} else {
+    $SenseNovaOverlay
+}
 & $WorkersPython -c @'
 from diffusion_editor.workers.lama_model import LamaModel
 import accelerate
 import cv2
 import diffusers
+import gguf
 import onnxruntime
 import peft
 import rembg
 import safetensors
+import sensenova_u1
+import sentencepiece
 import tokenizers
 import torch
 import torchvision
@@ -118,9 +132,11 @@ print(
     f"opencv={cv2.__version__}",
     f"onnxruntime={onnxruntime.__version__}",
     f"peft={peft.__version__}",
+    f"sensenova_u1={sensenova_u1.__version__}",
     f"diffusers={diffusers.__version__}",
     f"transformers={transformers.__version__}",
 )
 '@
+$env:PYTHONPATH = $PreviousPythonPath
 
 Write-Host "All model workers installed at $WorkersVenv"

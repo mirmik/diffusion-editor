@@ -12,6 +12,7 @@ WORKERS_BOOTSTRAP_PYTHON="$(
 )"
 ML_ACCELERATOR="${ML_ACCELERATOR:-auto}"
 WORKERS_PYTHON="$WORKERS_VENV/bin/python"
+SENSENOVA_OVERLAY="$WORKERS_VENV/share/diffusion-editor/sensenova-u1"
 
 if [ "$ML_ACCELERATOR" = auto ]; then
     if [ -r /proc/driver/nvidia/version ]; then
@@ -74,16 +75,24 @@ else
         "torchvision==$ML_TORCHVISION_VERSION"
 fi
 
+"$WORKERS_PYTHON" -m pip install --upgrade --no-deps \
+    --target "$SENSENOVA_OVERLAY" \
+    -r requirements-workers-sensenova.txt
+
 "$WORKERS_PYTHON" -m pip check
+PYTHONPATH="$SENSENOVA_OVERLAY${PYTHONPATH:+:$PYTHONPATH}" \
 ML_ACCELERATOR_RESOLVED="$ML_ACCELERATOR" "$WORKERS_PYTHON" -c '
 from diffusion_editor.workers.lama_model import LamaModel
 import accelerate
 import cv2
 import diffusers
+import gguf
 import onnxruntime
 import peft
 import rembg
 import safetensors
+import sensenova_u1
+import sentencepiece
 import tokenizers
 import torch
 import torchvision
@@ -105,6 +114,7 @@ print(
     f"opencv={cv2.__version__}",
     f"onnxruntime={onnxruntime.__version__}",
     f"peft={peft.__version__}",
+    f"sensenova_u1={sensenova_u1.__version__}",
     f"diffusers={diffusers.__version__}",
     f"transformers={transformers.__version__}",
 )
