@@ -479,12 +479,21 @@ def capture_tool_state(tool: object | None) -> RequestProvenance:
             ),
         })
     elif kind == "instruct":
-        parameters.update({
-            "instruction": str(getattr(tool, "instruction", "")),
-            "image_guidance_scale": float(getattr(
-                tool, "image_guidance_scale", 0.0)),
-            "guidance_scale": float(getattr(tool, "guidance_scale", 0.0)),
-            "steps": int(getattr(tool, "steps", 0)),
-            "seed": int(getattr(tool, "seed", -1)),
-        })
+        profile_parameters = getattr(tool, "profile_parameters", None)
+        if isinstance(profile_parameters, dict):
+            parameters.update({
+                "model_profile_id": str(getattr(
+                    tool, "model_profile_id", "instruct-pix2pix")),
+                "profile_parameters": profile_parameters,
+            })
+        else:
+            parameters.update({
+                "instruction": str(getattr(tool, "instruction", "")),
+                "image_guidance_scale": float(getattr(
+                    tool, "image_guidance_scale", 0.0)),
+                "guidance_scale": float(getattr(
+                    tool, "guidance_scale", 0.0)),
+                "steps": int(getattr(tool, "steps", 0)),
+                "seed": int(getattr(tool, "seed", -1)),
+            })
     return RequestProvenance.capture(f"{kind}_tool_state", parameters)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import copy
 from enum import Enum
 import os
 import random
@@ -14,13 +15,18 @@ from ..document.commands import (
     ClearLayerMaskCommand,
     SetIpAdapterReferenceLayerCommand,
     UpdateDiffusionToolCommand,
-    UpdateInstructToolCommand,
+    UpdateImageEditToolCommand,
 )
 from ..document.change_event import DocumentChangeEvent
 from ..document.layer import Layer
 from ..document.tool import DiffusionTool, InstructTool, LamaTool
 from .application import EditorApplication
 from .presentation import PanelUpdate
+from ..generation.image_edit_profiles import (
+    ImageEditParameter,
+    image_edit_profile,
+    image_edit_profiles,
+)
 
 
 class GenerationPanelKind(str, Enum):
@@ -59,6 +65,8 @@ class GenerationAction(str, Enum):
     SET_IP_SCALE = "set_ip_scale"
     SET_INSTRUCTION = "set_instruction"
     SET_IMAGE_GUIDANCE = "set_image_guidance"
+    SELECT_IMAGE_EDIT_PROFILE = "select_image_edit_profile"
+    SET_IMAGE_EDIT_PARAMETER = "set_image_edit_parameter"
     SET_MASK_SIZE = "set_mask_size"
     SET_MASK_HARDNESS = "set_mask_hardness"
     SET_MASK_FLOW = "set_mask_flow"
@@ -128,6 +136,12 @@ class InstructPanelState:
     phase: GenerationPhase = GenerationPhase.IDLE
     message: str = "Not loaded"
     layer_info: str = "No instruct layer selected"
+    model_profile_id: str = "instruct-pix2pix"
+    model_profiles: tuple[ReferenceChoice, ...] = ()
+    profile_description: str = ""
+    parameters: tuple[ImageEditParameter, ...] = ()
+    parameter_values: dict[str, object] | None = None
+    profile_parameters: dict[str, dict] | None = None
 
 
 @dataclass(frozen=True)
@@ -269,7 +283,11 @@ class GenerationPanelsCoordinator:
                 self._instruct_message = f"Error: {message[:60]}"
             elif update.state == "model-loaded":
                 self._instruct_phase = GenerationPhase.READY
-                self._instruct_message = "Loaded: instruct-pix2pix"
+                profile_id = str(update.payload.get("profile_id", ""))
+                self._instruct_message = (
+                    f"Loaded: {image_edit_profile(profile_id).title}"
+                    if profile_id else "Model loaded"
+                )
             elif update.state == "running":
                 self._instruct_phase = GenerationPhase.RUNNING
                 self._instruct_message = str(
@@ -312,7 +330,9 @@ class GenerationPanelsCoordinator:
                 self._edit_instruct(layer, action, value)
         elif action in {
                 GenerationAction.SET_INSTRUCTION,
-                GenerationAction.SET_IMAGE_GUIDANCE}:
+                GenerationAction.SET_IMAGE_GUIDANCE,
+                GenerationAction.SELECT_IMAGE_EDIT_PROFILE,
+                GenerationAction.SET_IMAGE_EDIT_PARAMETER}:
             self._edit_instruct(layer, action, value)
         elif action == GenerationAction.RANDOM_SEED:
             self._set_random_seed(layer)
@@ -487,15 +507,29 @@ class GenerationPanelsCoordinator:
             return InstructPanelState(
                 phase=self._instruct_phase,
                 message=self._instruct_message,
+                model_profiles=tuple(
+                    ReferenceChoice(profile.stable_id, profile.title)
+                    for profile in image_edit_profiles()),
             )
         cached = self._instruct_drafts.get(layer.id)
         if cached is None or cached[0] != id(tool):
+            profile = image_edit_profile(tool.model_profile_id)
+            values = copy.deepcopy(tool.parameters)
             draft = InstructPanelState(
-                instruction=tool.instruction,
-                image_guidance_scale=tool.image_guidance_scale,
-                guidance_scale=tool.guidance_scale,
-                steps=tool.steps,
-                seed_text=str(tool.seed),
+                instruction=str(values.get("prompt", "")),
+                image_guidance_scale=float(
+                    values.get("image_guidance_scale", 1.5)),
+                guidance_scale=float(values.get("guidance_scale", 1.0)),
+                steps=int(values.get("steps", 4)),
+                seed_text=str(values.get("seed", -1)),
+                model_profile_id=profile.stable_id,
+                model_profiles=tuple(
+                    ReferenceChoice(item.stable_id, item.title)
+                    for item in image_edit_profiles()),
+                profile_description=profile.description,
+                parameters=profile.parameters,
+                parameter_values=values,
+                profile_parameters=copy.deepcopy(tool.profile_parameters),
             )
         else:
             draft = cached[1]
@@ -554,24 +588,87 @@ class GenerationPanelsCoordinator:
         if layer is None or not isinstance(layer.tool, InstructTool):
             return
         state = self._instruct_state(layer, layer.tool)
-        if action == GenerationAction.SET_INSTRUCTION:
-            state = replace(state, instruction=str(value))
+        stores = copy.deepcopy(state.profile_parameters or {})
+        profile_id = state.model_profile_id
+        values = copy.deepcopy(state.parameter_values or {})
+        if action == GenerationAction.SELECT_IMAGE_EDIT_PROFILE:
+            profile_id = str(value)
+            profile = image_edit_profile(profile_id)
+            values = profile.normalize(stores.get(profile_id))
+            stores[profile_id] = values
+            state = replace(
+                state,
+                model_profile_id=profile_id,
+                profile_description=profile.description,
+                parameters=profile.parameters,
+                parameter_values=values,
+                profile_parameters=stores,
+                instruction=str(values.get("prompt", "")),
+                image_guidance_scale=float(
+                    values.get("image_guidance_scale", 1.5)),
+                guidance_scale=float(values.get("guidance_scale", 1.0)),
+                steps=int(values.get("steps", 4)),
+                seed_text=str(values.get("seed", -1)),
+            )
+        elif action == GenerationAction.SET_IMAGE_EDIT_PARAMETER:
+            if not isinstance(value, (tuple, list)) or len(value) != 2:
+                return
+            parameter_id, raw = str(value[0]), value[1]
+            parameter = image_edit_profile(profile_id).parameter(parameter_id)
+            values[parameter_id] = parameter.normalize(raw)
+            stores[profile_id] = values
+            state = replace(
+                state,
+                parameter_values=values,
+                profile_parameters=stores,
+                instruction=str(values.get("prompt", "")),
+                image_guidance_scale=float(
+                    values.get("image_guidance_scale", 1.5)),
+                guidance_scale=float(values.get("guidance_scale", 1.0)),
+                steps=int(values.get("steps", 4)),
+                seed_text=str(values.get("seed", -1)),
+            )
+        elif action == GenerationAction.SET_INSTRUCTION:
+            values["prompt"] = str(value)
+            stores[profile_id] = values
+            state = replace(
+                state, instruction=str(value), parameter_values=values,
+                profile_parameters=stores)
         elif action == GenerationAction.SET_IMAGE_GUIDANCE:
             state = replace(
                 state,
                 image_guidance_scale=max(
                     1.0, min(float(value), 3.0)),
             )
+            values["image_guidance_scale"] = state.image_guidance_scale
+            stores[profile_id] = values
+            state = replace(state, parameter_values=values,
+                            profile_parameters=stores)
         elif action == GenerationAction.SET_GUIDANCE:
             state = replace(
                 state,
                 guidance_scale=max(1.0, min(float(value), 20.0)),
             )
+            values["guidance_scale"] = state.guidance_scale
+            stores[profile_id] = values
+            state = replace(state, parameter_values=values,
+                            profile_parameters=stores)
         elif action == GenerationAction.SET_STEPS:
             state = replace(
                 state, steps=max(1, min(int(value), 50)))
+            values["steps"] = state.steps
+            stores[profile_id] = values
+            state = replace(state, parameter_values=values,
+                            profile_parameters=stores)
         elif action == GenerationAction.SET_SEED:
             state = replace(state, seed_text=str(value))
+            try:
+                values["seed"] = int(value)
+            except (TypeError, ValueError):
+                pass
+            stores[profile_id] = values
+            state = replace(state, parameter_values=values,
+                            profile_parameters=stores)
         self._instruct_drafts[layer.id] = (id(layer.tool), state)
 
     def _set_random_seed(self, layer: Layer | None) -> None:
@@ -583,8 +680,17 @@ class GenerationPanelsCoordinator:
                 layer, GenerationAction.SET_SEED, seed)
         elif isinstance(layer.tool, InstructTool):
             state = self._instruct_state(layer, layer.tool)
+            stores = copy.deepcopy(state.profile_parameters or {})
+            values = copy.deepcopy(state.parameter_values or {})
+            values["seed"] = int(seed)
+            stores[state.model_profile_id] = values
             self._instruct_drafts[layer.id] = (
-                id(layer.tool), replace(state, seed_text=seed))
+                id(layer.tool), replace(
+                    state,
+                    seed_text=seed,
+                    parameter_values=values,
+                    profile_parameters=stores,
+                ))
 
     def _load_model(self, layer: Layer | None) -> None:
         if isinstance(getattr(layer, "tool", None), DiffusionTool):
@@ -600,8 +706,11 @@ class GenerationPanelsCoordinator:
                 self._diffusion_message = event.status
                 self._handle_immediate_status(event.status)
         elif isinstance(getattr(layer, "tool", None), InstructTool):
-            event = (
-                self._application.instruct_controller.submit_load_model())
+            draft = self._instruct_state(layer, layer.tool)
+            event = self._application.instruct_controller.submit_load_model(
+                draft.model_profile_id,
+                dict(draft.parameter_values or {}),
+            )
             if event.model_loading:
                 self._instruct_phase = GenerationPhase.LOADING
                 self._instruct_message = event.status or "Loading..."
@@ -659,17 +768,26 @@ class GenerationPanelsCoordinator:
         elif isinstance(layer.tool, InstructTool):
             draft = self._instruct_state(layer, layer.tool)
             seed = self._parse_seed(draft.seed_text)
+            stores = copy.deepcopy(draft.profile_parameters or {})
+            values = copy.deepcopy(draft.parameter_values or {})
             if seed < 0:
                 seed = self._random_seed()
-                state = replace(draft, seed_text=str(seed))
+                values["seed"] = seed
+                stores[draft.model_profile_id] = values
+                state = replace(
+                    draft,
+                    seed_text=str(seed),
+                    parameter_values=values,
+                    profile_parameters=stores,
+                )
                 self._instruct_drafts[layer.id] = (id(layer.tool), state)
-            self._document.execute(UpdateInstructToolCommand(
+            else:
+                values["seed"] = seed
+                stores[draft.model_profile_id] = values
+            self._document.execute(UpdateImageEditToolCommand(
                 layer=layer,
-                instruction=draft.instruction,
-                image_guidance_scale=draft.image_guidance_scale,
-                guidance_scale=draft.guidance_scale,
-                steps=draft.steps,
-                seed=seed,
+                model_profile_id=draft.model_profile_id,
+                profile_parameters=stores,
             ))
             current = self._stack.find_layer_by_id(layer.id)
             if current is None:

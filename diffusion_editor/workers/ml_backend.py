@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 import secrets
 from typing import Any, Callable
@@ -20,6 +21,14 @@ from ..generation.provenance import (
     enforce_model_identity_policy,
     floating_model_identity,
     resolve_local_model_identity,
+)
+from ..generation.image_edit_profiles import (
+    FLUX2_KLEIN_PROFILE_ID,
+    LEGACY_INSTRUCT_PROFILE_ID,
+    QWEN_IMAGE_EDIT_PROFILE_ID,
+    image_edit_profile,
+    parse_float_list,
+    parse_int_tuple,
 )
 
 
@@ -46,6 +55,7 @@ class RealMlBackend:
         self._instruct_warnings: tuple[str, ...] = ()
         self._instruct_device: str | None = None
         self._instruct_dtype: str | None = None
+        self._image_edit_profile_id: str | None = None
         self._dino_model = None
         self._dino_processor = None
         self._dino_key: tuple[str, str] | None = None
@@ -76,6 +86,22 @@ class RealMlBackend:
         import torch
 
         return torch.float16 if device == "cuda" else torch.float32
+
+    @staticmethod
+    def _configured_dtype(name: str, device: str):
+        import torch
+
+        values = {
+            "bfloat16": torch.bfloat16,
+            "float16": torch.float16,
+            "float32": torch.float32,
+        }
+        dtype = values.get(str(name))
+        if dtype is None:
+            raise ValueError(f"Unsupported image edit dtype: {name}")
+        if device == "cpu" and dtype == torch.float16:
+            raise ValueError("float16 image edit inference is not supported on CPU")
+        return dtype
 
     def load_diffusion(self, data: dict[str, Any]) -> dict[str, Any]:
         import torch
@@ -314,76 +340,283 @@ class RealMlBackend:
             raise ValueError("seed must be -1 or an unsigned 32-bit integer")
         return request_seed
 
-    def load_instruct(self, data: dict[str, Any]) -> dict[str, Any]:
+    def load_image_edit(self, data: dict[str, Any]) -> dict[str, Any]:
         from diffusers import (
             EulerAncestralDiscreteScheduler,
+            Flux2KleinPipeline,
+            QwenImageEditPlusPipeline,
             StableDiffusionInstructPix2PixPipeline,
         )
 
-        device = self._device(data.get("device"))
-        identity = floating_model_identity(
-            "huggingface",
-            "timbrooks/instruct-pix2pix",
-            revision=(
-                str(data["revision"])
-                if data.get("revision") is not None else None
-            ),
-        )
-        identity_warnings = enforce_model_identity_policy(
-            identity,
-            data.get(
-                "model_identity_policy",
-                ModelIdentityPolicy.WARN.value,
-            ),
-        )
-        pipe = StableDiffusionInstructPix2PixPipeline.from_pretrained(
-            "timbrooks/instruct-pix2pix",
-            torch_dtype=self._dtype(device),
-            safety_checker=None,
-            revision=(
-                str(data["revision"])
-                if data.get("revision") is not None else None
-            ),
-        )
-        pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(
-            pipe.scheduler.config
-        )
-        pipe.to(device)
+        profile_id = str(data["profile_id"])
+        profile = image_edit_profile(profile_id)
+        parameters = profile.normalize(data.get("parameters"))
+        device = self._device(str(parameters["device"]))
+        dtype = self._configured_dtype(str(parameters["dtype"]), device)
+        model = str(parameters["model"])
+        revision = str(parameters["revision"]).strip() or None
+        if Path(model).expanduser().exists():
+            candidate = Path(model).expanduser().absolute()
+            model_path = str(candidate)
+            if candidate.is_file():
+                identity, identity_warnings = resolve_local_model_identity(
+                    model_path,
+                    policy=ModelIdentityPolicy.WARN,
+                )
+            else:
+                identity = floating_model_identity(
+                    "local-directory",
+                    candidate.name,
+                    local_override=model_path,
+                )
+                identity_warnings = enforce_model_identity_policy(
+                    identity, ModelIdentityPolicy.WARN.value)
+            model = model_path
+        else:
+            identity = floating_model_identity(
+                "huggingface", model, revision=revision)
+            identity_warnings = enforce_model_identity_policy(
+                identity, ModelIdentityPolicy.WARN.value)
+        load_kwargs: dict[str, Any] = {
+            "torch_dtype": dtype,
+            "local_files_only": bool(parameters["local_files_only"]),
+        }
+        if revision is not None:
+            load_kwargs["revision"] = revision
+        if profile_id == QWEN_IMAGE_EDIT_PROFILE_ID:
+            transformer_path = str(
+                parameters["transformer_checkpoint"]).strip()
+            text_encoder_path = str(
+                parameters["text_encoder_checkpoint"]).strip()
+            if bool(transformer_path) != bool(text_encoder_path):
+                raise ValueError(
+                    "Qwen local FP8 loading requires both Transformer "
+                    "checkpoint and Text encoder checkpoint"
+                )
+            component_mode = "upstream"
+            if transformer_path:
+                transformer, text_encoder = self._load_qwen_fp8_components(
+                    model,
+                    transformer_path=transformer_path,
+                    text_encoder_path=text_encoder_path,
+                    revision=revision,
+                    local_files_only=bool(parameters["local_files_only"]),
+                )
+                load_kwargs.update(
+                    transformer=transformer,
+                    text_encoder=text_encoder,
+                )
+                component_mode = "local-scaled-fp8"
+            pipe = QwenImageEditPlusPipeline.from_pretrained(
+                model, **load_kwargs)
+            lora_path = str(parameters["lora_path"]).strip()
+            if lora_path:
+                pipe.load_lora_weights(
+                    str(Path(lora_path).expanduser()),
+                    adapter_name="image_edit",
+                )
+                self._cast_adapter_parameters(
+                    pipe.transformer, "image_edit", dtype)
+                pipe.set_adapters(
+                    ["image_edit"],
+                    adapter_weights=[float(parameters["lora_scale"])],
+                )
+        elif profile_id == FLUX2_KLEIN_PROFILE_ID:
+            pipe = Flux2KleinPipeline.from_pretrained(model, **load_kwargs)
+        elif profile_id == LEGACY_INSTRUCT_PROFILE_ID:
+            pipe = StableDiffusionInstructPix2PixPipeline.from_pretrained(
+                model, safety_checker=None, **load_kwargs)
+            pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(
+                pipe.scheduler.config)
+        else:  # protected by image_edit_profile; keeps type narrowing explicit
+            raise ValueError(f"Unsupported image edit profile: {profile_id}")
+        if bool(parameters["vae_tiling"]):
+            pipe.vae.enable_tiling()
+        if bool(parameters["cpu_offload"]):
+            if device != "cuda":
+                raise ValueError("CPU offload requires the CUDA device")
+            pipe.enable_model_cpu_offload()
+        else:
+            pipe.to(device)
         self._instruct_pipe = pipe
         self._instruct_identity = identity
         self._instruct_warnings = identity_warnings
         self._instruct_device = device
-        self._instruct_dtype = str(self._dtype(device)).removeprefix("torch.")
+        self._instruct_dtype = str(dtype).removeprefix("torch.")
+        self._image_edit_profile_id = profile_id
         return {
             "loaded": True,
+            "profile_id": profile_id,
+            "profile_title": profile.title,
             "device": device,
             "dtype": self._instruct_dtype,
             "pipeline": type(pipe).__name__,
+            "component_mode": (
+                component_mode
+                if profile_id == QWEN_IMAGE_EDIT_PROFILE_ID
+                else "upstream"
+            ),
             "model_identity": identity.to_dict(),
             "warnings": list(identity_warnings),
         }
 
-    def instruct(
+    @staticmethod
+    def _load_qwen_fp8_components(
+        model: str,
+        *,
+        transformer_path: str,
+        text_encoder_path: str,
+        revision: str | None,
+        local_files_only: bool,
+    ):
+        from accelerate import init_empty_weights
+        from diffusers import QwenImageTransformer2DModel
+        from transformers import (
+            AutoConfig,
+            Qwen2_5_VLForConditionalGeneration,
+        )
+
+        from .scaled_fp8 import load_scaled_fp8_checkpoint
+
+        config_kwargs: dict[str, Any] = {
+            "local_files_only": local_files_only,
+        }
+        if revision is not None:
+            config_kwargs["revision"] = revision
+
+        transformer_config = QwenImageTransformer2DModel.load_config(
+            model, subfolder="transformer", **config_kwargs)
+        with init_empty_weights():
+            transformer = QwenImageTransformer2DModel.from_config(
+                transformer_config)
+        transformer = load_scaled_fp8_checkpoint(
+            transformer, transformer_path)
+
+        text_config = AutoConfig.from_pretrained(
+            model, subfolder="text_encoder", **config_kwargs)
+        with init_empty_weights():
+            text_encoder = Qwen2_5_VLForConditionalGeneration(text_config)
+
+        def text_encoder_key(key: str) -> str:
+            if key.startswith("model."):
+                return "model.language_model." + key.removeprefix("model.")
+            if key.startswith("visual."):
+                return "model.visual." + key.removeprefix("visual.")
+            return key
+
+        text_encoder = load_scaled_fp8_checkpoint(
+            text_encoder,
+            text_encoder_path,
+            key_mapper=text_encoder_key,
+        )
+        return transformer, text_encoder
+
+    @staticmethod
+    def _cast_adapter_parameters(model, adapter_name: str, dtype) -> None:
+        """Keep LoRA compute weights out of the FP8 storage dtype.
+
+        PEFT initializes a new adapter with its base Linear dtype.  For our
+        scaled-FP8 base layers that would incorrectly turn the BF16 Lightning
+        LoRA into unscaled FP8.  Adapter parameters are small enough to retain
+        the requested compute dtype.
+        """
+        marker = f".{adapter_name}."
+        for name, parameter in model.named_parameters():
+            if "lora_" in name and marker in name:
+                parameter.data = parameter.data.to(dtype=dtype)
+
+    def image_edit(
         self,
         data: dict[str, Any],
         image: Image.Image,
     ) -> tuple[Image.Image, int, dict[str, Any]]:
         import torch
 
-        if self._instruct_pipe is None:
-            raise RuntimeError("InstructPix2Pix model not loaded")
-        seed = self._resolve_seed(int(data["seed"]))
+        profile_id = str(data["profile_id"])
+        if (
+                self._instruct_pipe is None
+                or self._image_edit_profile_id != profile_id):
+            raise RuntimeError(
+                f"Image edit profile is not loaded: {profile_id}")
+        profile = image_edit_profile(profile_id)
+        parameters = profile.normalize(data.get("parameters"))
+        seed = self._resolve_seed(int(parameters["seed"]))
         generator = torch.Generator(device="cpu").manual_seed(seed)
-        result = self._instruct_pipe(
-            prompt=str(data["instruction"]),
-            image=image.convert("RGB"),
-            num_inference_steps=int(data["steps"]),
-            guidance_scale=float(data["guidance_scale"]),
-            image_guidance_scale=float(data["image_guidance_scale"]),
-            generator=generator,
-        ).images[0]
-        provenance = self._instruct_provenance(data, seed, result.size)
+        kwargs: dict[str, Any] = {
+            "prompt": str(parameters["prompt"]),
+            "image": image.convert("RGB"),
+            "num_inference_steps": int(parameters["steps"]),
+            "generator": generator,
+        }
+        width = int(parameters.get("width", 0))
+        height = int(parameters.get("height", 0))
+        if width > 0:
+            kwargs["width"] = width
+        if height > 0:
+            kwargs["height"] = height
+        sigmas = parse_float_list(parameters.get("sigmas", ""))
+        if sigmas is not None:
+            kwargs["sigmas"] = sigmas
+        attention_text = str(parameters.get("attention_kwargs", "")).strip()
+        if attention_text:
+            parsed = json.loads(attention_text)
+            if not isinstance(parsed, dict):
+                raise ValueError("attention_kwargs must be a JSON object")
+            kwargs["attention_kwargs"] = parsed
+        if profile_id == QWEN_IMAGE_EDIT_PROFILE_ID:
+            kwargs.update({
+                "negative_prompt": str(parameters["negative_prompt"]),
+                "true_cfg_scale": float(parameters["true_cfg_scale"]),
+                "guidance_scale": float(parameters["guidance_scale"]),
+                "max_sequence_length": int(
+                    parameters["max_sequence_length"]),
+            })
+        elif profile_id == FLUX2_KLEIN_PROFILE_ID:
+            kwargs.update({
+                "guidance_scale": float(parameters["guidance_scale"]),
+                "max_sequence_length": int(
+                    parameters["max_sequence_length"]),
+                "text_encoder_out_layers": parse_int_tuple(
+                    parameters["text_encoder_out_layers"]),
+            })
+        else:
+            kwargs.update({
+                "guidance_scale": float(parameters["guidance_scale"]),
+                "image_guidance_scale": float(
+                    parameters["image_guidance_scale"]),
+            })
+        result = self._instruct_pipe(**kwargs).images[0]
+        provenance = self._image_edit_provenance(
+            profile_id, parameters, seed, result.size)
         return result, seed, provenance.to_dict()
+
+    # Compatibility wrappers for older callers of the worker implementation.
+    def load_instruct(self, data: dict[str, Any]) -> dict[str, Any]:
+        parameters = image_edit_profile(
+            LEGACY_INSTRUCT_PROFILE_ID).defaults()
+        parameters.update({
+            "revision": data.get("revision") or "",
+            "device": data.get("device") or parameters["device"],
+        })
+        return self.load_image_edit({
+            "profile_id": LEGACY_INSTRUCT_PROFILE_ID,
+            "parameters": parameters,
+        })
+
+    def instruct(self, data, image):
+        parameters = image_edit_profile(
+            LEGACY_INSTRUCT_PROFILE_ID).defaults()
+        parameters.update({
+            "prompt": data["instruction"],
+            "guidance_scale": data["guidance_scale"],
+            "image_guidance_scale": data["image_guidance_scale"],
+            "steps": data["steps"],
+            "seed": data["seed"],
+        })
+        return self.image_edit({
+            "profile_id": LEGACY_INSTRUCT_PROFILE_ID,
+            "parameters": parameters,
+        }, image)
 
     @staticmethod
     def _package_version(name: str) -> str | None:
@@ -458,9 +691,10 @@ class RealMlBackend:
             warnings=tuple(warnings),
         )
 
-    def _instruct_provenance(
+    def _image_edit_provenance(
             self,
-            data: dict[str, Any],
+            profile_id: str,
+            parameters: dict[str, Any],
             seed: int,
             size: tuple[int, int],
     ) -> GenerationProvenance:
@@ -468,21 +702,17 @@ class RealMlBackend:
             "huggingface",
             "timbrooks/instruct-pix2pix",
         )
-        request = RequestProvenance.capture(
-            "instruct",
-            {
-                key: data.get(key)
-                for key in (
-                    "instruction",
-                    "guidance_scale",
-                    "image_guidance_scale",
-                    "steps",
-                    "seed",
-                )
-            },
+        operation = (
+            "instruct"
+            if profile_id == LEGACY_INSTRUCT_PROFILE_ID
+            else "image_edit"
         )
+        request = RequestProvenance.capture(operation, {
+            "model_profile_id": profile_id,
+            "parameters": parameters,
+        })
         return GenerationProvenance(
-            operation="instruct",
+            operation=operation,
             model=identity,
             request=request,
             seed=seed,
@@ -490,6 +720,7 @@ class RealMlBackend:
             height=int(size[1]),
             runtime=FrozenJsonObject.capture({
                 "pipeline": type(self._instruct_pipe).__name__,
+                "model_profile_id": profile_id,
                 "scheduler": type(self._instruct_pipe.scheduler).__name__,
                 "device": self._instruct_device,
                 "dtype": self._instruct_dtype,

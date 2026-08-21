@@ -1,11 +1,19 @@
-"""Main-process facade for InstructPix2Pix inference."""
+"""Main-process facade for provider-neutral image editing inference."""
 
 from __future__ import annotations
 
 from tcbase import log
 
 from ..generation.provenance import GenerationProvenance
-from ..generation.types import InstructInferenceResult, InstructRequest
+from ..generation.image_edit_profiles import (
+    LEGACY_INSTRUCT_PROFILE_ID,
+    image_edit_profile,
+)
+from ..generation.types import (
+    ImageEditRequest,
+    InstructInferenceResult,
+    InstructRequest,
+)
 from ..workers.ml_process import MlProcessClient
 from .threaded_lifecycle import EngineTaskQueue
 
@@ -17,6 +25,8 @@ class InstructEngine:
         self._client = client or MlProcessClient()
         self._tasks = EngineTaskQueue()
         self._loaded = False
+        self._loaded_profile_id: str | None = None
+        self._loaded_parameters: dict[str, object] = {}
         self.model_info: dict = {}
 
     @property
@@ -27,26 +37,53 @@ class InstructEngine:
     def is_busy(self) -> bool:
         return self._tasks.is_busy
 
-    def submit_load(self, *, job_id: str | None = None):
+    @property
+    def loaded_profile_id(self) -> str | None:
+        return self._loaded_profile_id if self.is_loaded else None
+
+    def loaded_configuration_matches(
+            self,
+            profile_id: str,
+            parameters: dict[str, object],
+    ) -> bool:
+        if self.loaded_profile_id != profile_id:
+            return False
+        profile = image_edit_profile(profile_id)
+        return self._loaded_parameters == profile.load_values(parameters)
+
+    def submit_load(
+            self,
+            profile_id: str = LEGACY_INSTRUCT_PROFILE_ID,
+            parameters: dict[str, object] | None = None,
+            *,
+            job_id: str | None = None):
+        normalized = image_edit_profile(profile_id).normalize(parameters)
         return self._tasks.submit(
             "load",
-            lambda cancel: self._load(cancel),
+            lambda cancel: self._load(profile_id, normalized, cancel),
             job_id=job_id,
-            name="instruct-load",
+            name="image-edit-load",
             on_error=lambda _exc: log.exception(
-                "InstructPix2Pix load failed"
+                "Image edit model load failed"
             ),
         )
 
-    def _load(self, cancel):
-        result = self._client.request("load_instruct", {}, cancel)
+    def _load(self, profile_id, parameters, cancel):
+        result = self._client.request(
+            "load_image_edit",
+            {"profile_id": profile_id, "parameters": parameters},
+            cancel,
+        )
         self.model_info = dict(result)
         self._loaded = True
+        self._loaded_profile_id = profile_id
+        self._loaded_parameters = image_edit_profile(
+            profile_id).load_values(parameters)
         return True
 
     def submit_request(
             self,
-            request: InstructRequest,
+            request: ImageEditRequest | InstructRequest,
             meta=None,
             *,
             job_id: str | None = None):
@@ -55,21 +92,21 @@ class InstructEngine:
             lambda cancel: self._run_inference(request, cancel),
             meta=meta,
             job_id=job_id,
-            name="instruct-inference",
+            name="image-edit-inference",
             on_error=lambda _exc: log.exception(
-                "InstructPix2Pix inference failed"
+                "Image edit inference failed"
             ),
         )
 
-    def _run_inference(self, request: InstructRequest, cancel):
+    def _run_inference(
+            self, request: ImageEditRequest | InstructRequest, cancel):
+        if isinstance(request, InstructRequest):
+            request = request.to_image_edit()
         result = self._client.request(
-            "instruct",
+            "image_edit",
             {
-                "instruction": request.instruction,
-                "guidance_scale": request.guidance_scale,
-                "image_guidance_scale": request.image_guidance_scale,
-                "steps": request.steps,
-                "seed": request.seed,
+                "profile_id": request.model_profile_id,
+                "parameters": request.parameters,
             },
             cancel,
             images={"image": request.image},
@@ -94,4 +131,6 @@ class InstructEngine:
         if self._tasks.shutdown(timeout):
             self._client.shutdown(timeout)
             self._loaded = False
+            self._loaded_profile_id = None
+            self._loaded_parameters = {}
             self.model_info = {}

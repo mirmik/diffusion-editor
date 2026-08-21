@@ -567,7 +567,7 @@ class GenerationError:
 class PatchSource:
     image: Image.Image
     canvas_rect: Rect
-    source: Literal["patch", "mask_bbox", "existing"]
+    source: Literal["patch", "mask_bbox", "existing", "full"]
 
     @property
     def width(self) -> int:
@@ -636,6 +636,20 @@ class DiffusionInferenceResult:
 
 
 @dataclass(frozen=True)
+class ImageEditRequest:
+    image: Image.Image
+    model_profile_id: str
+    parameters: dict[str, object]
+
+
+@dataclass(frozen=True)
+class ImageEditInferenceResult:
+    image: Image.Image
+    seed: int
+    provenance: GenerationProvenance | None = None
+
+
+@dataclass(frozen=True)
 class InstructRequest:
     image: Image.Image
     instruction: str
@@ -643,6 +657,27 @@ class InstructRequest:
     image_guidance_scale: float
     steps: int
     seed: int
+
+    def to_image_edit(self) -> ImageEditRequest:
+        return ImageEditRequest(
+            image=self.image,
+            model_profile_id="instruct-pix2pix",
+            parameters={
+                "prompt": self.instruction,
+                "guidance_scale": self.guidance_scale,
+                "image_guidance_scale": self.image_guidance_scale,
+                "steps": self.steps,
+                "seed": self.seed,
+                "model": "timbrooks/instruct-pix2pix",
+                "revision": "",
+                "local_files_only": False,
+                "dtype": "bfloat16",
+                "device": "cuda",
+                "cpu_offload": False,
+                "vae_tiling": False,
+                "attention_kwargs": "",
+            },
+        )
 
 
 @dataclass(frozen=True)

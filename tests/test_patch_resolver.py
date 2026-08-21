@@ -50,3 +50,18 @@ def test_resolve_source_patch_uses_existing_rect_as_fallback():
     assert patch.source == "existing"
     assert patch.canvas_rect == (2, 3, 10, 11)
     assert patch.image.size == (8, 8)
+
+
+def test_resolve_source_patch_can_default_to_full_composite():
+    composite = _rgba(18, 12, (10, 20, 30, 255))
+    layer = Layer("Layer", 18, 12, _rgba(18, 12, (0, 0, 0, 0)))
+
+    patch = resolve_source_patch(
+        layer,
+        composite,
+        default_to_full=True,
+    )
+
+    assert patch.source == "full"
+    assert patch.canvas_rect == (0, 0, 18, 12)
+    assert patch.image.size == (18, 12)

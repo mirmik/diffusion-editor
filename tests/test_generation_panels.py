@@ -36,6 +36,11 @@ from diffusion_editor.generation.types import (
     DiffusionInferenceResult,
     EnginePollEvent,
 )
+from diffusion_editor.generation.image_edit_profiles import (
+    FLUX2_KLEIN_PROFILE_ID,
+    QWEN_IMAGE_EDIT_PROFILE_ID,
+    image_edit_profile,
+)
 
 
 class _Settings:
@@ -131,6 +136,17 @@ def _instruct_tool():
         guidance_scale=7.0,
         steps=20,
         seed=2,
+    )
+
+
+def _qwen_edit_tool():
+    return InstructTool(
+        source_patch=Image.fromarray(_rgba()[:, :, :3], "RGB"),
+        patch_x=0,
+        patch_y=0,
+        patch_w=16,
+        patch_h=16,
+        model_profile_id=QWEN_IMAGE_EDIT_PROFILE_ID,
     )
 
 
@@ -551,3 +567,67 @@ def test_native_generation_programmatic_apply_is_feedback_free(tmp_path):
     panel.close()
     coordinator.close()
     tc_ui_document_destroy(document)
+
+
+def test_ai_edit_panel_exposes_complete_schema_without_advanced_sections(
+    tmp_path,
+):
+    application, _diffusion, _instruct, _lama = _application(tmp_path)
+    _insert_tool_layer(application, "AI Edit", _qwen_edit_tool())
+    coordinator = GenerationPanelsCoordinator(application, _Canvas())
+    document = tc_ui_document_create()
+    panel = NativeGenerationPanels(
+        document,
+        coordinator.state,
+        coordinator.handle_intent,
+        lambda: None,
+    )
+    coordinator.bind_view(panel)
+    assert document.add_root(panel.widget.handle)
+    try:
+        qwen_ids = {
+            parameter.stable_id
+            for parameter in image_edit_profile(
+                QWEN_IMAGE_EDIT_PROFILE_ID).parameters
+        }
+        assert set(panel._image_edit_widgets) >= qwen_ids
+        assert all(
+            panel._image_edit_widgets[parameter_id].widget.visible
+            for parameter_id in panel._image_edit_widgets
+        )
+        assert all(
+            panel._image_edit_widgets[parameter_id].widget.enabled
+            for parameter_id in qwen_ids
+        )
+        assert not panel._image_edit_widgets[
+            "image_guidance_scale"].widget.enabled
+
+        coordinator.handle_intent(GenerationIntent(
+            GenerationAction.SET_IMAGE_EDIT_PARAMETER,
+            ("prompt", "qwen prompt"),
+        ))
+        coordinator.handle_intent(GenerationIntent(
+            GenerationAction.SELECT_IMAGE_EDIT_PROFILE,
+            FLUX2_KLEIN_PROFILE_ID,
+        ))
+        coordinator.handle_intent(GenerationIntent(
+            GenerationAction.SET_IMAGE_EDIT_PARAMETER,
+            ("prompt", "flux prompt"),
+        ))
+        assert coordinator.state.instruct.model_profile_id == (
+            FLUX2_KLEIN_PROFILE_ID)
+        assert coordinator.state.instruct.instruction == "flux prompt"
+
+        coordinator.handle_intent(GenerationIntent(
+            GenerationAction.SELECT_IMAGE_EDIT_PROFILE,
+            QWEN_IMAGE_EDIT_PROFILE_ID,
+        ))
+        assert coordinator.state.instruct.instruction == "qwen prompt"
+        assert "Advanced" not in {
+            item.get("text", "")
+            for item in document.inspect_snapshot()["widgets"]
+        }
+    finally:
+        panel.close()
+        coordinator.close()
+        tc_ui_document_destroy(document)

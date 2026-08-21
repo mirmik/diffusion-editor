@@ -14,6 +14,11 @@ from ..generation.provenance import (
     ModelIdentity,
     ModelIdentityPolicy,
 )
+from ..generation.image_edit_profiles import (
+    LEGACY_INSTRUCT_PROFILE_ID,
+    image_edit_profile,
+    normalize_profile_store,
+)
 
 
 class Tool:
@@ -82,15 +87,83 @@ class InstructTool(Tool):
                  image_guidance_scale: float = 1.5,
                  guidance_scale: float = 7.0,
                  steps: int = 20,
-                 seed: int = -1):
+                 seed: int = -1,
+                 model_profile_id: str = LEGACY_INSTRUCT_PROFILE_ID,
+                 profile_parameters: dict[str, dict] | None = None):
         self.source_patch = source_patch
         self.patch_x = patch_x
         self.patch_y = patch_y
         self.patch_w = patch_w
         self.patch_h = patch_h
-        self.instruction = instruction
-        self.image_guidance_scale = image_guidance_scale
-        self.guidance_scale = guidance_scale
-        self.steps = steps
-        self.seed = seed
+        # Keep parameters for every profile so switching models is lossless.
+        self.profile_parameters = normalize_profile_store(profile_parameters)
+        self.model_profile_id = model_profile_id
+        image_edit_profile(model_profile_id)  # fail early on corrupt state
+        if profile_parameters is None:
+            legacy = self.profile_parameters[LEGACY_INSTRUCT_PROFILE_ID]
+            legacy.update({
+                "prompt": instruction,
+                "image_guidance_scale": image_guidance_scale,
+                "guidance_scale": guidance_scale,
+                "steps": steps,
+                "seed": seed,
+            })
         self.generation_provenance = None
+
+    @property
+    def parameters(self) -> dict:
+        return self.profile_parameters[self.model_profile_id]
+
+    def set_profile(self, profile_id: str) -> None:
+        image_edit_profile(profile_id)
+        self.model_profile_id = profile_id
+
+    def set_parameter(self, stable_id: str, value) -> None:
+        parameter = image_edit_profile(self.model_profile_id).parameter(stable_id)
+        self.parameters[stable_id] = parameter.normalize(value)
+
+    # Compatibility surface for old document commands and integrations.
+    @property
+    def instruction(self) -> str:
+        return str(self.parameters.get("prompt", ""))
+
+    @instruction.setter
+    def instruction(self, value: str) -> None:
+        self.parameters["prompt"] = str(value)
+
+    @property
+    def image_guidance_scale(self) -> float:
+        return float(self.parameters.get("image_guidance_scale", 1.5))
+
+    @image_guidance_scale.setter
+    def image_guidance_scale(self, value: float) -> None:
+        self.parameters["image_guidance_scale"] = float(value)
+
+    @property
+    def guidance_scale(self) -> float:
+        return float(self.parameters.get("guidance_scale", 1.0))
+
+    @guidance_scale.setter
+    def guidance_scale(self, value: float) -> None:
+        self.parameters["guidance_scale"] = float(value)
+
+    @property
+    def steps(self) -> int:
+        return int(self.parameters.get("steps", 4))
+
+    @steps.setter
+    def steps(self, value: int) -> None:
+        self.parameters["steps"] = int(value)
+
+    @property
+    def seed(self) -> int:
+        return int(self.parameters.get("seed", -1))
+
+    @seed.setter
+    def seed(self, value: int) -> None:
+        self.parameters["seed"] = int(value)
+
+
+# New code may use the domain name while old project files and integrations keep
+# the stable ``instruct`` tool type and class.
+ImageEditTool = InstructTool

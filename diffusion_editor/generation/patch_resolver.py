@@ -119,11 +119,21 @@ def source_patch_from_existing_rect(
     )
 
 
+def source_patch_from_full_composite(composite: np.ndarray) -> PatchSource:
+    height, width = composite.shape[:2]
+    return PatchSource(
+        image=Image.fromarray(composite).convert("RGB"),
+        canvas_rect=(0, 0, width, height),
+        source="full",
+    )
+
+
 def resolve_source_patch(
         layer: Layer,
         composite: np.ndarray,
         *,
-        fallback_canvas_rect: Rect | None = None
+        fallback_canvas_rect: Rect | None = None,
+        default_to_full: bool = False,
         ) -> PatchSource | GenerationError | None:
     patch = source_patch_from_layer_patch(layer, composite)
     if patch is not None:
@@ -133,6 +143,8 @@ def resolve_source_patch(
         return patch
     if fallback_canvas_rect is not None:
         return source_patch_from_existing_rect(composite, fallback_canvas_rect)
+    if default_to_full:
+        return source_patch_from_full_composite(composite)
     return None
 
 

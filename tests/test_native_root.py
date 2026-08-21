@@ -487,6 +487,23 @@ def test_real_offscreen_canvas_renders_and_routes_image_space_paint(
         ))
         assert application.layer_stack.active_layer.tool is None
         assert root.generation_panels.empty_label.visible
+        root.layer_tree_coordinator.handle_intent(LayerTreeIntent(
+            LayerTreeAction.ATTACH_TOOL,
+            layer_id=active_id,
+            value="instruct",
+        ))
+        ai_edit_tool = application.layer_stack.active_layer.tool
+        assert ai_edit_tool.source_patch.size == (32, 32)
+        assert (
+            ai_edit_tool.patch_x,
+            ai_edit_tool.patch_y,
+            ai_edit_tool.patch_w,
+            ai_edit_tool.patch_h,
+        ) == (0, 0, 32, 32)
+        root.layer_tree_coordinator.handle_intent(LayerTreeIntent(
+            LayerTreeAction.DETACH_TOOL,
+            layer_id=active_id,
+        ))
         root.canvas_controls.selection.rect_mode.checked = True
         assert root.canvas.widget.cursor_intent == CursorIntent.Crosshair
         model, command_id = root.canvas_controls.brush.tool_commands[

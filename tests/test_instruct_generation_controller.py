@@ -74,6 +74,29 @@ def test_start_apply_loads_model_when_needed():
     assert engine.calls == [("load",)]
 
 
+def test_start_apply_without_mask_or_manual_patch_uses_full_composite():
+    _stack, layer = _stack_with_instruct_layer()
+    engine = _Engine()
+    composite = _rgba(20, 14, (10, 20, 30, 255))
+    controller = InstructGenerationController(
+        engine=engine,
+        composite_below=lambda _layer: composite,
+    )
+
+    event = controller.start_apply(layer)
+
+    assert event.status == "Applying instruction..."
+    request = engine.calls[-1][1]
+    assert request.image.size == (20, 14)
+    assert layer.tool.source_patch.size == (20, 14)
+    assert (
+        layer.tool.patch_x,
+        layer.tool.patch_y,
+        layer.tool.patch_w,
+        layer.tool.patch_h,
+    ) == (0, 0, 20, 14)
+
+
 def test_poll_model_load_resumes_pending_instruction():
     _stack, layer = _stack_with_instruct_layer()
     engine = _Engine()

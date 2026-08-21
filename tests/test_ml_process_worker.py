@@ -16,6 +16,12 @@ from diffusion_editor.generation.types import (
     DiffusionRequest,
     InstructInferenceResult,
     InstructRequest,
+    ImageEditRequest,
+)
+from diffusion_editor.generation.image_edit_profiles import (
+    FLUX2_KLEIN_PROFILE_ID,
+    QWEN_IMAGE_EDIT_PROFILE_ID,
+    image_edit_profile,
 )
 from diffusion_editor.grounding.types import GroundingParams, GroundingRequest
 from diffusion_editor.workers.ml_process import MlProcessClient
@@ -140,6 +146,60 @@ def test_fake_worker_smokes_all_three_model_families_without_main_imports():
     finally:
         client.shutdown()
     assert not client.is_running
+
+
+@pytest.mark.parametrize(
+    "profile_id",
+    [QWEN_IMAGE_EDIT_PROFILE_ID, FLUX2_KLEIN_PROFILE_ID],
+)
+def test_fake_worker_smokes_image_edit_profiles(profile_id):
+    client = _client()
+    parameters = image_edit_profile(profile_id).defaults()
+    parameters.update({"prompt": "change only the body", "seed": 20260820})
+    try:
+        loaded = client.request(
+            "load_image_edit",
+            {"profile_id": profile_id, "parameters": parameters},
+            threading.Event(),
+        )
+        assert loaded["profile_id"] == profile_id
+        result = client.request(
+            "image_edit",
+            {"profile_id": profile_id, "parameters": parameters},
+            threading.Event(),
+            images={"image": _image()},
+        )
+        assert result["image"].size == (8, 6)
+        assert result["seed"] == 20260820
+        assert result["provenance"]["operation"] == "image_edit"
+        assert (
+            result["provenance"]["request"]["parameters"]
+            ["model_profile_id"] == profile_id
+        )
+    finally:
+        client.shutdown()
+
+
+def test_image_edit_engine_reloads_only_for_load_time_parameters():
+    engine = InstructEngine(client=_client())
+    profile = image_edit_profile(QWEN_IMAGE_EDIT_PROFILE_ID)
+    parameters = profile.defaults()
+    try:
+        assert engine.submit_load(QWEN_IMAGE_EDIT_PROFILE_ID, parameters)
+        assert _poll(engine).error is None
+        assert engine.loaded_configuration_matches(
+            QWEN_IMAGE_EDIT_PROFILE_ID, parameters)
+        changed_prompt = {**parameters, "prompt": "another edit"}
+        assert engine.loaded_configuration_matches(
+            QWEN_IMAGE_EDIT_PROFILE_ID, changed_prompt)
+        changed_dtype = {**parameters, "dtype": "float16"}
+        assert not engine.loaded_configuration_matches(
+            QWEN_IMAGE_EDIT_PROFILE_ID, changed_dtype)
+        assert engine.submit_request(ImageEditRequest(
+            _image(), QWEN_IMAGE_EDIT_PROFILE_ID, changed_prompt))
+        assert _poll(engine).result.seed == 4343
+    finally:
+        engine.shutdown()
 
 
 @pytest.mark.parametrize(

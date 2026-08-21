@@ -43,7 +43,10 @@ F   ← начало
 
 **Lama** — слой удаления объектов. Хранит маску зоны удаления.
 
-**Instruct** — слой редактирования по текстовой инструкции (InstructPix2Pix).
+**AI Edit** — слой редактирования исходного изображения по текстовой
+инструкции. В проекте сохраняется устойчивый ID профиля модели и отдельный
+набор параметров для каждого профиля; исторический тип файла `instruct`
+сохранён для обратной совместимости.
 
 Слои с маской (Diffusion, Lama, Instruct) хранят маску и исходный патч рядом с изображением — это нужно для повторного запуска генерации без перерисовки.
 
@@ -110,7 +113,7 @@ F   ← начало
 
 **ApplicationDialogCoordinator / NativeApplicationDialogs** — toolkit-neutral файловые, Settings и Grounding workflows и переиспользуемые native overlays на публичных `Dialog`, `MessageBox` и `FileDialogOverlay`. Coordinator владеет фильтрами, расширениями, `last_dir`, изменением приложения и запуском Grounding; native service владеет только modal lifecycle и преобразованием значений форм. Все dialog-команды подключены к app-owned command handlers, а открытые overlays закрываются до уничтожения `TcDocument`.
 
-**GenerationPanelsCoordinator / NativeGenerationPanels** — immutable snapshots и typed intents для Diffusion, LaMa и InstructPix2Pix поверх существующих toolkit-neutral controllers. Черновики параметров привязаны к stable layer ID, tool updates проходят typed `DocumentService` commands, а model/inference worker events проецируются главным циклом через `EditorApplication.poll`. Native view использует только публичные `GroupBox`, `ScrollArea`, `TextArea`, `TextInput`, `ComboBox`, `SliderEdit` и `Checkbox`.
+**GenerationPanelsCoordinator / NativeGenerationPanels** — immutable snapshots и typed intents для Diffusion, LaMa и provider-neutral AI Edit поверх существующих toolkit-neutral controllers. AI Edit строит одну прокручиваемую панель по декларативной schema профиля; все зарегистрированные параметры видимы без `Advanced`-секций, а параметры выбранной модели доступны для редактирования. Черновики и значения каждого профиля привязаны к stable layer ID, tool updates проходят typed `DocumentService` commands, а model/inference worker events проецируются главным циклом через `EditorApplication.poll`. Native view использует только публичные `GroupBox`, `ScrollArea`, `TextArea`, `TextInput`, `ComboBox`, `SliderEdit` и `Checkbox`.
 
 **NativeEditorCanvas** — адаптер над публичным Termin `Canvas`. Сам виджет Termin владеет fit/zoom/pan и преобразованиями координат; приложение владеет двумя `DynamicTextureLease`. CPU-композит и overlay используют owned RGBA8 textures с региональными обновлениями, оконный GPU-композит передаётся как borrowed texture. В offscreen-композиции, где нельзя получить общий application `Tgfx2Context`, используется owned CPU-путь. Рамки активного слоя, выделения и patch рисуются через публичный `PaintContext`.
 

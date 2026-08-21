@@ -37,7 +37,10 @@ from ..document.commands import (
 )
 from ..document.reconstruction import ReconstructionLayer, ReconstructionStatus
 from ..document.tool import DiffusionTool, InstructTool, LamaTool
-from ..generation.patch_resolver import source_patch_at_center
+from ..generation.patch_resolver import (
+    source_patch_at_center,
+    source_patch_from_full_composite,
+)
 from ..generation.types import (
     RECONSTRUCTION_BACKEND_STAGES,
     ReconstructionBackend,
@@ -698,8 +701,11 @@ class NativeEditorRoot:
             composite = self.canvas.controller.get_composite()
         if composite is None:
             return None
-        center_x, center_y = self.canvas.view_center_image()
-        patch = source_patch_at_center(composite, center_x, center_y)
+        if tool_type == "instruct":
+            patch = source_patch_from_full_composite(composite)
+        else:
+            center_x, center_y = self.canvas.view_center_image()
+            patch = source_patch_at_center(composite, center_x, center_y)
         x0, y0, x1, y1 = patch.canvas_rect
         common = {
             "source_patch": patch.image,
@@ -725,7 +731,13 @@ class NativeEditorRoot:
         if tool_type == "lama":
             return LamaTool(**common)
         if tool_type == "instruct":
-            return InstructTool(**common)
+            from ..generation.image_edit_profiles import (
+                DEFAULT_IMAGE_EDIT_PROFILE_ID,
+            )
+            return InstructTool(
+                **common,
+                model_profile_id=DEFAULT_IMAGE_EDIT_PROFILE_ID,
+            )
         return None
 
     def _before_detach_layer_tool(self, layer: Layer) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+import copy
 from dataclasses import dataclass, field, replace
 from numbers import Integral
 from typing import Callable, Protocol
@@ -1001,6 +1002,53 @@ class UpdateInstructToolCommand:
                 "seed": self.seed,
             },
             coalesce_key=("instruct-tool", self.layer.id),
+        )
+
+
+@dataclass(frozen=True)
+class UpdateImageEditToolCommand:
+    layer: Layer
+    model_profile_id: str
+    profile_parameters: dict[str, dict]
+    label: str = "Update AI Edit Settings"
+
+    def apply(self, layer_stack: LayerStack) -> None:
+        tool = self.layer.tool
+        if not isinstance(tool, InstructTool):
+            return
+        tool.model_profile_id = self.model_profile_id
+        tool.profile_parameters = copy.deepcopy(self.profile_parameters)
+        layer_stack.publish_change(
+            DocumentChangeKind.METADATA, layers=(self.layer,))
+
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
+        tool = self.layer.tool
+        if not isinstance(tool, InstructTool):
+            return None
+        old_profile = tool.model_profile_id
+        old_parameters = copy.deepcopy(tool.profile_parameters)
+        new_parameters = copy.deepcopy(self.profile_parameters)
+        if (
+                old_profile == self.model_profile_id
+                and old_parameters == new_parameters):
+            return None
+
+        def assign(profile_id: str, parameters: dict[str, dict]) -> None:
+            tool.model_profile_id = profile_id
+            tool.profile_parameters = copy.deepcopy(parameters)
+            layer_stack.publish_change(
+                DocumentChangeKind.METADATA, layers=(self.layer,))
+
+        assign(self.model_profile_id, new_parameters)
+        size = len(repr((
+            old_profile, old_parameters,
+            self.model_profile_id, new_parameters,
+        )).encode("utf-8"))
+        return CommandDelta(
+            lambda: assign(old_profile, old_parameters),
+            lambda: assign(self.model_profile_id, new_parameters),
+            size,
+            coalesce_key=("image-edit-tool", self.layer.id),
         )
 
 

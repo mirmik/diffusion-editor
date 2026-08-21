@@ -104,6 +104,7 @@ def test_model_workers_share_one_exact_binary_only_lock_and_installer():
         "diffusers==0.39.0",
         "transformers==5.14.1",
         "accelerate==1.14.0",
+        "peft==0.20.0",
         "safetensors==0.8.0",
         "tokenizers==0.22.2",
     )

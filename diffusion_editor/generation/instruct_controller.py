@@ -1,8 +1,9 @@
-"""Application workflow for InstructPix2Pix generation tasks."""
+"""Application workflow for provider-neutral AI image editing tasks."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import copy
 from typing import Callable
 
 import numpy as np
@@ -26,7 +27,15 @@ from .job_context import (
 )
 from .patch_resolver import apply_patch_source_to_tool, resolve_source_patch
 from .provenance import RequestProvenance
-from .types import GenerationError, InstructInferenceResult, InstructRequest
+from .image_edit_profiles import (
+    LEGACY_INSTRUCT_PROFILE_ID,
+    image_edit_profile,
+)
+from .types import (
+    GenerationError,
+    ImageEditRequest,
+    InstructInferenceResult,
+)
 
 
 @dataclass(frozen=True)
@@ -44,7 +53,7 @@ class InstructControllerEvent:
 @dataclass(frozen=True)
 class _PendingInstructJob:
     context: InferenceJobContext
-    request: InstructRequest
+    request: ImageEditRequest
 
 
 class InstructGenerationController:
@@ -112,22 +121,24 @@ class InstructGenerationController:
             self._invalidated_operations[operation_id] = reason
             cancel_engine(self._engine)
 
-    def submit_load_model(self) -> InstructControllerEvent:
+    def submit_load_model(
+            self,
+            profile_id: str = LEGACY_INSTRUCT_PROFILE_ID,
+            parameters: dict[str, object] | None = None,
+    ) -> InstructControllerEvent:
         if self._engine.is_busy or self._active_operation_id is not None:
             return InstructControllerEvent()
         operation_id = self._job_id_factory()
-        submitted = submit_with_job_id(
-            self._engine,
-            "submit_load",
-            job_id=operation_id,
-        )
+        submitted = self._submit_load(
+            profile_id, parameters or image_edit_profile(profile_id).defaults(),
+            operation_id)
         if not submitted:
             return InstructControllerEvent()
         self._active_operation_id = operation_id
         self._active_target_layer_id = None
         return InstructControllerEvent(
             model_loading=True,
-            status="Loading InstructPix2Pix model...",
+            status=self._loading_status(profile_id),
         )
 
     def start_apply(self, layer: Layer) -> InstructControllerEvent:
@@ -138,12 +149,22 @@ class InstructGenerationController:
             return prepared
         job = prepared
 
-        if not self._engine.is_loaded:
+        matches = getattr(
+            self._engine, "loaded_configuration_matches", None)
+        needs_load = not self._engine.is_loaded
+        if callable(matches):
+            needs_load = not matches(
+                job.request.model_profile_id, job.request.parameters)
+        elif hasattr(self._engine, "loaded_profile_id"):
+            needs_load = (
+                getattr(self._engine, "loaded_profile_id")
+                != job.request.model_profile_id)
+        if needs_load:
             self._pending_job = job
-            submitted = submit_with_job_id(
-                self._engine,
-                "submit_load",
-                job_id=job.context.job_id,
+            submitted = self._submit_load(
+                job.request.model_profile_id,
+                job.request.parameters,
+                job.context.job_id,
             )
             if not submitted:
                 self._pending_job = None
@@ -152,7 +173,7 @@ class InstructGenerationController:
             self._active_target_layer_id = job.context.layer_id
             return InstructControllerEvent(
                 model_loading=True,
-                status="Loading InstructPix2Pix model...",
+                status=self._loading_status(job.request.model_profile_id),
             )
 
         return self._submit_job(job)
@@ -170,12 +191,7 @@ class InstructGenerationController:
         patch = resolve_source_patch(
             layer,
             composite,
-            fallback_canvas_rect=(
-                tool.patch_x,
-                tool.patch_y,
-                tool.patch_x + tool.patch_w,
-                tool.patch_y + tool.patch_h,
-            ),
+            default_to_full=True,
         )
         if isinstance(patch, GenerationError):
             log.error(patch.log_message or patch.message)
@@ -189,14 +205,13 @@ class InstructGenerationController:
         if input_image is None:
             return InstructControllerEvent(
                 status="No source patch for instruction")
-        request = InstructRequest(
+        parameters = copy.deepcopy(tool.parameters)
+        request = ImageEditRequest(
             image=input_image.to_image(),
-            instruction=str(tool.instruction),
-            guidance_scale=float(tool.guidance_scale),
-            image_guidance_scale=float(tool.image_guidance_scale),
-            steps=int(tool.steps),
-            seed=int(tool.seed),
+            model_profile_id=tool.model_profile_id,
+            parameters=parameters,
         )
+        profile = image_edit_profile(tool.model_profile_id)
         context = capture_job_context(
             kind="instruct",
             document_state=self._document_state(),
@@ -205,21 +220,43 @@ class InstructGenerationController:
             input_image=input_image.to_image(),
             paste=FrozenPasteContext.capture(layer, tool),
             model_provenance=(
-                ("model_id", "timbrooks/instruct-pix2pix"),
+                ("model_profile_id", profile.stable_id),
+                ("provider", profile.provider),
+                ("model_id", str(parameters.get("model", profile.model_id))),
             ),
             request_provenance=RequestProvenance.capture(
-                "instruct",
+                "image_edit",
                 {
-                    "instruction": request.instruction,
-                    "guidance_scale": request.guidance_scale,
-                    "image_guidance_scale": request.image_guidance_scale,
-                    "steps": request.steps,
-                    "seed": request.seed,
+                    "model_profile_id": request.model_profile_id,
+                    "parameters": request.parameters,
                     "input_image_hash": input_image.content_hash,
                 },
             ),
         )
         return _PendingInstructJob(context=context, request=request)
+
+    def _submit_load(
+            self,
+            profile_id: str,
+            parameters: dict[str, object],
+            job_id: str,
+    ) -> bool:
+        if hasattr(self._engine, "loaded_profile_id"):
+            return submit_with_job_id(
+                self._engine,
+                "submit_load",
+                profile_id,
+                parameters,
+                job_id=job_id,
+            )
+        return submit_with_job_id(
+            self._engine, "submit_load", job_id=job_id)
+
+    @staticmethod
+    def _loading_status(profile_id: str) -> str:
+        if profile_id == LEGACY_INSTRUCT_PROFILE_ID:
+            return "Loading InstructPix2Pix model..."
+        return f"Loading {image_edit_profile(profile_id).title}..."
 
     def _submit_job(
             self, job: _PendingInstructJob) -> InstructControllerEvent:

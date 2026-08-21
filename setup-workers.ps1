@@ -94,6 +94,7 @@ import accelerate
 import cv2
 import diffusers
 import onnxruntime
+import peft
 import rembg
 import safetensors
 import tokenizers
@@ -116,6 +117,7 @@ print(
     f"torchvision={torchvision.__version__}",
     f"opencv={cv2.__version__}",
     f"onnxruntime={onnxruntime.__version__}",
+    f"peft={peft.__version__}",
     f"diffusers={diffusers.__version__}",
     f"transformers={transformers.__version__}",
 )

@@ -125,6 +125,8 @@ def _serialize_instruct_tool(tool: InstructTool, file_key: str) -> dict:
         "guidance_scale": tool.guidance_scale,
         "steps": tool.steps,
         "seed": tool.seed,
+        "model_profile_id": tool.model_profile_id,
+        "profile_parameters": tool.profile_parameters,
     }, tool)
 
 
@@ -212,6 +214,13 @@ def _load_instruct_tool(d: dict, zf: zipfile.ZipFile) -> ToolLoadResult:
         guidance_scale=d.get("guidance_scale", 7.0),
         steps=d.get("steps", 20),
         seed=d.get("seed", -1),
+        model_profile_id=d.get(
+            "model_profile_id", "instruct-pix2pix"),
+        profile_parameters=(
+            d.get("profile_parameters")
+            if isinstance(d.get("profile_parameters"), dict)
+            else None
+        ),
     )
     _load_generation_provenance(tool, d)
     return ToolLoadResult(

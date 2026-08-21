@@ -26,6 +26,10 @@ from ..generation.provenance import (
     floating_model_identity,
     resolve_local_model_identity,
 )
+from ..generation.image_edit_profiles import (
+    LEGACY_INSTRUCT_PROFILE_ID,
+    image_edit_profile,
+)
 from .ml_protocol import MAX_MESSAGE_BYTES, PROTOCOL_VERSION, encode_message
 
 
@@ -45,6 +49,7 @@ class _Backend:
         self.ip_adapter_identity: ModelIdentity | None = None
         self.instruct_identity: ModelIdentity | None = None
         self.instruct_warnings: tuple[str, ...] = ()
+        self.image_edit_profile_id: str | None = None
 
     def execute(
         self,
@@ -104,6 +109,22 @@ class _Backend:
             progress("Running InstructPix2Pix...")
             image = self._open_required(data, "image")
             result, seed, provenance = self._real.instruct(data, image)
+            output = output_dir / "result.png"
+            result.save(output, format="PNG")
+            return {
+                "output_path": str(output),
+                "seed": seed,
+                "provenance": provenance,
+            }
+        if operation == "load_image_edit":
+            profile = image_edit_profile(str(data["profile_id"]))
+            progress(f"Loading {profile.title}...")
+            return self._real.load_image_edit(data)
+        if operation == "image_edit":
+            profile = image_edit_profile(str(data["profile_id"]))
+            progress(f"Running {profile.title}...")
+            image = self._open_required(data, "image")
+            result, seed, provenance = self._real.image_edit(data, image)
             output = output_dir / "result.png"
             result.save(output, format="PNG")
             return {
@@ -258,6 +279,26 @@ class _Backend:
                 "model_identity": identity.to_dict(),
                 "warnings": list(warnings),
             }
+        if operation == "load_image_edit":
+            profile = image_edit_profile(str(data["profile_id"]))
+            parameters = profile.normalize(data.get("parameters"))
+            self.instruct_loaded = True
+            self.image_edit_profile_id = profile.stable_id
+            model = str(parameters["model"])
+            identity = floating_model_identity("huggingface", model)
+            self.instruct_identity = identity
+            self.instruct_warnings = (identity.warning,) if identity.warning else ()
+            progress(f"Loading {profile.title}...")
+            return {
+                "loaded": True,
+                "profile_id": profile.stable_id,
+                "profile_title": profile.title,
+                "device": "cpu",
+                "dtype": "float32",
+                "pipeline": f"Fake{profile.provider}",
+                "model_identity": identity.to_dict(),
+                "warnings": list(self.instruct_warnings),
+            }
         if operation == "instruct":
             if not self.instruct_loaded:
                 raise RuntimeError("InstructPix2Pix model not loaded")
@@ -296,6 +337,53 @@ class _Backend:
                     "backend": "fake",
                     "pipeline": "FakeInstructPix2PixPipeline",
                     "scheduler": "FakeScheduler",
+                    "device": "cpu",
+                    "dtype": "float32",
+                }),
+                warnings=self.instruct_warnings,
+            )
+            return {
+                "output_path": str(output),
+                "seed": seed,
+                "provenance": provenance.to_dict(),
+            }
+        if operation == "image_edit":
+            profile = image_edit_profile(str(data["profile_id"]))
+            if (
+                    not self.instruct_loaded
+                    or self.image_edit_profile_id != profile.stable_id):
+                raise RuntimeError(
+                    f"Image edit profile is not loaded: {profile.stable_id}")
+            parameters = profile.normalize(data.get("parameters"))
+            progress(f"Running {profile.title}...")
+            output = output_dir / "result.png"
+            self._open_required(data, "image").convert("RGB").save(
+                output, format="PNG")
+            requested_seed = int(parameters["seed"])
+            seed = 4343 if requested_seed == -1 else requested_seed
+            identity = self.instruct_identity or floating_model_identity(
+                "huggingface", str(parameters["model"]))
+            with Image.open(output) as generated:
+                width, height = generated.size
+            operation_name = (
+                "instruct"
+                if profile.stable_id == LEGACY_INSTRUCT_PROFILE_ID
+                else "image_edit"
+            )
+            provenance = GenerationProvenance(
+                operation=operation_name,
+                model=identity,
+                request=RequestProvenance.capture(operation_name, {
+                    "model_profile_id": profile.stable_id,
+                    "parameters": parameters,
+                }),
+                seed=seed,
+                width=width,
+                height=height,
+                runtime=FrozenJsonObject.capture({
+                    "backend": "fake",
+                    "pipeline": f"Fake{profile.provider}",
+                    "model_profile_id": profile.stable_id,
                     "device": "cpu",
                     "dtype": "float32",
                 }),

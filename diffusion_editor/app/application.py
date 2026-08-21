@@ -664,7 +664,15 @@ class EditorApplication:
         if event.model_error is not None:
             self.update_panel("instruct", "model-error", error=event.model_error)
         elif event.model_loaded:
-            self.update_panel("instruct", "model-loaded")
+            info = getattr(self.engines.instruct, "model_info", {})
+            self.update_panel(
+                "instruct",
+                "model-loaded",
+                profile_id=(
+                    str(info.get("profile_id", ""))
+                    if isinstance(info, dict) else ""
+                ),
+            )
         if (
                 event.status
                 and event.inference_result is None
@@ -692,12 +700,12 @@ class EditorApplication:
                 layer=layer,
                 result_image=result_image,
                 paste=context.paste,
-                label="Apply Instruct Result",
+                label="Apply AI Edit Result",
                 provenance=context.result_provenance,
             ))
             self.update_panel("instruct", "result")
             self.set_status(self._generation_success_status(
-                f"Instruction applied (seed={used_seed})",
+                f"AI edit applied (seed={used_seed})",
                 context,
             ))
         elif event.inference_error is not None:

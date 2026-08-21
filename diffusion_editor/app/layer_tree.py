@@ -344,7 +344,7 @@ class LayerTreeCoordinator:
         label = {
             "diffusion": "Attach Diffusion Tool",
             "lama": "Attach LaMa Tool",
-            "instruct": "Attach Instruct Tool",
+            "instruct": "Attach AI Edit Tool",
         }.get(tool_type, "Attach Tool")
         self._document.execute(AttachLayerToolCommand(
             layer=layer,

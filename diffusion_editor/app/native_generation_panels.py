@@ -13,6 +13,10 @@ from .generation_panels import (
     GenerationPanelsState,
     GenerationPhase,
 )
+from ..generation.image_edit_profiles import (
+    ParameterKind,
+    all_image_edit_parameters,
+)
 
 
 _PREDICTIONS = ("Auto", "epsilon", "v_prediction")
@@ -41,6 +45,13 @@ class NativeGenerationPanels:
         self._connections: list[object] = []
         self._model_paths: list[str] = []
         self._reference_ids: list[str | None] = []
+        self._image_edit_profile_ids: list[str] = []
+        self._image_edit_widgets: dict[str, object] = {}
+        self._image_edit_choice_values: dict[str, list[str]] = {}
+        self._image_edit_specs = {
+            parameter.stable_id: parameter
+            for parameter in all_image_edit_parameters()
+        }
 
         self.content = document.create_vstack(
             "NativeGenerationPanelsContent")
@@ -58,7 +69,7 @@ class NativeGenerationPanels:
         self.content.add_preferred_child(self.lama_group.widget)
 
         self.instruct_group, instruct = self._group(
-            "InstructPix2Pix", "instruct")
+            "AI Edit", "instruct")
         self._build_instruct(instruct)
         self.content.add_preferred_child(self.instruct_group.widget)
 
@@ -67,7 +78,7 @@ class NativeGenerationPanels:
         self.content.add_preferred_child(self.mask_group.widget)
 
         self.empty_label = document.create_label(
-            "Attach a Diffusion, LaMa or Instruct tool to the active layer.",
+            "Attach a Diffusion, LaMa or AI Edit tool to the active layer.",
             "NativeGenerationEmptyLabel",
         )
         self.empty_label.stable_id = "diffusion-editor.generation.empty"
@@ -157,12 +168,39 @@ class NativeGenerationPanels:
                 not lama_busy)
 
             instruct = state.instruct
-            self.instruct_text.text = instruct.instruction
-            self.instruct_image_guidance.value = (
-                instruct.image_guidance_scale)
-            self.instruct_guidance.value = instruct.guidance_scale
-            self.instruct_steps.value = float(instruct.steps)
-            self.instruct_seed.text = instruct.seed_text
+            self._sync_combo(
+                self.image_edit_profile_combo,
+                [choice.name for choice in instruct.model_profiles],
+                [choice.stable_id for choice in instruct.model_profiles],
+                instruct.model_profile_id,
+                self._set_image_edit_profile_ids,
+            )
+            self.image_edit_description.text = instruct.profile_description
+            active_parameters = {
+                parameter.stable_id for parameter in instruct.parameters}
+            values = instruct.parameter_values or {}
+            for parameter_id, widget in self._image_edit_widgets.items():
+                supported = parameter_id in active_parameters
+                widget.widget.visible = True
+                widget.widget.enabled = supported
+                if not supported:
+                    continue
+                spec = self._image_edit_specs[parameter_id]
+                value = values.get(parameter_id, spec.default)
+                if parameter_id == "seed":
+                    widget.text = str(value)
+                elif spec.kind in {ParameterKind.TEXT, ParameterKind.STRING}:
+                    widget.text = str(value)
+                elif spec.kind in {ParameterKind.INTEGER, ParameterKind.FLOAT}:
+                    widget.value = float(value)
+                elif spec.kind == ParameterKind.BOOLEAN:
+                    widget.checked = bool(value)
+                elif spec.kind == ParameterKind.CHOICE:
+                    self._set_combo_value(
+                        widget,
+                        self._image_edit_choice_values[parameter_id],
+                        str(value),
+                    )
             self.instruct_status.text = (
                 f"{instruct.phase.value}: {instruct.message}")
             self.instruct_info.text = instruct.layer_info
@@ -329,28 +367,81 @@ class NativeGenerationPanels:
             lambda: self._emit(GenerationAction.CLEAR_MASK))
 
     def _build_instruct(self, content) -> None:
+        self._caption(content, "Model", "instruct.profile.caption")
+        self.image_edit_profile_combo = self._combo(
+            content,
+            "instruct.profile",
+            lambda index: self._emit(
+                GenerationAction.SELECT_IMAGE_EDIT_PROFILE,
+                self._item(self._image_edit_profile_ids, index, ""),
+            ),
+        )
+        self.image_edit_description = self._label(
+            content, "", "instruct.profile.description")
         self.instruct_status = self._label(
             content, "", "instruct.status")
         self.instruct_load_button = self._button(
-            content, "Load InstructPix2Pix", "instruct.load-model",
+            content, "Load Model", "instruct.load-model",
             lambda: self._emit(GenerationAction.LOAD_MODEL))
-        self.instruct_text = self._text_area(
-            content,
-            "instruct.instruction",
-            "make it snowy",
-            GenerationAction.SET_INSTRUCTION,
-        )
-        self.instruct_image_guidance = self._slider(
-            content, "Image Guidance", "instruct.image-guidance",
-            1.5, 1, 3, 0.1, 1,
-            GenerationAction.SET_IMAGE_GUIDANCE)
-        self.instruct_guidance = self._slider(
-            content, "CFG Scale", "instruct.guidance",
-            7, 1, 20, 0.1, 1, GenerationAction.SET_GUIDANCE)
-        self.instruct_steps = self._slider(
-            content, "Steps", "instruct.steps",
-            20, 1, 50, 1, 0, GenerationAction.SET_STEPS)
-        self.instruct_seed = self._seed_row(content, "instruct")
+        for parameter in all_image_edit_parameters():
+            parameter_id = parameter.stable_id
+            suffix = f"instruct.parameter.{parameter_id.replace('_', '-')}"
+            emit = lambda changed, key=parameter_id: self._emit(
+                GenerationAction.SET_IMAGE_EDIT_PARAMETER,
+                (key, changed),
+            )
+            if parameter.kind == ParameterKind.TEXT:
+                self._caption(content, parameter.label, f"{suffix}.caption")
+                widget = self._text_area_callback(
+                    content, suffix, parameter.placeholder, emit)
+            elif parameter.kind == ParameterKind.STRING:
+                widget = self._text_input_parameter(
+                    content, parameter.label, suffix,
+                    parameter.placeholder, emit)
+            elif parameter_id == "seed":
+                widget = self._seed_parameter_row(
+                    content, suffix, emit)
+            elif parameter.kind in {
+                    ParameterKind.INTEGER, ParameterKind.FLOAT}:
+                widget = self._slider_callback(
+                    content,
+                    parameter.label,
+                    suffix,
+                    parameter.default,
+                    parameter.minimum,
+                    parameter.maximum,
+                    parameter.step,
+                    parameter.decimals,
+                    emit,
+                )
+            elif parameter.kind == ParameterKind.BOOLEAN:
+                widget = self._checkbox_callback(
+                    content, parameter.label, suffix, emit)
+            else:
+                self._caption(content, parameter.label, f"{suffix}.caption")
+                values = [choice.value for choice in parameter.choices]
+                widget = self._combo(
+                    content,
+                    suffix,
+                    lambda index, key=parameter_id: self._emit(
+                        GenerationAction.SET_IMAGE_EDIT_PARAMETER,
+                        (key, self._item(
+                            self._image_edit_choice_values[key], index, "")),
+                    ),
+                )
+                self._fill_combo(
+                    widget, [choice.label for choice in parameter.choices])
+                self._image_edit_choice_values[parameter_id] = values
+            self._image_edit_widgets[parameter_id] = widget
+
+        # Compatibility aliases for integrations which still address the old
+        # fixed InstructPix2Pix controls.
+        self.instruct_text = self._image_edit_widgets["prompt"]
+        self.instruct_image_guidance = self._image_edit_widgets[
+            "image_guidance_scale"]
+        self.instruct_guidance = self._image_edit_widgets["guidance_scale"]
+        self.instruct_steps = self._image_edit_widgets["steps"]
+        self.instruct_seed = self._image_edit_widgets["seed"]
         self.instruct_info = self._label(
             content, "", "instruct.layer-info")
         actions = self._document.create_hstack(
@@ -448,6 +539,30 @@ class NativeGenerationPanels:
         parent.add_fixed_child(area.widget, 64.0)
         return area
 
+    def _text_area_callback(self, parent, suffix, placeholder, callback):
+        area = self._document.create_text_area("")
+        area.widget.stable_id = (
+            f"diffusion-editor.generation.{suffix}")
+        area.placeholder = placeholder
+        self._connections.append(area.connect_changed(
+            lambda changed: None
+            if self._syncing or self._closed else callback(changed)))
+        parent.add_fixed_child(area.widget, 64.0)
+        return area
+
+    def _text_input_parameter(
+            self, parent, label, suffix, placeholder, callback):
+        self._caption(parent, label, f"{suffix}.caption")
+        field = self._document.create_text_input("")
+        field.widget.stable_id = (
+            f"diffusion-editor.generation.{suffix}")
+        field.placeholder = placeholder
+        self._connections.append(field.connect_changed(
+            lambda changed: None
+            if self._syncing or self._closed else callback(changed)))
+        parent.add_preferred_child(field.widget)
+        return field
+
     def _seed_row(self, parent, suffix):
         row = self._document.create_hstack("NativeGenerationSeedRow")
         row.set_layout_spacing(4.0)
@@ -459,6 +574,24 @@ class NativeGenerationPanels:
             lambda text: self._emit(GenerationAction.SET_SEED, text)))
         random_button = self._button(
             row, "Rnd", f"{suffix}.random-seed",
+            lambda: self._emit(GenerationAction.RANDOM_SEED), add=False)
+        row.add_flex_child(seed.widget, 1.0)
+        row.add_fixed_child(random_button.widget, 48.0)
+        parent.add_preferred_child(row)
+        return seed
+
+    def _seed_parameter_row(self, parent, suffix, callback):
+        row = self._document.create_hstack("NativeGenerationSeedRow")
+        row.set_layout_spacing(4.0)
+        seed = self._document.create_text_input("-1")
+        seed.widget.stable_id = (
+            f"diffusion-editor.generation.{suffix}")
+        seed.placeholder = "seed"
+        self._connections.append(seed.connect_changed(
+            lambda changed: None
+            if self._syncing or self._closed else callback(changed)))
+        random_button = self._button(
+            row, "Rnd", f"{suffix}.random",
             lambda: self._emit(GenerationAction.RANDOM_SEED), add=False)
         row.add_flex_child(seed.widget, 1.0)
         row.add_fixed_child(random_button.widget, 48.0)
@@ -488,6 +621,22 @@ class NativeGenerationPanels:
         parent.add_preferred_child(slider.widget)
         return slider
 
+    def _slider_callback(
+            self, parent, label, suffix, value, minimum, maximum,
+            step, decimals, callback):
+        slider = self._document.create_slider_edit(float(value))
+        slider.widget.stable_id = (
+            f"diffusion-editor.generation.{suffix}")
+        slider.label = label
+        slider.set_range(float(minimum), float(maximum))
+        slider.set_step(float(step))
+        slider.set_decimals(decimals)
+        self._connections.append(slider.connect_changed(
+            lambda changed: None
+            if self._syncing or self._closed else callback(changed)))
+        parent.add_preferred_child(slider.widget)
+        return slider
+
     def _checkbox(
             self, parent, label, suffix, action, *, add=True):
         checkbox = self._document.create_checkbox(False)
@@ -506,6 +655,26 @@ class NativeGenerationPanels:
             row.add_preferred_child(checkbox.widget)
             row.add_flex_child(text, 1.0)
             parent.add_preferred_child(row)
+        return checkbox
+
+    def _checkbox_callback(
+            self, parent, label, suffix, callback):
+        checkbox = self._document.create_checkbox(False)
+        checkbox.widget.stable_id = (
+            f"diffusion-editor.generation.{suffix}")
+        self._connections.append(checkbox.connect_changed(
+            lambda checked: None
+            if self._syncing or self._closed else callback(checked)))
+        row = self._document.create_hstack(
+            "NativeGenerationCheckboxRow")
+        row.set_layout_spacing(4.0)
+        text = self._document.create_label(
+            label, "NativeGenerationCheckboxLabel")
+        text.stable_id = (
+            f"diffusion-editor.generation.{suffix}.label")
+        row.add_preferred_child(checkbox.widget)
+        row.add_flex_child(text, 1.0)
+        parent.add_preferred_child(row)
         return checkbox
 
     def _add_inline_checkbox(
@@ -558,6 +727,9 @@ class NativeGenerationPanels:
 
     def _set_reference_ids(self, values) -> None:
         self._reference_ids = values
+
+    def _set_image_edit_profile_ids(self, values) -> None:
+        self._image_edit_profile_ids = values
 
     @staticmethod
     def _item(values, index: int, default):

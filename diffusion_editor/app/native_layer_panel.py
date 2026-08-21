@@ -279,7 +279,7 @@ class NativeLayerPanel:
             ),
             CommandData(
                 "attach.instruct",
-                "Attach Instruct Tool",
+                "Attach AI Edit Tool",
                 enabled=accepts_tool and not has_tool,
             ),
             CommandData(

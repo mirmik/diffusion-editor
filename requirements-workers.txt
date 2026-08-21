@@ -108,6 +108,8 @@ packaging==26.2
     #   pooch
     #   scikit-image
     #   transformers
+peft==0.20.0
+    # via -r requirements-workers.in
 pillow==12.3.0
     # via
     #   diffusers
