@@ -128,6 +128,15 @@ def test_dialog_coordinator_file_specs_cancel_and_last_directory(tmp_path):
     callback(None)
     assert app.project_path is None
 
+    selected_references = []
+    coordinator.pick_ai_edit_reference(selected_references.append)
+    reference_spec, callback = view.files[-1]
+    assert reference_spec.kind == FileDialogKind.OPEN_FILE
+    assert reference_spec.title == "Select AI Edit Reference"
+    assert "*.png" in reference_spec.filters
+    callback(str(tmp_path / "reference.png"))
+    assert selected_references == [str(tmp_path / "reference.png")]
+
     image_path = tmp_path / "inputs" / "source.png"
     image_path.parent.mkdir()
     Image.fromarray(

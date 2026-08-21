@@ -89,7 +89,11 @@ class InstructTool(Tool):
                  steps: int = 20,
                  seed: int = -1,
                  model_profile_id: str = LEGACY_INSTRUCT_PROFILE_ID,
-                 profile_parameters: dict[str, dict] | None = None):
+                 profile_parameters: dict[str, dict] | None = None,
+                 reference_layer_id: str | None = None,
+                 reference_layer_name_hint: str = "",
+                 reference_image: Image.Image | None = None,
+                 reference_image_name_hint: str = ""):
         self.source_patch = source_patch
         self.patch_x = patch_x
         self.patch_y = patch_y
@@ -98,6 +102,11 @@ class InstructTool(Tool):
         # Keep parameters for every profile so switching models is lossless.
         self.profile_parameters = normalize_profile_store(profile_parameters)
         self.model_profile_id = model_profile_id
+        self.reference_layer_id = reference_layer_id
+        self.reference_layer_name_hint = reference_layer_name_hint
+        self.reference_image = (
+            reference_image.copy() if reference_image is not None else None)
+        self.reference_image_name_hint = reference_image_name_hint
         image_edit_profile(model_profile_id)  # fail early on corrupt state
         if profile_parameters is None:
             legacy = self.profile_parameters[LEGACY_INSTRUCT_PROFILE_ID]

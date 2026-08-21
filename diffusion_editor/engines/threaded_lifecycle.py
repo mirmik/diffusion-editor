@@ -13,7 +13,8 @@ from ..generation.types import EnginePollEvent
 
 EventT = TypeVar("EventT")
 TaskType = Literal[
-    "load", "load_ip_adapter", "inference", "segmentation", "reconstruction"
+    "load", "load_ip_adapter", "inference", "segmentation", "depth",
+    "reconstruction",
 ]
 
 

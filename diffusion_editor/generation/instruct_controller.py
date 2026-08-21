@@ -11,6 +11,7 @@ from PIL import Image
 from tcbase import log
 
 from ..document.layer import Layer
+from ..document.layer_stack import LayerStack
 from ..document.tool import InstructTool
 from ..engines.instruct_engine import InstructEngine
 from .job_context import (
@@ -26,6 +27,7 @@ from .job_context import (
     terminal_job_matches,
 )
 from .patch_resolver import apply_patch_source_to_tool, resolve_source_patch
+from .reference_resolver import resolve_image_edit_reference
 from .provenance import RequestProvenance
 from .image_edit_profiles import (
     LEGACY_INSTRUCT_PROFILE_ID,
@@ -61,10 +63,12 @@ class InstructGenerationController:
             self,
             *,
             engine: InstructEngine,
+            layer_stack: LayerStack | None = None,
             composite_below: Callable[[Layer], np.ndarray | None],
             document_state: Callable[[], JobDocumentState] | None = None,
             job_id_factory: Callable[[], str] = new_job_id):
         self._engine = engine
+        self._layer_stack = layer_stack
         self._composite_below = composite_below
         self._document_state = document_state or standalone_document_state
         self._job_id_factory = job_id_factory
@@ -206,18 +210,38 @@ class InstructGenerationController:
             return InstructControllerEvent(
                 status="No source patch for instruction")
         parameters = copy.deepcopy(tool.parameters)
+        reference_image = None
+        profile = image_edit_profile(tool.model_profile_id)
+        if profile.max_input_images > 1:
+            if self._layer_stack is None and tool.reference_layer_id is not None:
+                return InstructControllerEvent(
+                    status="AI Edit reference layer is unavailable")
+            if self._layer_stack is not None:
+                reference_image = resolve_image_edit_reference(
+                    tool, self._layer_stack)
+            elif tool.reference_image is not None:
+                reference_image = tool.reference_image.copy().convert("RGB")
+            if isinstance(reference_image, GenerationError):
+                log.error(reference_image.log_message or reference_image.message)
+                return InstructControllerEvent(status=reference_image.message)
+        frozen_reference = FrozenImage.capture(reference_image)
         request = ImageEditRequest(
             image=input_image.to_image(),
             model_profile_id=tool.model_profile_id,
             parameters=parameters,
+            reference_image=(
+                frozen_reference.to_image()
+                if frozen_reference is not None else None),
         )
-        profile = image_edit_profile(tool.model_profile_id)
         context = capture_job_context(
             kind="instruct",
             document_state=self._document_state(),
             layer=layer,
             job_id=self._job_id_factory(),
             input_image=input_image.to_image(),
+            reference_image=(
+                frozen_reference.to_image()
+                if frozen_reference is not None else None),
             paste=FrozenPasteContext.capture(layer, tool),
             model_provenance=(
                 ("model_profile_id", profile.stable_id),
@@ -230,6 +254,9 @@ class InstructGenerationController:
                     "model_profile_id": request.model_profile_id,
                     "parameters": request.parameters,
                     "input_image_hash": input_image.content_hash,
+                    "reference_image_hash": (
+                        frozen_reference.content_hash
+                        if frozen_reference is not None else None),
                 },
             ),
         )

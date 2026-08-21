@@ -109,7 +109,10 @@ class InstructEngine:
                 "parameters": request.parameters,
             },
             cancel,
-            images={"image": request.image},
+            images={
+                "image": request.image,
+                "reference_image": request.reference_image,
+            },
         )
         return InstructInferenceResult(
             image=result["image"],

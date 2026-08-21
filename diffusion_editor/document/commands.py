@@ -903,6 +903,72 @@ class ClearIpAdapterReferenceLayerCommand:
 
 
 @dataclass(frozen=True)
+class SetImageEditReferenceCommand:
+    layer: Layer
+    reference_layer_id: str | None = None
+    reference_layer_name_hint: str = ""
+    reference_image: Image.Image | None = None
+    reference_image_name_hint: str = ""
+    label: str = "Set AI Edit Reference"
+
+    @staticmethod
+    def _copy_image(image: Image.Image | None) -> Image.Image | None:
+        return image.copy() if image is not None else None
+
+    def _values(self) -> dict[str, object]:
+        return {
+            "reference_layer_id": self.reference_layer_id,
+            "reference_layer_name_hint": self.reference_layer_name_hint,
+            "reference_image": self._copy_image(self.reference_image),
+            "reference_image_name_hint": self.reference_image_name_hint,
+        }
+
+    def apply(self, layer_stack: LayerStack) -> None:
+        tool = self.layer.tool
+        if not isinstance(tool, InstructTool):
+            return
+        for name, value in self._values().items():
+            setattr(tool, name, value)
+        layer_stack.publish_change(
+            DocumentChangeKind.METADATA, layers=(self.layer,))
+
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
+        tool = self.layer.tool
+        if not isinstance(tool, InstructTool):
+            return None
+        old_values = {
+            "reference_layer_id": tool.reference_layer_id,
+            "reference_layer_name_hint": tool.reference_layer_name_hint,
+            "reference_image": self._copy_image(tool.reference_image),
+            "reference_image_name_hint": tool.reference_image_name_hint,
+        }
+        new_values = self._values()
+
+        def assign(values: dict[str, object]) -> None:
+            for name, value in values.items():
+                if name == "reference_image":
+                    value = self._copy_image(value)
+                setattr(tool, name, value)
+            layer_stack.publish_change(
+                DocumentChangeKind.METADATA, layers=(self.layer,))
+
+        assign(new_values)
+        size = 0
+        for values in (old_values, new_values):
+            for name, value in values.items():
+                if name == "reference_image" and isinstance(value, Image.Image):
+                    size += len(value.tobytes())
+                elif name != "reference_image":
+                    size += len(repr(value).encode("utf-8"))
+        return CommandDelta(
+            lambda: assign(old_values),
+            lambda: assign(new_values),
+            size,
+            coalesce_key=("image-edit-reference", self.layer.id),
+        )
+
+
+@dataclass(frozen=True)
 class UpdateDiffusionToolCommand:
     layer: Layer
     prompt: str

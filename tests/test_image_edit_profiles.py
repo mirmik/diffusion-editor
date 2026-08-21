@@ -3,8 +3,14 @@ from __future__ import annotations
 import io
 import zipfile
 
+from PIL import Image
+
 from diffusion_editor.document.tool import InstructTool
-from diffusion_editor.document.tool_serialization import load_tool, serialize_tool
+from diffusion_editor.document.tool_serialization import (
+    load_tool,
+    save_tool_assets,
+    serialize_tool,
+)
 from diffusion_editor.generation.image_edit_profiles import (
     DEFAULT_IMAGE_EDIT_PROFILE_ID,
     FLUX2_KLEIN_PROFILE_ID,
@@ -138,6 +144,22 @@ def test_image_edit_profiles_roundtrip_with_legacy_fields():
     restored.set_profile(QWEN_IMAGE_EDIT_PROFILE_ID)
     assert restored.parameters == image_edit_profile(
         QWEN_IMAGE_EDIT_PROFILE_ID).defaults()
+
+
+def test_image_edit_external_reference_roundtrip():
+    tool = _tool(QWEN_IMAGE_EDIT_PROFILE_ID)
+    tool.reference_image = Image.new("RGB", (7, 5), (12, 34, 56))
+    tool.reference_image_name_hint = "portrait.png"
+    data = serialize_tool(tool, "edit")
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        save_tool_assets(tool, archive, "edit")
+    with zipfile.ZipFile(io.BytesIO(buffer.getvalue()), "r") as archive:
+        restored = load_tool(data, archive).tool
+
+    assert restored.reference_image_name_hint == "portrait.png"
+    assert restored.reference_image.size == (7, 5)
+    assert restored.reference_image.getpixel((0, 0)) == (12, 34, 56)
 
 
 def test_legacy_instruct_document_migrates_without_changing_values():

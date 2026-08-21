@@ -45,6 +45,7 @@ def _application(calls=None):
         lama=_Engine("lama", calls),
         instruct=_Engine("instruct", calls),
         grounding=_Engine("grounding", calls),
+        depth=_Engine("depth", calls),
     )
     return EditorApplication(settings=_MemorySettings(), engines=engines)
 
@@ -123,6 +124,7 @@ def test_shutdown_orders_view_workers_engines_and_gpu_resources():
         "lama",
         "segmentation",
         "grounding",
+        "depth",
         "canvas",
     ]
     assert application.shutdown_trace == [
@@ -132,6 +134,7 @@ def test_shutdown_orders_view_workers_engines_and_gpu_resources():
         "lama-engine",
         "segmentation-engine",
         "grounding-engine",
+        "depth-engine",
         "canvas",
     ]
 

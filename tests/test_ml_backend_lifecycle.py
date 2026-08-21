@@ -8,6 +8,7 @@ import pytest
 
 from diffusion_editor.generation.image_edit_profiles import (
     LEGACY_INSTRUCT_PROFILE_ID,
+    QWEN_IMAGE_EDIT_PROFILE_ID,
     SENSENOVA_U15_PROFILE_ID,
     image_edit_profile,
 )
@@ -131,6 +132,50 @@ def test_failed_image_edit_reload_leaves_backend_unloaded(monkeypatch):
     assert backend._instruct_device is None
     assert backend._instruct_dtype is None
     assert backend._image_edit_profile_id is None
+
+
+def test_qwen_image_edit_passes_second_image_as_ordered_list(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeGenerator:
+        def __init__(self, *, device):
+            captured["generator_device"] = device
+
+        def manual_seed(self, seed):
+            captured["seed"] = seed
+            return self
+
+    class FakeEditPipeline(_FakePipeline):
+        def __call__(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(images=[Image.new("RGB", (8, 6), "blue")])
+
+    monkeypatch.setitem(
+        sys.modules, "torch", SimpleNamespace(Generator=FakeGenerator))
+    backend = RealMlBackend()
+    backend._instruct_pipe = FakeEditPipeline()
+    backend._image_edit_profile_id = QWEN_IMAGE_EDIT_PROFILE_ID
+    backend._instruct_device = "cpu"
+    backend._instruct_dtype = "float32"
+    parameters = image_edit_profile(QWEN_IMAGE_EDIT_PROFILE_ID).defaults()
+    parameters.update({"prompt": "combine", "seed": 123})
+    first = Image.new("RGBA", (8, 6), "red")
+    second = Image.new("RGBA", (5, 7), "green")
+
+    result, seed, _provenance = backend.image_edit(
+        {
+            "profile_id": QWEN_IMAGE_EDIT_PROFILE_ID,
+            "parameters": parameters,
+        },
+        first,
+        second,
+    )
+
+    assert seed == 123
+    assert result.size == (8, 6)
+    assert isinstance(captured["image"], list)
+    assert [image.size for image in captured["image"]] == [(8, 6), (5, 7)]
+    assert all(image.mode == "RGB" for image in captured["image"])
 
 
 def test_sensenova_provider_loads_gguf_and_uses_standalone_edit_adapter(

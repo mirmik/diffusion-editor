@@ -164,6 +164,14 @@ COMMAND_SPECS = (
     NativeCommandSpec("layer.flatten", "Flatten"),
     NativeCommandSpec("layer.detect", "Detect Objects…"),
     NativeCommandSpec(
+        "ai.depth_map",
+        "Create Depth Map",
+        tooltip=(
+            "Create a grayscale depth layer from the current image using "
+            "Depth Anything V2 Small"
+        ),
+    ),
+    NativeCommandSpec(
         "generation.3d",
         "Generate to Selected Stage",
         tooltip="Generate a Pixal3D model from the current composite",
@@ -248,6 +256,13 @@ MENU_COMMANDS = (
         ),
     ),
     (
+        "ai",
+        "AI",
+        (
+            "ai.depth_map",
+        ),
+    ),
+    (
         "generation",
         "3D",
         (
@@ -273,6 +288,7 @@ TOOLBAR_COMMANDS = (
     None,
     "view.fit",
     "layer.new_3d_reconstruction",
+    "ai.depth_map",
     None,
     "selection.all",
     "selection.clear",

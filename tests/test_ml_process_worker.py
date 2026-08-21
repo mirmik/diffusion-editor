@@ -85,7 +85,7 @@ def _poll(engine, timeout: float = 2.0):
     return event
 
 
-def test_fake_worker_smokes_all_three_model_families_without_main_imports():
+def test_fake_worker_smokes_model_families_without_main_imports():
     client = _client()
     before = sys._is_gil_enabled()
     progress: list[str] = []
@@ -138,6 +138,17 @@ def test_fake_worker_smokes_all_three_model_families_without_main_imports():
             threading.Event(),
             images={"image": np.asarray(_image().convert("RGBA"))},
         )
+        depth = client.request(
+            "depth",
+            {"model_id": "depth-anything/Depth-Anything-V2-Small-hf"},
+            threading.Event(),
+            images={"image": _image()},
+        )
+        assert depth["image"].mode == "L"
+        assert depth["image"].size == (8, 6)
+        depth_array = np.asarray(depth["image"])
+        assert depth_array[0, 0] == 255
+        assert depth_array[0, -1] == 0
         assert grounding["detections"][0]["label"] == "object"
         assert grounding["detections"][0]["mask"].shape == (6, 8)
         assert client.is_running
@@ -205,6 +216,29 @@ def test_image_edit_engine_reloads_only_for_load_time_parameters():
         assert _poll(engine).result.seed == 4343
     finally:
         engine.shutdown()
+
+
+def test_image_edit_engine_sends_optional_second_image_to_worker():
+    class CaptureClient:
+        is_running = True
+
+        def request(self, operation, data, cancel, images=None):
+            assert operation == "image_edit"
+            assert images["image"].getpixel((0, 0)) == (255, 0, 0)
+            assert images["reference_image"].getpixel((0, 0)) == (0, 0, 255)
+            return {"image": _image("green"), "seed": 17}
+
+    parameters = image_edit_profile(QWEN_IMAGE_EDIT_PROFILE_ID).defaults()
+    engine = InstructEngine(client=CaptureClient())
+    result = engine._run_inference(ImageEditRequest(
+        image=_image("red"),
+        model_profile_id=QWEN_IMAGE_EDIT_PROFILE_ID,
+        parameters=parameters,
+        reference_image=_image("blue"),
+    ), threading.Event())
+
+    assert result.seed == 17
+    assert result.image.getpixel((0, 0)) == (0, 128, 0)
 
 
 @pytest.mark.parametrize(

@@ -46,6 +46,12 @@ def save_tool_assets(tool: Tool, zf: zipfile.ZipFile, file_key: str) -> None:
             f"layers/{file_key}_source.npy",
             np.array(tool.source_patch),
         )
+    if isinstance(tool, InstructTool) and tool.reference_image is not None:
+        save_array_to_zip(
+            zf,
+            f"layers/{file_key}_reference.npy",
+            np.array(tool.reference_image),
+        )
 
 
 def load_tool(d: dict, zf: zipfile.ZipFile) -> ToolLoadResult:
@@ -127,6 +133,12 @@ def _serialize_instruct_tool(tool: InstructTool, file_key: str) -> dict:
         "seed": tool.seed,
         "model_profile_id": tool.model_profile_id,
         "profile_parameters": tool.profile_parameters,
+        "reference_layer_id": tool.reference_layer_id,
+        "reference_layer_name_hint": tool.reference_layer_name_hint,
+        "reference_file": (
+            f"layers/{file_key}_reference.npy"
+            if tool.reference_image is not None else None),
+        "reference_image_name_hint": tool.reference_image_name_hint,
     }, tool)
 
 
@@ -203,6 +215,12 @@ def _load_lama_tool(d: dict, zf: zipfile.ZipFile) -> ToolLoadResult:
 
 
 def _load_instruct_tool(d: dict, zf: zipfile.ZipFile) -> ToolLoadResult:
+    reference_file = d.get("reference_file")
+    reference_image = (
+        load_pil_from_zip(zf, reference_file, mode="RGB")
+        if isinstance(reference_file, str) and reference_file in zf.namelist()
+        else None
+    )
     tool = InstructTool(
         source_patch=_load_source_patch(d, zf),
         patch_x=d["patch_x"],
@@ -221,6 +239,12 @@ def _load_instruct_tool(d: dict, zf: zipfile.ZipFile) -> ToolLoadResult:
             if isinstance(d.get("profile_parameters"), dict)
             else None
         ),
+        reference_layer_id=d.get("reference_layer_id"),
+        reference_layer_name_hint=d.get(
+            "reference_layer_name_hint", ""),
+        reference_image=reference_image,
+        reference_image_name_hint=d.get(
+            "reference_image_name_hint", ""),
     )
     _load_generation_provenance(tool, d)
     return ToolLoadResult(

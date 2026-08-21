@@ -124,7 +124,11 @@ class _Backend:
             profile = image_edit_profile(str(data["profile_id"]))
             progress(f"Running {profile.title}...")
             image = self._open_required(data, "image")
-            result, seed, provenance = self._real.image_edit(data, image)
+            reference_image = (
+                self._open_required(data, "reference_image")
+                if data.get("reference_image_path") else None)
+            result, seed, provenance = self._real.image_edit(
+                data, image, reference_image)
             output = output_dir / "result.png"
             result.save(output, format="PNG")
             return {
@@ -132,6 +136,12 @@ class _Backend:
                 "seed": seed,
                 "provenance": provenance,
             }
+        if operation == "depth":
+            image = self._open_required(data, "image")
+            result = self._real.depth(data, image, progress)
+            output = output_dir / "depth.png"
+            result.save(output, format="PNG")
+            return {"output_path": str(output)}
         if operation == "grounding":
             image = self._open_required(data, "image")
             detections = self._real.grounding(data, image, progress)
@@ -394,6 +404,16 @@ class _Backend:
                 "seed": seed,
                 "provenance": provenance.to_dict(),
             }
+        if operation == "depth":
+            progress("Loading Depth-Anything-V2-Small-hf from cache...")
+            progress("Depth Anything V2 Small: estimating depth...")
+            image = self._open_required(data, "image")
+            width, height = image.size
+            gradient = np.linspace(255, 0, width, dtype=np.uint8)
+            depth = np.broadcast_to(gradient, (height, width)).copy()
+            output = output_dir / "depth.png"
+            Image.fromarray(depth, "L").save(output, format="PNG")
+            return {"output_path": str(output)}
         if operation == "grounding":
             progress("Grounding: detecting...")
             image = self._open_required(data, "image")

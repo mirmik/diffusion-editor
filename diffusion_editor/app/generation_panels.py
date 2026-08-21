@@ -9,11 +9,14 @@ import os
 import random
 from typing import Callable, Protocol
 
+from PIL import Image
+
 from ..canvas.editor_canvas_controller import EditorCanvasController
 from ..document.commands import (
     ClearIpAdapterReferenceLayerCommand,
     ClearLayerMaskCommand,
     SetIpAdapterReferenceLayerCommand,
+    SetImageEditReferenceCommand,
     UpdateDiffusionToolCommand,
     UpdateImageEditToolCommand,
 )
@@ -67,6 +70,9 @@ class GenerationAction(str, Enum):
     SET_IMAGE_GUIDANCE = "set_image_guidance"
     SELECT_IMAGE_EDIT_PROFILE = "select_image_edit_profile"
     SET_IMAGE_EDIT_PARAMETER = "set_image_edit_parameter"
+    SELECT_IMAGE_EDIT_REFERENCE = "select_image_edit_reference"
+    PICK_IMAGE_EDIT_REFERENCE = "pick_image_edit_reference"
+    CLEAR_IMAGE_EDIT_REFERENCE = "clear_image_edit_reference"
     SET_MASK_SIZE = "set_mask_size"
     SET_MASK_HARDNESS = "set_mask_hardness"
     SET_MASK_FLOW = "set_mask_flow"
@@ -142,6 +148,9 @@ class InstructPanelState:
     parameters: tuple[ImageEditParameter, ...] = ()
     parameter_values: dict[str, object] | None = None
     profile_parameters: dict[str, dict] | None = None
+    supports_reference_image: bool = False
+    reference_layer_id: str | None = None
+    reference_label: str = "None"
 
 
 @dataclass(frozen=True)
@@ -179,6 +188,9 @@ class GenerationPanelsCoordinator:
         self._random_seed = random_seed or (
             lambda: random.randint(0, 2**32 - 1))
         self._view: GenerationPanelsPresentation | None = None
+        self._reference_file_picker: (
+            Callable[[Callable[[str], None]], None] | None
+        ) = None
         self._closed = False
         self._mask = MaskBrushState()
         self._models = self._scan_models()
@@ -222,6 +234,12 @@ class GenerationPanelsCoordinator:
         self._require_open()
         self._view = view
         view.apply_generation_panels_state(self._state)
+
+    def set_reference_file_picker(
+            self,
+            picker: Callable[[Callable[[str], None]], None] | None,
+    ) -> None:
+        self._reference_file_picker = picker
 
     def update_panel(self, update: PanelUpdate) -> None:
         """PanelPresentation port used by EditorApplication.poll."""
@@ -344,6 +362,15 @@ class GenerationPanelsCoordinator:
             self._load_ip_adapter()
         elif action == GenerationAction.SELECT_IP_REFERENCE:
             self._select_ip_reference(layer, value)
+        elif action == GenerationAction.SELECT_IMAGE_EDIT_REFERENCE:
+            self._select_image_edit_reference(layer, value)
+        elif action == GenerationAction.PICK_IMAGE_EDIT_REFERENCE:
+            if self._reference_file_picker is not None:
+                self._reference_file_picker(
+                    lambda path: self._set_image_edit_reference_file(
+                        layer.id if layer is not None else "", path))
+        elif action == GenerationAction.CLEAR_IMAGE_EDIT_REFERENCE:
+            self._clear_image_edit_reference(layer)
         elif action == GenerationAction.SET_MASK_SIZE:
             self._mask = replace(
                 self._mask, size=max(1, min(int(value), 500)))
@@ -400,6 +427,7 @@ class GenerationPanelsCoordinator:
             return
         self._closed = True
         self._view = None
+        self._reference_file_picker = None
         self._diffusion_drafts.clear()
         self._instruct_drafts.clear()
         self._stack_subscription.unsubscribe()
@@ -530,6 +558,9 @@ class GenerationPanelsCoordinator:
                 parameters=profile.parameters,
                 parameter_values=values,
                 profile_parameters=copy.deepcopy(tool.profile_parameters),
+                supports_reference_image=(profile.max_input_images > 1),
+                reference_layer_id=tool.reference_layer_id,
+                reference_label=self._image_edit_reference_label(tool),
             )
         else:
             draft = cached[1]
@@ -538,6 +569,10 @@ class GenerationPanelsCoordinator:
             phase=self._instruct_phase,
             message=self._instruct_message,
             layer_info=self._layer_info(layer, tool),
+            supports_reference_image=(
+                image_edit_profile(draft.model_profile_id).max_input_images > 1),
+            reference_layer_id=tool.reference_layer_id,
+            reference_label=self._image_edit_reference_label(tool),
         )
         self._instruct_drafts[layer.id] = (id(tool), draft)
         return draft
@@ -609,6 +644,7 @@ class GenerationPanelsCoordinator:
                 guidance_scale=float(values.get("guidance_scale", 1.0)),
                 steps=int(values.get("steps", 4)),
                 seed_text=str(values.get("seed", -1)),
+                supports_reference_image=(profile.max_input_images > 1),
             )
         elif action == GenerationAction.SET_IMAGE_EDIT_PARAMETER:
             if not isinstance(value, (tuple, list)) or len(value) != 2:
@@ -828,6 +864,64 @@ class GenerationPanelsCoordinator:
         ))
         self._application.set_status(
             f"IP-Adapter reference: {reference.name}")
+
+    def _select_image_edit_reference(
+            self, layer: Layer | None, value) -> None:
+        if layer is None or not isinstance(layer.tool, InstructTool):
+            return
+        reference_id = str(value) if value else ""
+        if not reference_id:
+            self._clear_image_edit_reference(layer)
+            return
+        reference = self._stack.find_layer_by_id(reference_id)
+        if reference is None or reference is layer:
+            return
+        self._document.execute(SetImageEditReferenceCommand(
+            layer=layer,
+            reference_layer_id=reference.id,
+            reference_layer_name_hint=reference.name,
+        ))
+        self._application.set_status(
+            f"AI Edit reference: layer {reference.name}")
+
+    def _set_image_edit_reference_file(
+            self, layer_id: str, path: str) -> None:
+        if self._closed or not path:
+            return
+        layer = self._stack.find_layer_by_id(layer_id)
+        if layer is None or not isinstance(layer.tool, InstructTool):
+            return
+        try:
+            with Image.open(path) as opened:
+                reference = opened.convert("RGB").copy()
+        except (OSError, ValueError) as exc:
+            self._application.set_status(
+                f"Could not load AI Edit reference: {exc}")
+            self.refresh()
+            return
+        self._document.execute(SetImageEditReferenceCommand(
+            layer=layer,
+            reference_image=reference,
+            reference_image_name_hint=os.path.basename(path),
+        ))
+        self._application.set_last_dir(os.path.dirname(path))
+        self._application.set_status(
+            f"AI Edit reference: {os.path.basename(path)}")
+        self.refresh()
+
+    def _clear_image_edit_reference(self, layer: Layer | None) -> None:
+        if layer is None or not isinstance(layer.tool, InstructTool):
+            return
+        self._document.execute(SetImageEditReferenceCommand(layer=layer))
+        self._application.set_status("AI Edit second reference cleared")
+
+    @staticmethod
+    def _image_edit_reference_label(tool: InstructTool) -> str:
+        if tool.reference_layer_id is not None:
+            return f"Layer: {tool.reference_layer_name_hint or tool.reference_layer_id}"
+        if tool.reference_image is not None:
+            return f"External: {tool.reference_image_name_hint or 'image'}"
+        return "None"
 
     def _apply_mask_brush(self) -> None:
         if self._canvas_controls is not None:

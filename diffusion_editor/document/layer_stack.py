@@ -869,6 +869,12 @@ class LayerStack:
                         or source_file not in available):
                     raise ValueError(
                         "project tool source image entry is missing")
+                reference_file = tool_dict.get("reference_file")
+                if reference_file is not None and (
+                        not isinstance(reference_file, str)
+                        or reference_file not in available):
+                    raise ValueError(
+                        "project tool reference image entry is missing")
             children = layer_dict.get("children", [])
             if not isinstance(children, list):
                 raise ValueError("project layer children must be an array")
@@ -1081,7 +1087,22 @@ class LayerStack:
                 raise ValueError(
                     "tool resize_to_model_resolution must be boolean")
         elif isinstance(tool, InstructTool):
-            self._validate_string_fields(tool, ("instruction",))
+            self._validate_string_fields(tool, (
+                "instruction",
+                "reference_layer_name_hint",
+                "reference_image_name_hint",
+            ))
+            if (
+                    tool.reference_layer_id is not None
+                    and not isinstance(tool.reference_layer_id, str)):
+                raise ValueError(
+                    "tool reference_layer_id must be a string or null")
+            if (
+                    tool.reference_layer_id is not None
+                    and tool.reference_image is not None):
+                raise ValueError(
+                    "AI Edit tool cannot use layer and embedded references "
+                    "at the same time")
             self._validate_finite_fields(
                 tool,
                 ("image_guidance_scale", "guidance_scale"),
@@ -1108,6 +1129,22 @@ class LayerStack:
             if source.shape[0] * source.shape[1] > self.MAX_PROJECT_PIXELS:
                 raise ValueError("tool source_patch exceeds the pixel budget")
             payload_bytes = int(source.nbytes)
+        if (
+                isinstance(tool, InstructTool)
+                and tool.reference_image is not None):
+            reference = np.asarray(tool.reference_image)
+            if (
+                    reference.dtype != np.uint8
+                    or reference.ndim != 3
+                    or reference.shape[2] not in (3, 4)
+                    or reference.shape[0] < 1
+                    or reference.shape[1] < 1):
+                raise ValueError(
+                    "tool reference_image must be a non-empty uint8 image "
+                    "with RGB or RGBA channels")
+            if reference.shape[0] * reference.shape[1] > self.MAX_PROJECT_PIXELS:
+                raise ValueError("tool reference_image exceeds the pixel budget")
+            payload_bytes += int(reference.nbytes)
         try:
             json.dumps(
                 serialize_tool(tool, "validation"),

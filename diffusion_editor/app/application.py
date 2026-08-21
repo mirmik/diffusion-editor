@@ -13,18 +13,20 @@ from tcbase import log
 
 from ..agent.tools import create_editor_tool_registry
 from ..document.document_service import DocumentService
-from ..document.commands import SetLayerSelectionCommand
+from ..document.commands import AddLayerCommand, SetLayerSelectionCommand
 from ..document.history import HistoryManager
 from ..document.layer import Layer
 from ..document.layer_stack import LayerStack
 from ..document.change_event import DocumentChangeEvent
 from ..document.session import DocumentSession, RecoveryRecord, RecoveryStore
 from ..engines.diffusion_engine import DiffusionEngine
+from ..engines.depth_engine import DepthEstimationEngine
 from ..engines.grounding_engine import GroundingEngine
 from ..engines.instruct_engine import InstructEngine
 from ..engines.lama_engine import LamaEngine
 from ..engines.segmentation_engine import SegmentationEngine
 from ..generation.diffusion_controller import DiffusionGenerationController
+from ..generation.depth_controller import DepthGenerationController
 from ..generation.instruct_controller import InstructGenerationController
 from ..generation.job_context import (
     ApplyFrozenGeneratedResultCommand,
@@ -69,6 +71,7 @@ class EngineSet:
     lama: Any
     instruct: Any
     grounding: Any
+    depth: Any | None = None
 
     @classmethod
     def create_default(cls) -> "EngineSet":
@@ -78,6 +81,7 @@ class EngineSet:
             lama=LamaEngine(),
             instruct=InstructEngine(),
             grounding=GroundingEngine(),
+            depth=DepthEstimationEngine(),
         )
 
 
@@ -109,6 +113,7 @@ class EditorApplication:
             engines: EngineSet | None = None) -> None:
         self.settings = settings if settings is not None else Settings()
         self.engines = engines if engines is not None else EngineSet.create_default()
+        self.depth_engine = self.engines.depth or DepthEstimationEngine()
         self.running = True
         self.closed = False
         self.status_text = "Ready"
@@ -174,6 +179,7 @@ class EditorApplication:
         )
         self.instruct_controller = InstructGenerationController(
             engine=self.engines.instruct,
+            layer_stack=self.layer_stack,
             composite_below=composite_below,
             document_state=document_state,
         )
@@ -189,6 +195,13 @@ class EditorApplication:
             engine=self.engines.grounding,
             composite=lambda: self.layer_stack.composite(),
         )
+        self.depth_controller = DepthGenerationController(
+            engine=self.depth_engine,
+            composite=lambda: np.ascontiguousarray(
+                self.layer_stack.composite()
+            ),
+            document_state=document_state,
+        )
 
         self._view = ViewPorts()
         self._snapshot_listeners: list[Callable[[], None]] = []
@@ -200,7 +213,8 @@ class EditorApplication:
                 ("instruct-engine", self.engines.instruct),
                 ("lama-engine", self.engines.lama),
                 ("segmentation-engine", self.engines.segmentation),
-                ("grounding-engine", self.engines.grounding)):
+                ("grounding-engine", self.engines.grounding),
+                ("depth-engine", self.depth_engine)):
             self.register_shutdown_resource(
                 ShutdownPhase.ENGINE_WORKERS,
                 name,
@@ -411,6 +425,7 @@ class EditorApplication:
         self._poll_instruct()
         self._poll_diffusion()
         self._poll_grounding()
+        self._poll_depth()
 
     def request_stop(self) -> None:
         self.running = False
@@ -502,6 +517,7 @@ class EditorApplication:
             self.instruct_controller,
             self.lama_controller,
             self.segmentation_controller,
+            self.depth_controller,
         )
 
     def _invalidate_stale_generation_jobs(self) -> None:
@@ -792,5 +808,34 @@ class EditorApplication:
             if command is not None:
                 self.document.execute(command)
             self.set_status(status)
+        elif event.status:
+            self.set_status(event.status)
+
+    def _poll_depth(self) -> None:
+        event = self.depth_controller.poll()
+        if event is None:
+            return
+        if event.depth_result is not None:
+            context, depth_map = event.depth_result
+            _layer, rejection = self._resolve_generation_target(context)
+            if rejection is not None:
+                self.set_status(rejection)
+                return
+            expected_shape = (self.layer_stack.height, self.layer_stack.width)
+            if depth_map.shape != expected_shape:
+                self.set_status(
+                    "Depth result rejected: output size does not match canvas"
+                )
+                return
+            alpha = np.full(expected_shape, 255, dtype=np.uint8)
+            rgba = np.dstack((depth_map, depth_map, depth_map, alpha))
+            self.document.execute(AddLayerCommand(
+                name=self.layer_stack.next_name("Depth Map"),
+                image=np.ascontiguousarray(rgba),
+                label="Create Depth Map",
+            ))
+            self.set_status(
+                "Depth map created (white is closer, black is farther)"
+            )
         elif event.status:
             self.set_status(event.status)

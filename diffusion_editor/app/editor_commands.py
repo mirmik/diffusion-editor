@@ -49,6 +49,7 @@ class EditorCommandCoordinator:
             "layer.new": self.new_layer,
             "layer.remove": self.remove_layer,
             "layer.flatten": self.flatten_layers,
+            "ai.depth_map": self.create_depth_map,
             "view.fit": self.fit,
         }
         self.refresh()
@@ -91,6 +92,11 @@ class EditorCommandCoordinator:
             "layer.flatten": (
                 len(layers) > 1
                 and all(layer.contributes_to_composite for layer in layers)
+            ),
+            "ai.depth_map": (
+                canvas_ready
+                and active is not None
+                and not self._application.depth_controller.is_busy
             ),
             "view.fit": canvas_ready and self._fit_in_view is not None,
         }
@@ -178,6 +184,17 @@ class EditorCommandCoordinator:
 
     def flatten_layers(self) -> None:
         self._execute(FlattenLayersCommand(), "Layers flattened")
+
+    def create_depth_map(self) -> None:
+        self._before_mutation()
+        layer = self._stack.active_layer
+        if layer is None:
+            self.refresh()
+            return
+        event = self._application.depth_controller.start(layer)
+        if event.status is not None:
+            self._application.set_status(event.status)
+        self.refresh()
 
     def fit(self) -> None:
         if self._fit_in_view is not None:

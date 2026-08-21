@@ -13,7 +13,7 @@ from .types import (
 )
 from ..document.layer import Layer
 from ..document.layer_stack import LayerStack
-from ..document.tool import DiffusionTool
+from ..document.tool import DiffusionTool, InstructTool
 
 
 def _clip_local_rect(layer: Layer, rect: Rect) -> Rect:
@@ -47,15 +47,19 @@ def reference_rect_for_layer(layer: Layer) -> tuple[Rect, str]:
     return (0, 0, layer.width, layer.height), "full_layer"
 
 
-def layer_reference_image(layer: Layer) -> ReferenceImage | GenerationError:
+def layer_reference_image(
+        layer: Layer,
+        *,
+        purpose: str = "IP-Adapter",
+) -> ReferenceImage | GenerationError:
     raw_rect, source = reference_rect_for_layer(layer)
     rect = _clip_local_rect(layer, raw_rect)
     x0, y0, x1, y1 = rect
     if x1 <= x0 or y1 <= y0:
         return GenerationError(
-            message=f"IP-Adapter reference is empty: {layer.name}",
+            message=f"{purpose} reference is empty: {layer.name}",
             log_message=(
-                f"IP-Adapter reference crop is empty for layer {layer.name}: "
+                f"{purpose} reference crop is empty for layer {layer.name}: "
                 f"{raw_rect}"
             ),
         )
@@ -91,3 +95,25 @@ def resolve_ip_adapter_reference(
     if isinstance(resolved, GenerationError):
         return ReferenceResolveResult(error=resolved)
     return ReferenceResolveResult(reference=resolved)
+
+
+def resolve_image_edit_reference(
+        tool: InstructTool,
+        layer_stack: LayerStack,
+) -> Image.Image | GenerationError | None:
+    """Resolve the optional second AI Edit image from a layer or embedded file."""
+    if tool.reference_layer_id is not None:
+        layer = layer_stack.find_layer_by_id(tool.reference_layer_id)
+        if layer is None:
+            hint = tool.reference_layer_name_hint or tool.reference_layer_id
+            return GenerationError(
+                message=f"AI Edit reference missing: {hint}",
+                log_message=f"AI Edit reference layer not found: {hint}",
+            )
+        resolved = layer_reference_image(layer, purpose="AI Edit")
+        if isinstance(resolved, GenerationError):
+            return resolved
+        return resolved.image
+    if tool.reference_image is not None:
+        return tool.reference_image.copy().convert("RGB")
+    return None

@@ -2,7 +2,11 @@ import numpy as np
 
 from diffusion_editor.app.application import EditorApplication, EngineSet
 from diffusion_editor.app.editor_commands import EditorCommandCoordinator
-from diffusion_editor.generation.types import EnginePollEvent, SegmentationResult
+from diffusion_editor.generation.types import (
+    DepthEstimationResult,
+    EnginePollEvent,
+    SegmentationResult,
+)
 
 
 class _Settings:
@@ -135,6 +139,48 @@ def test_select_background_command_submits_full_composite_segmentation():
     assert application.layer_stack.selection.is_empty
     application.document.redo()
     assert np.all(application.layer_stack.selection.data[:, :2] == 1.0)
+    application.close()
+
+
+def test_depth_map_command_adds_undoable_grayscale_layer():
+    application = _application()
+    image = np.full((4, 5, 4), (12, 34, 56, 255), dtype=np.uint8)
+    application.layer_stack.init_from_image(image)
+    requests = []
+    application.depth_engine.submit_request = (
+        lambda request, **_kwargs: requests.append(request) or True
+    )
+    commands = EditorCommandCoordinator(application)
+
+    assert application.command_states["ai.depth_map"] == (True, False)
+    commands.handlers["ai.depth_map"]()
+
+    assert len(requests) == 1
+    np.testing.assert_array_equal(requests[0].image, image)
+    assert application.command_states["ai.depth_map"] == (False, False)
+    context = application.depth_controller.pending_context
+    depth = np.arange(20, dtype=np.uint8).reshape((4, 5))
+    events = [EnginePollEvent(
+        task_type="depth",
+        result=DepthEstimationResult(depth),
+        job_id=context.job_id,
+    )]
+    application.depth_engine.poll_event = (
+        lambda: events.pop(0) if events else None
+    )
+
+    application.poll()
+
+    assert len(application.layer_stack.all_layers()) == 2
+    layer = application.layer_stack.active_layer
+    assert layer.name == "Depth Map 0"
+    np.testing.assert_array_equal(layer.image[:, :, 0], depth)
+    np.testing.assert_array_equal(layer.image[:, :, 1], depth)
+    np.testing.assert_array_equal(layer.image[:, :, 2], depth)
+    assert np.all(layer.image[:, :, 3] == 255)
+    assert application.status_text.startswith("Depth map created")
+    application.document.undo()
+    assert len(application.layer_stack.all_layers()) == 1
     application.close()
 
 

@@ -11,6 +11,9 @@ from diffusion_editor.generation.types import (
 from diffusion_editor.document.layer import Layer
 from diffusion_editor.document.layer_stack import LayerStack
 from diffusion_editor.document.tool import InstructTool
+from diffusion_editor.generation.image_edit_profiles import (
+    QWEN_IMAGE_EDIT_PROFILE_ID,
+)
 
 
 def _rgba(width, height, color):
@@ -95,6 +98,47 @@ def test_start_apply_without_mask_or_manual_patch_uses_full_composite():
         layer.tool.patch_w,
         layer.tool.patch_h,
     ) == (0, 0, 20, 14)
+
+
+def test_qwen_start_apply_resolves_second_image_from_layer():
+    stack, layer = _stack_with_instruct_layer()
+    reference = next(item for item in stack.all_layers() if item is not layer)
+    reference.image[:, :] = (90, 80, 70, 255)
+    layer.tool.set_profile(QWEN_IMAGE_EDIT_PROFILE_ID)
+    layer.tool.reference_layer_id = reference.id
+    layer.tool.reference_layer_name_hint = reference.name
+    engine = _Engine()
+    controller = InstructGenerationController(
+        engine=engine,
+        layer_stack=stack,
+        composite_below=lambda _layer: _rgba(
+            16, 16, (10, 20, 30, 255)),
+    )
+
+    event = controller.start_apply(layer)
+
+    assert event.status == "Applying instruction..."
+    request = engine.calls[-1][1]
+    assert request.reference_image is not None
+    assert request.reference_image.getpixel((0, 0)) == (90, 80, 70)
+    assert controller.pending_context.reference_image is not None
+
+
+def test_qwen_start_apply_reports_missing_second_image_layer():
+    stack, layer = _stack_with_instruct_layer()
+    layer.tool.set_profile(QWEN_IMAGE_EDIT_PROFILE_ID)
+    layer.tool.reference_layer_id = "missing-layer"
+    layer.tool.reference_layer_name_hint = "Old portrait"
+    controller = InstructGenerationController(
+        engine=_Engine(),
+        layer_stack=stack,
+        composite_below=lambda _layer: _rgba(
+            16, 16, (10, 20, 30, 255)),
+    )
+
+    event = controller.start_apply(layer)
+
+    assert event.status == "AI Edit reference missing: Old portrait"
 
 
 def test_poll_model_load_resumes_pending_instruction():

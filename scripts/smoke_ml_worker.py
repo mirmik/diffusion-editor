@@ -107,10 +107,18 @@ def main() -> int:
             images={"image": np.asarray(image.convert("RGBA"))},
             on_progress=print,
         )
+        depth = client.request(
+            "depth",
+            {"model_id": "depth-anything/Depth-Anything-V2-Small-hf"},
+            cancel,
+            images={"image": np.asarray(image.convert("RGBA"))},
+            on_progress=print,
+        )
         print(
             "ML worker smoke OK:",
             f"diffusion={diffusion['image'].size}",
             f"instruct={instruct['image'].size}",
+            f"depth={depth['image'].size}",
             f"detections={len(grounding['detections'])}",
         )
         return 0

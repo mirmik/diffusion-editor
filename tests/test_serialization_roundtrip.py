@@ -7,10 +7,14 @@ import json
 import zipfile
 
 import numpy as np
+from PIL import Image
 
 from diffusion_editor.document.layer import Layer
-from diffusion_editor.document.tool import DiffusionTool
+from diffusion_editor.document.tool import DiffusionTool, InstructTool
 from diffusion_editor.document.layer_stack import LayerStack
+from diffusion_editor.generation.image_edit_profiles import (
+    QWEN_IMAGE_EDIT_PROFILE_ID,
+)
 
 
 def _solid_rgba(w: int, h: int, rgba: tuple[int, int, int, int]) -> np.ndarray:
@@ -88,6 +92,34 @@ def test_project_file_roundtrip(tmp_path):
     assert isinstance(restored.layers[0], Layer)
     assert isinstance(restored.layers[0].children[0].tool, DiffusionTool)
     assert restored.get_layer_path(restored.active_layer) == "0/0"
+
+
+def test_project_file_embeds_ai_edit_external_reference(tmp_path):
+    stack = LayerStack()
+    stack.init_from_image(_solid_rgba(12, 10, (255, 255, 255, 255)))
+    layer = Layer("AI Edit", 12, 10)
+    layer.tool = InstructTool(
+        source_patch=None,
+        patch_x=0,
+        patch_y=0,
+        patch_w=12,
+        patch_h=10,
+        model_profile_id=QWEN_IMAGE_EDIT_PROFILE_ID,
+        reference_image=Image.new("RGB", (7, 5), (13, 24, 35)),
+        reference_image_name_hint="portable.png",
+    )
+    stack.insert_layer(layer)
+    path = tmp_path / "reference.deproj"
+
+    stack.save_project(str(path))
+    restored = LayerStack()
+    restored.load_project(str(path))
+
+    tool = restored.active_layer.tool
+    assert isinstance(tool, InstructTool)
+    assert tool.reference_image_name_hint == "portable.png"
+    assert tool.reference_image.size == (7, 5)
+    assert tool.reference_image.getpixel((0, 0)) == (13, 24, 35)
 
 
 def test_selection_roundtrip():

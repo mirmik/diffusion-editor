@@ -45,6 +45,7 @@ class NativeGenerationPanels:
         self._connections: list[object] = []
         self._model_paths: list[str] = []
         self._reference_ids: list[str | None] = []
+        self._image_edit_reference_ids: list[str | None] = []
         self._image_edit_profile_ids: list[str] = []
         self._image_edit_widgets: dict[str, object] = {}
         self._image_edit_choice_values: dict[str, list[str]] = {}
@@ -176,6 +177,17 @@ class NativeGenerationPanels:
                 self._set_image_edit_profile_ids,
             )
             self.image_edit_description.text = instruct.profile_description
+            reference_values = [None] + [
+                choice.stable_id for choice in state.reference_layers]
+            self._sync_combo(
+                self.image_edit_reference_combo,
+                ["None"] + [
+                    choice.name for choice in state.reference_layers],
+                reference_values,
+                instruct.reference_layer_id,
+                self._set_image_edit_reference_ids,
+            )
+            self.image_edit_reference_label.text = instruct.reference_label
             active_parameters = {
                 parameter.stable_id for parameter in instruct.parameters}
             values = instruct.parameter_values or {}
@@ -213,6 +225,12 @@ class NativeGenerationPanels:
             self.instruct_run_button.widget.enabled = not instruct_busy
             self.instruct_new_seed_button.widget.enabled = (
                 not instruct_busy)
+            reference_enabled = (
+                instruct.supports_reference_image and not instruct_busy)
+            self.image_edit_reference_combo.widget.enabled = reference_enabled
+            self.image_edit_reference_browse.widget.enabled = reference_enabled
+            self.image_edit_reference_clear.widget.enabled = (
+                reference_enabled and instruct.reference_label != "None")
 
             self.mask_size.value = float(state.mask.size)
             self.mask_hardness.value = state.mask.hardness
@@ -378,6 +396,43 @@ class NativeGenerationPanels:
         )
         self.image_edit_description = self._label(
             content, "", "instruct.profile.description")
+        self._caption(
+            content, "Second image", "instruct.reference.caption")
+        self.image_edit_reference_combo = self._combo(
+            content,
+            "instruct.reference.layer",
+            lambda index: self._emit(
+                GenerationAction.SELECT_IMAGE_EDIT_REFERENCE,
+                self._item(
+                    self._image_edit_reference_ids, index, None),
+            ),
+        )
+        reference_actions = self._document.create_hstack(
+            "NativeInstructReferenceActions")
+        reference_actions.set_layout_spacing(4.0)
+        self.image_edit_reference_browse = self._button(
+            reference_actions,
+            "Open Image...",
+            "instruct.reference.open",
+            lambda: self._emit(
+                GenerationAction.PICK_IMAGE_EDIT_REFERENCE),
+            add=False,
+        )
+        self.image_edit_reference_clear = self._button(
+            reference_actions,
+            "Clear",
+            "instruct.reference.clear",
+            lambda: self._emit(
+                GenerationAction.CLEAR_IMAGE_EDIT_REFERENCE),
+            add=False,
+        )
+        reference_actions.add_flex_child(
+            self.image_edit_reference_browse.widget, 1.0)
+        reference_actions.add_flex_child(
+            self.image_edit_reference_clear.widget, 1.0)
+        content.add_preferred_child(reference_actions)
+        self.image_edit_reference_label = self._label(
+            content, "None", "instruct.reference.label")
         self.instruct_status = self._label(
             content, "", "instruct.status")
         self.instruct_load_button = self._button(
@@ -730,6 +785,9 @@ class NativeGenerationPanels:
 
     def _set_image_edit_profile_ids(self, values) -> None:
         self._image_edit_profile_ids = values
+
+    def _set_image_edit_reference_ids(self, values) -> None:
+        self._image_edit_reference_ids = values
 
     @staticmethod
     def _item(values, index: int, default):

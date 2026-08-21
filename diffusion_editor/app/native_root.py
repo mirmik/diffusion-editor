@@ -618,6 +618,9 @@ class NativeEditorRoot:
                     request_repaint=composition.request_repaint,
                 )
                 self.dialog_coordinator.bind_view(self.dialogs)
+                if self.generation_panels_coordinator is not None:
+                    self.generation_panels_coordinator.set_reference_file_picker(
+                        self.dialog_coordinator.pick_ai_edit_reference)
                 for command_id, handler in (
                         self.dialog_coordinator.command_handlers.items()):
                     self.view.set_command_handler(command_id, handler)
@@ -746,6 +749,7 @@ class NativeEditorRoot:
                 self.application.lama_controller,
                 self.application.instruct_controller,
                 self.application.segmentation_controller,
+                self.application.depth_controller,
                 self.application.grounding_controller):
             controller.clear_pending_layer(layer)
 

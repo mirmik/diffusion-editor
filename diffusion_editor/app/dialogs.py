@@ -181,6 +181,18 @@ class ApplicationDialogCoordinator:
             self.import_image_path,
         )
 
+    def pick_ai_edit_reference(
+            self, on_selected: Callable[[str], None]) -> None:
+        self._show_file(
+            FileDialogSpec(
+                FileDialogKind.OPEN_FILE,
+                "Select AI Edit Reference",
+                self._application.last_dir,
+                _IMAGE_FILTER,
+            ),
+            on_selected,
+        )
+
     def save_project(self) -> None:
         self._require_open()
         if not self._application.project_path:

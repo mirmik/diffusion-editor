@@ -219,6 +219,39 @@ def test_generation_coordinator_projects_tools_and_preserves_layer_drafts(
     assert coordinator.state.diffusion.prompt == "draft"
 
 
+def test_ai_edit_selects_layer_or_embeds_external_reference(tmp_path):
+    application, _diffusion, _instruct, _lama = _application(tmp_path)
+    reference = application.layer_stack.active_layer
+    layer = _insert_tool_layer(application, "AI Edit", _qwen_edit_tool())
+    coordinator = GenerationPanelsCoordinator(application, _Canvas())
+
+    assert coordinator.state.instruct.supports_reference_image
+    coordinator.handle_intent(GenerationIntent(
+        GenerationAction.SELECT_IMAGE_EDIT_REFERENCE,
+        reference.id,
+    ))
+    assert layer.tool.reference_layer_id == reference.id
+    assert layer.tool.reference_image is None
+    assert coordinator.state.instruct.reference_label == (
+        f"Layer: {reference.name}")
+
+    path = tmp_path / "second.png"
+    Image.new("RGB", (9, 7), (11, 22, 33)).save(path)
+    coordinator.set_reference_file_picker(
+        lambda selected: selected(str(path)))
+    coordinator.handle_intent(GenerationIntent(
+        GenerationAction.PICK_IMAGE_EDIT_REFERENCE))
+    assert layer.tool.reference_layer_id is None
+    assert layer.tool.reference_image.size == (9, 7)
+    assert layer.tool.reference_image.getpixel((0, 0)) == (11, 22, 33)
+    assert coordinator.state.instruct.reference_label == "External: second.png"
+
+    coordinator.handle_intent(GenerationIntent(
+        GenerationAction.CLEAR_IMAGE_EDIT_REFERENCE))
+    assert layer.tool.reference_image is None
+    assert coordinator.state.instruct.reference_label == "None"
+
+
 def test_generation_intents_update_mask_reference_and_run_settings(tmp_path):
     application, diffusion, _instruct, _lama = _application(tmp_path)
     canvas = _Canvas()
@@ -599,6 +632,8 @@ def test_ai_edit_panel_exposes_complete_schema_without_advanced_sections(
             panel._image_edit_widgets[parameter_id].widget.enabled
             for parameter_id in qwen_ids
         )
+        assert panel.image_edit_reference_combo.widget.enabled
+        assert panel.image_edit_reference_browse.widget.enabled
         assert not panel._image_edit_widgets[
             "image_guidance_scale"].widget.enabled
 
@@ -617,6 +652,8 @@ def test_ai_edit_panel_exposes_complete_schema_without_advanced_sections(
         assert coordinator.state.instruct.model_profile_id == (
             FLUX2_KLEIN_PROFILE_ID)
         assert coordinator.state.instruct.instruction == "flux prompt"
+        assert not panel.image_edit_reference_combo.widget.enabled
+        assert not panel.image_edit_reference_browse.widget.enabled
 
         coordinator.handle_intent(GenerationIntent(
             GenerationAction.SELECT_IMAGE_EDIT_PROFILE,

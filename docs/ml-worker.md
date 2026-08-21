@@ -1,7 +1,14 @@
 # Diffusers/Transformers worker
 
-Diffusion, InstructPix2Pix, Grounding DINO, and SAM 2.1 run in a persistent
-subprocess using the shared [model-worker environment](model-workers.md).
+Diffusion, image editing, Grounding DINO, SAM 2.1, and Depth Anything V2 Small
+run in a persistent subprocess using the shared
+[model-worker environment](model-workers.md).
+
+`AI -> Create Depth Map` estimates relative monocular depth for the current
+composite with `depth-anything/Depth-Anything-V2-Small-hf`. The first run may
+download model weights; later runs reuse the Hugging Face cache. The result is
+an opaque grayscale layer where white is closer and black is farther. Values
+are normalized per image and are not distances in metres.
 
 Requests and responses use bounded, versioned JSON-lines messages. Images and
 masks cross the boundary as PNG files; detections use a bounded JSON manifest

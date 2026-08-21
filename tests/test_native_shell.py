@@ -58,6 +58,7 @@ EXPECTED_COMMANDS = (
     "layer.remove",
     "layer.flatten",
     "layer.detect",
+    "ai.depth_map",
     "generation.3d",
     "generation.3d_cancel",
     "view.3d_light_from_camera",
@@ -80,6 +81,16 @@ def test_select_menu_contains_background_segmentation_command():
         None,
         "selection.invert",
     )
+
+
+def test_ai_menu_contains_depth_map_tool():
+    ai_menu = next(
+        command_ids
+        for menu_id, _label, command_ids in MENU_COMMANDS
+        if menu_id == "ai"
+    )
+
+    assert ai_menu == ("ai.depth_map",)
 
 
 def _snapshot_by_id(document):

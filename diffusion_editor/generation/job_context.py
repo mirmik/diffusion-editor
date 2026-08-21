@@ -24,7 +24,9 @@ from .provenance import (
 from .types import Rect
 
 
-GenerationKind = Literal["diffusion", "instruct", "lama", "segmentation"]
+GenerationKind = Literal[
+    "diffusion", "instruct", "lama", "segmentation", "depth"
+]
 
 
 class ResultApplicationPolicy(str, Enum):

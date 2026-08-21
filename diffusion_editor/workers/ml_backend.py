@@ -65,6 +65,9 @@ class RealMlBackend:
         self._sam_model = None
         self._sam_processor = None
         self._sam_key: tuple[str, str] | None = None
+        self._depth_model = None
+        self._depth_processor = None
+        self._depth_key: tuple[str, str] | None = None
 
     @staticmethod
     def gpu_available() -> bool:
@@ -595,6 +598,7 @@ class RealMlBackend:
         self,
         data: dict[str, Any],
         image: Image.Image,
+        reference_image: Image.Image | None = None,
     ) -> tuple[Image.Image, int, dict[str, Any]]:
         import torch
 
@@ -635,6 +639,11 @@ class RealMlBackend:
                 raise ValueError("attention_kwargs must be a JSON object")
             kwargs["attention_kwargs"] = parsed
         if profile_id == QWEN_IMAGE_EDIT_PROFILE_ID:
+            if reference_image is not None:
+                kwargs["image"] = [
+                    image.convert("RGB"),
+                    reference_image.convert("RGB"),
+                ]
             kwargs.update({
                 "negative_prompt": str(parameters["negative_prompt"]),
                 "true_cfg_scale": float(parameters["true_cfg_scale"]),
@@ -812,6 +821,71 @@ class RealMlBackend:
             }),
             warnings=self._instruct_warnings,
         )
+
+    def depth(
+        self,
+        data: dict[str, Any],
+        image: Image.Image,
+        progress: Callable[[str], None],
+    ) -> Image.Image:
+        import torch
+        from huggingface_hub import try_to_load_from_cache
+        from transformers import AutoImageProcessor, AutoModelForDepthEstimation
+
+        device = self._device(data.get("device"))
+        model_id = str(data["model_id"])
+        key = (model_id, device)
+        if self._depth_key != key:
+            cached = try_to_load_from_cache(model_id, "config.json") is not None
+            progress(
+                f"Loading {model_id.split('/')[-1]} "
+                f"{'from cache' if cached else '(first run downloads weights)'}..."
+            )
+            self._depth_processor = AutoImageProcessor.from_pretrained(model_id)
+            self._depth_model = (
+                AutoModelForDepthEstimation.from_pretrained(model_id)
+                .to(device)
+                .eval()
+            )
+            self._depth_key = key
+
+        progress("Depth Anything V2 Small: estimating depth...")
+        processor = self._depth_processor
+        model = self._depth_model
+        inputs = processor(images=image.convert("RGB"), return_tensors="pt")
+        inputs = {name: value.to(device) for name, value in inputs.items()}
+        with torch.inference_mode():
+            outputs = model(**inputs)
+        processed = processor.post_process_depth_estimation(
+            outputs,
+            target_sizes=[(image.height, image.width)],
+        )
+        depth = (
+            processed[0]["predicted_depth"]
+            .detach()
+            .float()
+            .cpu()
+            .numpy()
+            .squeeze()
+        )
+        if depth.shape != (image.height, image.width):
+            raise RuntimeError(
+                "Depth Anything returned an unexpected shape: "
+                f"{depth.shape}"
+            )
+        if not np.isfinite(depth).all():
+            raise RuntimeError("Depth Anything returned non-finite values")
+        minimum = float(depth.min())
+        maximum = float(depth.max())
+        if maximum - minimum <= np.finfo(np.float32).eps:
+            normalized = np.zeros(depth.shape, dtype=np.uint8)
+        else:
+            normalized = np.clip(
+                (depth - minimum) / (maximum - minimum) * 255.0,
+                0.0,
+                255.0,
+            ).astype(np.uint8)
+        return Image.fromarray(normalized, "L")
 
     def grounding(
         self,

@@ -485,7 +485,19 @@ def capture_tool_state(tool: object | None) -> RequestProvenance:
                 "model_profile_id": str(getattr(
                     tool, "model_profile_id", "instruct-pix2pix")),
                 "profile_parameters": profile_parameters,
+                "reference_layer_id": getattr(
+                    tool, "reference_layer_id", None),
+                "reference_image_name_hint": str(getattr(
+                    tool, "reference_image_name_hint", "")),
             })
+            reference_image = getattr(tool, "reference_image", None)
+            if reference_image is not None:
+                digest = hashlib.sha256()
+                digest.update(str(reference_image.mode).encode("utf-8"))
+                digest.update(repr(reference_image.size).encode("ascii"))
+                digest.update(reference_image.tobytes())
+                parameters["reference_image_hash"] = (
+                    f"sha256:{digest.hexdigest()}")
         else:
             parameters.update({
                 "instruction": str(getattr(tool, "instruction", "")),

@@ -640,6 +640,7 @@ class ImageEditRequest:
     image: Image.Image
     model_profile_id: str
     parameters: dict[str, object]
+    reference_image: Image.Image | None = None
 
 
 @dataclass(frozen=True)
@@ -800,3 +801,19 @@ class SegmentationRequest:
 class SegmentationResult:
     mask: np.ndarray
     provenance: GenerationProvenance | None = None
+
+
+DEPTH_ANYTHING_V2_SMALL_MODEL_ID = (
+    "depth-anything/Depth-Anything-V2-Small-hf"
+)
+
+
+@dataclass(frozen=True)
+class DepthEstimationRequest:
+    image: np.ndarray
+    model_id: str = DEPTH_ANYTHING_V2_SMALL_MODEL_ID
+
+
+@dataclass(frozen=True)
+class DepthEstimationResult:
+    depth_map: np.ndarray

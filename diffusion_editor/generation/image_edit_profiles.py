@@ -83,6 +83,7 @@ class ImageEditProfile:
     parameters: tuple[ImageEditParameter, ...]
     primary: bool = False
     fast: bool = False
+    max_input_images: int = 1
 
     def parameter(self, stable_id: str) -> ImageEditParameter:
         for parameter in self.parameters:
@@ -233,6 +234,7 @@ _PROFILES = (
         model_id=_QWEN_MODEL,
         description="Primary profile; best preservation of source geometry.",
         primary=True,
+        max_input_images=2,
         parameters=(
             ImageEditParameter(
                 "prompt", "Prompt", ParameterKind.TEXT, "", "Conditioning",
