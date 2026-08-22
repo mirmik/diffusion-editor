@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 from PIL import Image
@@ -38,7 +39,9 @@ from diffusion_editor.generation.types import (
 )
 from diffusion_editor.generation.image_edit_profiles import (
     FLUX2_KLEIN_PROFILE_ID,
+    LEGACY_INSTRUCT_PROFILE_ID,
     QWEN_IMAGE_EDIT_PROFILE_ID,
+    SENSENOVA_U15_PROFILE_ID,
     image_edit_profile,
 )
 
@@ -652,6 +655,20 @@ def test_ai_edit_panel_exposes_complete_schema_without_advanced_sections(
         assert coordinator.state.instruct.model_profile_id == (
             FLUX2_KLEIN_PROFILE_ID)
         assert coordinator.state.instruct.instruction == "flux prompt"
+        assert panel.image_edit_reference_combo.widget.enabled
+        assert panel.image_edit_reference_browse.widget.enabled
+
+        coordinator.handle_intent(GenerationIntent(
+            GenerationAction.SELECT_IMAGE_EDIT_PROFILE,
+            SENSENOVA_U15_PROFILE_ID,
+        ))
+        assert panel.image_edit_reference_combo.widget.enabled
+        assert panel.image_edit_reference_browse.widget.enabled
+
+        coordinator.handle_intent(GenerationIntent(
+            GenerationAction.SELECT_IMAGE_EDIT_PROFILE,
+            LEGACY_INSTRUCT_PROFILE_ID,
+        ))
         assert not panel.image_edit_reference_combo.widget.enabled
         assert not panel.image_edit_reference_browse.widget.enabled
 
@@ -664,6 +681,135 @@ def test_ai_edit_panel_exposes_complete_schema_without_advanced_sections(
             item.get("text", "")
             for item in document.inspect_snapshot()["widgets"]
         }
+    finally:
+        panel.close()
+        coordinator.close()
+        tc_ui_document_destroy(document)
+
+
+def test_ai_edit_panel_manages_arbitrary_ordered_lora_stack(tmp_path):
+    application, _diffusion, _instruct, _lama = _application(tmp_path)
+    _insert_tool_layer(application, "AI Edit", _qwen_edit_tool())
+    coordinator = GenerationPanelsCoordinator(application, _Canvas())
+    document = tc_ui_document_create()
+    panel = NativeGenerationPanels(
+        document,
+        coordinator.state,
+        coordinator.handle_intent,
+        lambda: None,
+    )
+    coordinator.bind_view(panel)
+    assert document.add_root(panel.widget.handle)
+    try:
+        assert len(coordinator.state.instruct.lora_adapters) == 1
+        assert len(panel._image_edit_lora_rows) == 1
+        for _index in range(9):
+            coordinator.handle_intent(GenerationIntent(
+                GenerationAction.ADD_IMAGE_EDIT_LORA))
+        adapters = coordinator.state.instruct.lora_adapters
+        assert len(adapters) == 10
+        assert len(panel._image_edit_lora_rows) == 10
+        assert len({adapter.stable_id for adapter in adapters}) == 10
+
+        last_id = adapters[-1].stable_id
+        coordinator.handle_intent(GenerationIntent(
+            GenerationAction.UPDATE_IMAGE_EDIT_LORA,
+            (last_id, "source", "/models/tenth.safetensors"),
+        ))
+        coordinator.handle_intent(GenerationIntent(
+            GenerationAction.UPDATE_IMAGE_EDIT_LORA,
+            (last_id, "weight", 0.35),
+        ))
+        coordinator.handle_intent(GenerationIntent(
+            GenerationAction.MOVE_IMAGE_EDIT_LORA,
+            (last_id, -1),
+        ))
+        adapters = coordinator.state.instruct.lora_adapters
+        assert adapters[-2].stable_id == last_id
+        assert adapters[-2].source == "/models/tenth.safetensors"
+        assert adapters[-2].weight == 0.35
+
+        coordinator.handle_intent(GenerationIntent(
+            GenerationAction.REMOVE_IMAGE_EDIT_LORA,
+            last_id,
+        ))
+        assert len(coordinator.state.instruct.lora_adapters) == 9
+        assert len(panel._image_edit_lora_rows) == 9
+    finally:
+        panel.close()
+        coordinator.close()
+        tc_ui_document_destroy(document)
+
+
+def test_ai_edit_lora_catalog_scans_deduplicates_and_selects_source(
+    tmp_path,
+    monkeypatch,
+):
+    lora_dir = tmp_path / "installed-loras"
+    nested = lora_dir / "styles"
+    cache = lora_dir / ".cache"
+    nested.mkdir(parents=True)
+    cache.mkdir()
+    first = lora_dir / "portrait.safetensors"
+    first.write_bytes(b"portrait")
+    (lora_dir / "portrait-alias.safetensors").symlink_to(first)
+    second = nested / "material.safetensors"
+    second.write_bytes(b"material")
+    (cache / "hidden.safetensors").write_bytes(b"hidden")
+    monkeypatch.setenv("DIFFUSION_EDITOR_LORA_DIRS", str(lora_dir))
+
+    application, _diffusion, _instruct, _lama = _application(
+        tmp_path / "checkpoints")
+    _insert_tool_layer(application, "AI Edit", _qwen_edit_tool())
+    coordinator = GenerationPanelsCoordinator(application, _Canvas())
+    local_entries = [
+        entry for entry in coordinator.state.instruct.lora_catalog
+        if str(lora_dir) in entry.stable_id
+    ]
+
+    assert len(local_entries) == 2
+    assert {
+        Path(entry.stable_id).resolve() for entry in local_entries
+    } == {first.resolve(), second.resolve()}
+    assert all(".cache" not in entry.stable_id for entry in local_entries)
+    assert any("styles/material.safetensors" in entry.name
+               for entry in local_entries)
+
+    document = tc_ui_document_create()
+    panel = NativeGenerationPanels(
+        document,
+        coordinator.state,
+        coordinator.handle_intent,
+        lambda: None,
+    )
+    coordinator.bind_view(panel)
+    assert document.add_root(panel.widget.handle)
+    try:
+        coordinator.handle_intent(GenerationIntent(
+            GenerationAction.ADD_IMAGE_EDIT_LORA))
+        adapter_id = coordinator.state.instruct.lora_adapters[-1].stable_id
+        selected = next(
+            entry for entry in local_entries
+            if Path(entry.stable_id).resolve() == second.resolve()
+        )
+        catalog_index = 1 + list(
+            coordinator.state.instruct.lora_catalog).index(selected)
+        panel._select_image_edit_lora_catalog(adapter_id, catalog_index)
+
+        adapter = coordinator.state.instruct.lora_adapters[-1]
+        assert adapter.source == selected.stable_id
+        assert adapter.label == "material"
+        assert panel._image_edit_lora_rows[-1][
+            "catalog"].selected_index == catalog_index
+
+        coordinator.handle_intent(GenerationIntent(
+            GenerationAction.UPDATE_IMAGE_EDIT_LORA,
+            (adapter_id, "source", "org/custom-lora"),
+        ))
+        assert coordinator.state.instruct.lora_adapters[-1].source == (
+            "org/custom-lora")
+        assert panel._image_edit_lora_rows[-1][
+            "catalog"].selected_index == 0
     finally:
         panel.close()
         coordinator.close()

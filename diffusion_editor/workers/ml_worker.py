@@ -50,6 +50,7 @@ class _Backend:
         self.instruct_identity: ModelIdentity | None = None
         self.instruct_warnings: tuple[str, ...] = ()
         self.image_edit_profile_id: str | None = None
+        self.image_edit_lora_adapters: tuple[dict[str, Any], ...] = ()
 
     def execute(
         self,
@@ -139,9 +140,7 @@ class _Backend:
         if operation == "depth":
             image = self._open_required(data, "image")
             result = self._real.depth(data, image, progress)
-            output = output_dir / "depth.png"
-            result.save(output, format="PNG")
-            return {"output_path": str(output)}
+            return self._write_depth_result(output_dir, result)
         if operation == "grounding":
             image = self._open_required(data, "image")
             detections = self._real.grounding(data, image, progress)
@@ -292,8 +291,14 @@ class _Backend:
         if operation == "load_image_edit":
             profile = image_edit_profile(str(data["profile_id"]))
             parameters = profile.normalize(data.get("parameters"))
+            lora_adapters = tuple(
+                adapter.to_dict()
+                for adapter in profile.normalize_lora_adapters(
+                    data.get("lora_adapters"))
+            )
             self.instruct_loaded = True
             self.image_edit_profile_id = profile.stable_id
+            self.image_edit_lora_adapters = lora_adapters
             model = str(parameters["model"])
             identity = floating_model_identity("huggingface", model)
             self.instruct_identity = identity
@@ -365,6 +370,14 @@ class _Backend:
                 raise RuntimeError(
                     f"Image edit profile is not loaded: {profile.stable_id}")
             parameters = profile.normalize(data.get("parameters"))
+            lora_adapters = tuple(
+                adapter.to_dict()
+                for adapter in profile.normalize_lora_adapters(
+                    data.get("lora_adapters"))
+            )
+            if lora_adapters != self.image_edit_lora_adapters:
+                raise RuntimeError(
+                    "Image edit LoRA configuration is not loaded")
             progress(f"Running {profile.title}...")
             output = output_dir / "result.png"
             self._open_required(data, "image").convert("RGB").save(
@@ -386,6 +399,7 @@ class _Backend:
                 request=RequestProvenance.capture(operation_name, {
                     "model_profile_id": profile.stable_id,
                     "parameters": parameters,
+                    "lora_adapters": list(lora_adapters),
                 }),
                 seed=seed,
                 width=width,
@@ -405,15 +419,32 @@ class _Backend:
                 "provenance": provenance.to_dict(),
             }
         if operation == "depth":
-            progress("Loading Depth-Anything-V2-Small-hf from cache...")
-            progress("Depth Anything V2 Small: estimating depth...")
+            title = str(data.get("title", "Depth model"))
+            model_id = str(data.get("model_id", "depth-model"))
+            progress(f"Loading {model_id.split('/')[-1]} from cache...")
+            progress(f"{title}: estimating depth...")
             image = self._open_required(data, "image")
             width, height = image.size
-            gradient = np.linspace(255, 0, width, dtype=np.uint8)
+            gradient = np.linspace(1.0, 2.0, width, dtype=np.float32)
             depth = np.broadcast_to(gradient, (height, width)).copy()
-            output = output_dir / "depth.png"
-            Image.fromarray(depth, "L").save(output, format="PNG")
-            return {"output_path": str(output)}
+            value_kind = str(data.get(
+                "value_kind", "direct_scale_ambiguous"))
+            intrinsics = None
+            if value_kind != "inverse_relative":
+                focal = float(max(width, height))
+                intrinsics = np.array([
+                    [focal, 0.0, width * 0.5],
+                    [0.0, focal, height * 0.5],
+                    [0.0, 0.0, 1.0],
+                ], dtype=np.float32)
+            return self._write_depth_result(output_dir, {
+                "depth": depth,
+                "intrinsics": intrinsics,
+                "confidence": None,
+                "field_of_view_degrees": None,
+                "scale_factor": None,
+                "value_kind": value_kind,
+            })
         if operation == "grounding":
             progress("Grounding: detecting...")
             image = self._open_required(data, "image")
@@ -474,6 +505,56 @@ class _Backend:
         path = output_dir / "detections.json"
         path.write_text(json.dumps(serialized), encoding="utf-8")
         return {"detections_path": str(path)}
+
+    @staticmethod
+    def _write_depth_result(
+            output_dir: Path,
+            raw: dict[str, Any]) -> dict[str, Any]:
+        depth = np.asarray(raw["depth"], dtype=np.float32)
+        if depth.ndim != 2 or depth.size == 0:
+            raise RuntimeError("Depth model returned an invalid depth shape")
+        if not np.isfinite(depth).all():
+            raise RuntimeError("Depth model returned non-finite depth")
+        depth = np.ascontiguousarray(depth, dtype="<f4")
+        depth_path = output_dir / "depth.f32"
+        depth.tofile(depth_path)
+
+        confidence_path = None
+        confidence = raw.get("confidence")
+        if confidence is not None:
+            confidence = np.asarray(confidence, dtype=np.float32)
+            if confidence.shape != depth.shape:
+                raise RuntimeError(
+                    "Depth confidence shape does not match depth")
+            if not np.isfinite(confidence).all():
+                raise RuntimeError(
+                    "Depth model returned non-finite confidence")
+            confidence = np.ascontiguousarray(confidence, dtype="<f4")
+            confidence_path = output_dir / "depth-confidence.f32"
+            confidence.tofile(confidence_path)
+
+        intrinsics = raw.get("intrinsics")
+        if intrinsics is not None:
+            intrinsics = np.asarray(intrinsics, dtype=np.float32)
+            if (
+                    intrinsics.shape != (3, 3)
+                    or not np.isfinite(intrinsics).all()):
+                raise RuntimeError("Depth model returned invalid intrinsics")
+            intrinsics_payload = intrinsics.tolist()
+        else:
+            intrinsics_payload = None
+        return {
+            "depth_path": str(depth_path),
+            "depth_shape": list(depth.shape),
+            "depth_dtype": "float32-le",
+            "confidence_path": (
+                str(confidence_path) if confidence_path is not None else None
+            ),
+            "intrinsics": intrinsics_payload,
+            "field_of_view_degrees": raw.get("field_of_view_degrees"),
+            "scale_factor": raw.get("scale_factor"),
+            "value_kind": str(raw["value_kind"]),
+        }
 
 
 def _runtime(backend: str) -> dict[str, Any]:

@@ -7,8 +7,10 @@ from PIL import Image
 import pytest
 
 from diffusion_editor.generation.image_edit_profiles import (
+    FLUX2_KLEIN_PROFILE_ID,
     LEGACY_INSTRUCT_PROFILE_ID,
     QWEN_IMAGE_EDIT_PROFILE_ID,
+    QWEN_MULTIPLE_ANGLES_PROFILE_ID,
     SENSENOVA_U15_PROFILE_ID,
     image_edit_profile,
 )
@@ -134,7 +136,16 @@ def test_failed_image_edit_reload_leaves_backend_unloaded(monkeypatch):
     assert backend._image_edit_profile_id is None
 
 
-def test_qwen_image_edit_passes_second_image_as_ordered_list(monkeypatch):
+@pytest.mark.parametrize(
+    "profile_id",
+    [
+        QWEN_IMAGE_EDIT_PROFILE_ID,
+        QWEN_MULTIPLE_ANGLES_PROFILE_ID,
+        FLUX2_KLEIN_PROFILE_ID,
+    ],
+)
+def test_diffusers_image_edit_passes_second_image_as_ordered_list(
+        monkeypatch, profile_id):
     captured: dict[str, object] = {}
 
     class FakeGenerator:
@@ -154,17 +165,22 @@ def test_qwen_image_edit_passes_second_image_as_ordered_list(monkeypatch):
         sys.modules, "torch", SimpleNamespace(Generator=FakeGenerator))
     backend = RealMlBackend()
     backend._instruct_pipe = FakeEditPipeline()
-    backend._image_edit_profile_id = QWEN_IMAGE_EDIT_PROFILE_ID
+    backend._image_edit_profile_id = profile_id
     backend._instruct_device = "cpu"
     backend._instruct_dtype = "float32"
-    parameters = image_edit_profile(QWEN_IMAGE_EDIT_PROFILE_ID).defaults()
+    backend._image_edit_lora_adapters = tuple(
+        adapter.to_dict()
+        for adapter in image_edit_profile(
+            profile_id).default_lora_adapters
+    )
+    parameters = image_edit_profile(profile_id).defaults()
     parameters.update({"prompt": "combine", "seed": 123})
     first = Image.new("RGBA", (8, 6), "red")
     second = Image.new("RGBA", (5, 7), "green")
 
     result, seed, _provenance = backend.image_edit(
         {
-            "profile_id": QWEN_IMAGE_EDIT_PROFILE_ID,
+            "profile_id": profile_id,
             "parameters": parameters,
         },
         first,
@@ -176,6 +192,88 @@ def test_qwen_image_edit_passes_second_image_as_ordered_list(monkeypatch):
     assert isinstance(captured["image"], list)
     assert [image.size for image in captured["image"]] == [(8, 6), (5, 7)]
     assert all(image.mode == "RGB" for image in captured["image"])
+
+
+def test_qwen_multiple_angles_loads_lightning_and_angle_adapters(monkeypatch):
+    captured: dict[str, object] = {"loaded": [], "cast": []}
+
+    class FakeQwenPipeline(_FakePipeline):
+        def __init__(self):
+            super().__init__()
+            self.transformer = object()
+
+        def load_lora_weights(self, path, *, adapter_name):
+            captured["loaded"].append((path, adapter_name))
+
+        def set_adapters(self, names, *, adapter_weights):
+            captured["active"] = (names, adapter_weights)
+
+    backend = RealMlBackend()
+    monkeypatch.setattr(
+        backend, "_release_accelerator_memory", lambda: None)
+    monkeypatch.setattr(backend, "_device", lambda _requested: "cpu")
+    monkeypatch.setattr(
+        backend, "_configured_dtype",
+        lambda _name, _device: "float32")
+    monkeypatch.setattr(
+        backend,
+        "_cast_adapter_parameters",
+        lambda _model, name, _dtype: captured["cast"].append(name),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "diffusers",
+        _fake_diffusers(FakeQwenPipeline),
+    )
+    parameters = image_edit_profile(
+        QWEN_MULTIPLE_ANGLES_PROFILE_ID).defaults()
+    parameters.update({
+        "model": "fake/qwen-image-edit",
+        "device": "cpu",
+        "dtype": "float32",
+        "local_files_only": True,
+        "cpu_offload": False,
+        "transformer_checkpoint": "",
+        "text_encoder_checkpoint": "",
+    })
+    adapters = (
+        {
+            "stable_id": "lightning",
+            "label": "Lightning",
+            "source": "/models/lightning.safetensors",
+            "weight": 1.0,
+            "enabled": True,
+        },
+        {
+            "stable_id": "multiple-angles",
+            "label": "Multiple Angles",
+            "source": "/models/multiple-angles.safetensors",
+            "weight": 0.9,
+            "enabled": True,
+        },
+    )
+
+    loaded = backend.load_image_edit({
+        "profile_id": QWEN_MULTIPLE_ANGLES_PROFILE_ID,
+        "parameters": parameters,
+        "lora_adapters": adapters,
+    })
+
+    assert loaded["profile_id"] == QWEN_MULTIPLE_ANGLES_PROFILE_ID
+    assert captured["loaded"] == [
+        ("/models/lightning.safetensors", "image_edit_0_lightning"),
+        (
+            "/models/multiple-angles.safetensors",
+            "image_edit_1_multiple_angles",
+        ),
+    ]
+    assert captured["cast"] == [
+        "image_edit_0_lightning", "image_edit_1_multiple_angles",
+    ]
+    assert captured["active"] == (
+        ["image_edit_0_lightning", "image_edit_1_multiple_angles"],
+        [1.0, 0.9],
+    )
 
 
 def test_sensenova_provider_loads_gguf_and_uses_standalone_edit_adapter(
@@ -196,9 +294,11 @@ def test_sensenova_provider_loads_gguf_and_uses_standalone_edit_adapter(
         def __init__(self, **kwargs):
             captured.update(kwargs)
 
-        def edit(self, image, parameters, seed):
+        def edit(self, image, parameters, seed, *, reference_image=None):
             captured["parameters"] = parameters
             captured["seed"] = seed
+            captured["image"] = image
+            captured["reference_image"] = reference_image
             return image.convert("RGB")
 
     monkeypatch.setattr(
@@ -233,12 +333,15 @@ def test_sensenova_provider_loads_gguf_and_uses_standalone_edit_adapter(
             "parameters": parameters,
         },
         Image.new("RGB", (8, 6), "red"),
+        Image.new("RGB", (5, 7), "blue"),
     )
 
     assert loaded["component_mode"] == "gguf"
     assert captured["model_path"] == str(model_dir)
     assert captured["gguf_checkpoint"] == str(checkpoint)
     assert captured["seed"] == 42015
+    assert captured["image"].size == (8, 6)
+    assert captured["reference_image"].size == (5, 7)
     assert result.size == (8, 6)
     assert seed == 42015
     assert provenance["request"]["parameters"][

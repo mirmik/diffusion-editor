@@ -6,8 +6,10 @@ from dataclasses import dataclass, replace
 import copy
 from enum import Enum
 import os
+from pathlib import Path
 import random
 from typing import Callable, Protocol
+from uuid import uuid4
 
 from PIL import Image
 
@@ -26,6 +28,7 @@ from ..document.tool import DiffusionTool, InstructTool, LamaTool
 from .application import EditorApplication
 from .presentation import PanelUpdate
 from ..generation.image_edit_profiles import (
+    ImageEditLoraAdapter,
     ImageEditParameter,
     image_edit_profile,
     image_edit_profiles,
@@ -70,6 +73,10 @@ class GenerationAction(str, Enum):
     SET_IMAGE_GUIDANCE = "set_image_guidance"
     SELECT_IMAGE_EDIT_PROFILE = "select_image_edit_profile"
     SET_IMAGE_EDIT_PARAMETER = "set_image_edit_parameter"
+    ADD_IMAGE_EDIT_LORA = "add_image_edit_lora"
+    REMOVE_IMAGE_EDIT_LORA = "remove_image_edit_lora"
+    UPDATE_IMAGE_EDIT_LORA = "update_image_edit_lora"
+    MOVE_IMAGE_EDIT_LORA = "move_image_edit_lora"
     SELECT_IMAGE_EDIT_REFERENCE = "select_image_edit_reference"
     PICK_IMAGE_EDIT_REFERENCE = "pick_image_edit_reference"
     CLEAR_IMAGE_EDIT_REFERENCE = "clear_image_edit_reference"
@@ -148,6 +155,10 @@ class InstructPanelState:
     parameters: tuple[ImageEditParameter, ...] = ()
     parameter_values: dict[str, object] | None = None
     profile_parameters: dict[str, dict] | None = None
+    lora_adapters: tuple[ImageEditLoraAdapter, ...] = ()
+    profile_lora_adapters: dict[str, list[dict]] | None = None
+    supports_lora_adapters: bool = False
+    lora_catalog: tuple[ReferenceChoice, ...] = ()
     supports_reference_image: bool = False
     reference_layer_id: str | None = None
     reference_label: str = "None"
@@ -194,6 +205,7 @@ class GenerationPanelsCoordinator:
         self._closed = False
         self._mask = MaskBrushState()
         self._models = self._scan_models()
+        self._lora_catalog = self._scan_loras()
         self._diffusion_drafts: dict[
             str, tuple[int, DiffusionPanelState]] = {}
         self._instruct_drafts: dict[
@@ -350,7 +362,11 @@ class GenerationPanelsCoordinator:
                 GenerationAction.SET_INSTRUCTION,
                 GenerationAction.SET_IMAGE_GUIDANCE,
                 GenerationAction.SELECT_IMAGE_EDIT_PROFILE,
-                GenerationAction.SET_IMAGE_EDIT_PARAMETER}:
+                GenerationAction.SET_IMAGE_EDIT_PARAMETER,
+                GenerationAction.ADD_IMAGE_EDIT_LORA,
+                GenerationAction.REMOVE_IMAGE_EDIT_LORA,
+                GenerationAction.UPDATE_IMAGE_EDIT_LORA,
+                GenerationAction.MOVE_IMAGE_EDIT_LORA}:
             self._edit_instruct(layer, action, value)
         elif action == GenerationAction.RANDOM_SEED:
             self._set_random_seed(layer)
@@ -420,6 +436,7 @@ class GenerationPanelsCoordinator:
         if self._closed:
             return
         self._models = self._scan_models()
+        self._lora_catalog = self._scan_loras()
         self.refresh()
 
     def close(self) -> None:
@@ -538,6 +555,7 @@ class GenerationPanelsCoordinator:
                 model_profiles=tuple(
                     ReferenceChoice(profile.stable_id, profile.title)
                     for profile in image_edit_profiles()),
+                lora_catalog=self._lora_catalog,
             )
         cached = self._instruct_drafts.get(layer.id)
         if cached is None or cached[0] != id(tool):
@@ -558,6 +576,12 @@ class GenerationPanelsCoordinator:
                 parameters=profile.parameters,
                 parameter_values=values,
                 profile_parameters=copy.deepcopy(tool.profile_parameters),
+                lora_adapters=tool.lora_adapters,
+                profile_lora_adapters=copy.deepcopy(
+                    tool.profile_lora_adapters),
+                supports_lora_adapters=profile.provider.startswith(
+                    "diffusers."),
+                lora_catalog=self._lora_catalog,
                 supports_reference_image=(profile.max_input_images > 1),
                 reference_layer_id=tool.reference_layer_id,
                 reference_label=self._image_edit_reference_label(tool),
@@ -571,6 +595,9 @@ class GenerationPanelsCoordinator:
             layer_info=self._layer_info(layer, tool),
             supports_reference_image=(
                 image_edit_profile(draft.model_profile_id).max_input_images > 1),
+            supports_lora_adapters=image_edit_profile(
+                draft.model_profile_id).provider.startswith("diffusers."),
+            lora_catalog=self._lora_catalog,
             reference_layer_id=tool.reference_layer_id,
             reference_label=self._image_edit_reference_label(tool),
         )
@@ -624,6 +651,7 @@ class GenerationPanelsCoordinator:
             return
         state = self._instruct_state(layer, layer.tool)
         stores = copy.deepcopy(state.profile_parameters or {})
+        lora_stores = copy.deepcopy(state.profile_lora_adapters or {})
         profile_id = state.model_profile_id
         values = copy.deepcopy(state.parameter_values or {})
         if action == GenerationAction.SELECT_IMAGE_EDIT_PROFILE:
@@ -631,6 +659,10 @@ class GenerationPanelsCoordinator:
             profile = image_edit_profile(profile_id)
             values = profile.normalize(stores.get(profile_id))
             stores[profile_id] = values
+            adapters = profile.normalize_lora_adapters(
+                lora_stores.get(profile_id))
+            lora_stores[profile_id] = [
+                adapter.to_dict() for adapter in adapters]
             state = replace(
                 state,
                 model_profile_id=profile_id,
@@ -638,6 +670,8 @@ class GenerationPanelsCoordinator:
                 parameters=profile.parameters,
                 parameter_values=values,
                 profile_parameters=stores,
+                lora_adapters=adapters,
+                profile_lora_adapters=lora_stores,
                 instruction=str(values.get("prompt", "")),
                 image_guidance_scale=float(
                     values.get("image_guidance_scale", 1.5)),
@@ -645,6 +679,8 @@ class GenerationPanelsCoordinator:
                 steps=int(values.get("steps", 4)),
                 seed_text=str(values.get("seed", -1)),
                 supports_reference_image=(profile.max_input_images > 1),
+                supports_lora_adapters=profile.provider.startswith(
+                    "diffusers."),
             )
         elif action == GenerationAction.SET_IMAGE_EDIT_PARAMETER:
             if not isinstance(value, (tuple, list)) or len(value) != 2:
@@ -705,6 +741,75 @@ class GenerationPanelsCoordinator:
             stores[profile_id] = values
             state = replace(state, parameter_values=values,
                             profile_parameters=stores)
+        elif action in {
+                GenerationAction.ADD_IMAGE_EDIT_LORA,
+                GenerationAction.REMOVE_IMAGE_EDIT_LORA,
+                GenerationAction.UPDATE_IMAGE_EDIT_LORA,
+                GenerationAction.MOVE_IMAGE_EDIT_LORA}:
+            profile = image_edit_profile(profile_id)
+            adapters = [
+                adapter.to_dict()
+                for adapter in profile.normalize_lora_adapters(
+                    lora_stores.get(profile_id))
+            ]
+            if action == GenerationAction.ADD_IMAGE_EDIT_LORA:
+                adapters.append({
+                    "stable_id": f"custom-{uuid4().hex[:12]}",
+                    "label": f"LoRA {len(adapters) + 1}",
+                    "source": "",
+                    "weight": 1.0,
+                    "enabled": True,
+                })
+            elif action == GenerationAction.REMOVE_IMAGE_EDIT_LORA:
+                adapter_id = str(value)
+                adapters = [
+                    adapter for adapter in adapters
+                    if adapter["stable_id"] != adapter_id
+                ]
+            elif action == GenerationAction.UPDATE_IMAGE_EDIT_LORA:
+                if not isinstance(value, (tuple, list)) or len(value) != 3:
+                    return
+                adapter_id, field, raw = str(value[0]), str(value[1]), value[2]
+                if field not in {"label", "source", "weight", "enabled"}:
+                    return
+                for adapter in adapters:
+                    if adapter["stable_id"] != adapter_id:
+                        continue
+                    if field in {"label", "source"}:
+                        adapter[field] = str(raw)
+                        if (
+                                field == "source"
+                                and (
+                                    not str(adapter.get("label", "")).strip()
+                                    or str(adapter["label"]).startswith("LoRA ")
+                                )
+                                and str(raw).strip()):
+                            adapter["label"] = Path(str(raw)).stem
+                    elif field == "weight":
+                        adapter[field] = max(-4.0, min(float(raw), 4.0))
+                    else:
+                        adapter[field] = bool(raw)
+                    break
+            else:
+                if not isinstance(value, (tuple, list)) or len(value) != 2:
+                    return
+                adapter_id, delta = str(value[0]), int(value[1])
+                index = next((
+                    index for index, adapter in enumerate(adapters)
+                    if adapter["stable_id"] == adapter_id
+                ), -1)
+                destination = index + delta
+                if index >= 0 and 0 <= destination < len(adapters):
+                    adapters[index], adapters[destination] = (
+                        adapters[destination], adapters[index])
+            normalized_adapters = profile.normalize_lora_adapters(adapters)
+            lora_stores[profile_id] = [
+                adapter.to_dict() for adapter in normalized_adapters]
+            state = replace(
+                state,
+                lora_adapters=normalized_adapters,
+                profile_lora_adapters=lora_stores,
+            )
         self._instruct_drafts[layer.id] = (id(layer.tool), state)
 
     def _set_random_seed(self, layer: Layer | None) -> None:
@@ -746,6 +851,7 @@ class GenerationPanelsCoordinator:
             event = self._application.instruct_controller.submit_load_model(
                 draft.model_profile_id,
                 dict(draft.parameter_values or {}),
+                draft.lora_adapters,
             )
             if event.model_loading:
                 self._instruct_phase = GenerationPhase.LOADING
@@ -824,6 +930,8 @@ class GenerationPanelsCoordinator:
                 layer=layer,
                 model_profile_id=draft.model_profile_id,
                 profile_parameters=stores,
+                profile_lora_adapters=copy.deepcopy(
+                    draft.profile_lora_adapters or {}),
             ))
             current = self._stack.find_layer_by_id(layer.id)
             if current is None:
@@ -962,6 +1070,76 @@ class GenerationPanelsCoordinator:
             for name in names
             if name.endswith(".safetensors") and "flux" not in name.lower()
         )
+
+    def _scan_loras(self) -> tuple[ReferenceChoice, ...]:
+        entries: list[ReferenceChoice] = []
+        seen_files: set[str] = set()
+        for root in self._lora_search_directories():
+            if not root.is_dir():
+                continue
+            try:
+                candidates = tuple(root.rglob("*.safetensors"))
+            except OSError:
+                continue
+            for candidate in candidates:
+                try:
+                    relative = candidate.relative_to(root)
+                    if ".cache" in relative.parts or not candidate.is_file():
+                        continue
+                    resolved = str(candidate.resolve(strict=True))
+                except (OSError, ValueError):
+                    continue
+                if resolved in seen_files:
+                    continue
+                seen_files.add(resolved)
+                entries.append(ReferenceChoice(
+                    str(candidate.absolute()),
+                    f"{self._lora_origin(root)}: {relative.as_posix()}",
+                ))
+        return tuple(sorted(
+            entries,
+            key=lambda item: (item.name.casefold(), item.stable_id.casefold()),
+        ))
+
+    def _lora_search_directories(self) -> tuple[Path, ...]:
+        configured: list[str] = []
+        raw_setting = self._application.settings.get("lora_dirs", "")
+        if isinstance(raw_setting, str):
+            configured.extend(raw_setting.split(os.pathsep))
+        elif isinstance(raw_setting, (tuple, list)):
+            configured.extend(str(item) for item in raw_setting)
+        configured.extend(
+            os.environ.get("DIFFUSION_EDITOR_LORA_DIRS", "").split(
+                os.pathsep))
+        models_dir = Path(self._application.models_dir).expanduser()
+        candidates = [
+            *(Path(value).expanduser() for value in configured if value.strip()),
+            models_dir.parent / "Lora",
+            models_dir.parent / "loras",
+            Path("~/soft/ComfyUI/models/loras").expanduser(),
+            Path(
+                "~/soft/stable-diffusion-webui-forge/models/Lora"
+            ).expanduser(),
+        ]
+        result: list[Path] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            absolute = candidate.absolute()
+            key = str(absolute)
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(absolute)
+        return tuple(result)
+
+    @staticmethod
+    def _lora_origin(root: Path) -> str:
+        parts = {part.casefold() for part in root.parts}
+        if "comfyui" in parts:
+            return "ComfyUI"
+        if "stable-diffusion-webui-forge" in parts:
+            return "Forge"
+        return root.name or str(root)
 
     @staticmethod
     def _parse_seed(value: str) -> int:

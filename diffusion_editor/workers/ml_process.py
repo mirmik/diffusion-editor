@@ -32,6 +32,7 @@ DEFAULT_STARTUP_TIMEOUT = 20.0
 DEFAULT_REQUEST_TIMEOUT = 1800.0
 MAX_IMAGE_PIXELS = 64 * 1024 * 1024
 MAX_DETECTIONS = 1024
+DEPTH_FLOAT_DTYPE = np.dtype("<f4")
 
 
 def default_worker_python() -> Path:
@@ -157,6 +158,47 @@ class MlProcessClient:
                 if image.width * image.height > MAX_IMAGE_PIXELS:
                     raise MlProtocolError("ML result exceeds the pixel limit")
                 result["image"] = image.copy()
+        depth_path = result.pop("depth_path", None)
+        if depth_path is not None:
+            shape = MlProcessClient._validate_depth_shape(
+                result.pop("depth_shape", None))
+            if result.pop("depth_dtype", None) != "float32-le":
+                raise MlProtocolError(
+                    "ML depth result has an unsupported dtype")
+            result["depth"] = MlProcessClient._load_float32_plane(
+                root, depth_path, shape, "depth")
+            confidence_path = result.pop("confidence_path", None)
+            result["confidence"] = (
+                MlProcessClient._load_float32_plane(
+                    root, confidence_path, shape, "depth confidence")
+                if confidence_path is not None else None
+            )
+            intrinsics = result.get("intrinsics")
+            if intrinsics is not None:
+                try:
+                    intrinsics = np.asarray(intrinsics, dtype=np.float32)
+                except (TypeError, ValueError) as exc:
+                    raise MlProtocolError(
+                        "ML depth intrinsics are not numeric") from exc
+                if (
+                        intrinsics.shape != (3, 3)
+                        or not np.isfinite(intrinsics).all()
+                        or intrinsics[0, 0] <= 0.0
+                        or intrinsics[1, 1] <= 0.0):
+                    raise MlProtocolError(
+                        "ML depth result has invalid intrinsics")
+                result["intrinsics"] = np.ascontiguousarray(intrinsics)
+            for name in ("field_of_view_degrees", "scale_factor"):
+                value = result.get(name)
+                if value is None:
+                    continue
+                if (
+                        isinstance(value, bool)
+                        or not isinstance(value, (int, float))
+                        or not np.isfinite(float(value))):
+                    raise MlProtocolError(
+                        f"ML depth result has invalid {name}")
+                result[name] = float(value)
         detections_path = result.pop("detections_path", None)
         if detections_path is not None:
             path = Path(detections_path)
@@ -194,6 +236,45 @@ class MlProcessClient:
                 detections.append(detection)
             result["detections"] = detections
         return result
+
+    @staticmethod
+    def _validate_depth_shape(raw: Any) -> tuple[int, int]:
+        if (
+                not isinstance(raw, list)
+                or len(raw) != 2
+                or any(
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or value < 1
+                    for value in raw)):
+            raise MlProtocolError("ML depth result has invalid dimensions")
+        height, width = map(int, raw)
+        if height * width > MAX_IMAGE_PIXELS:
+            raise MlProtocolError("ML depth result exceeds the pixel limit")
+        return height, width
+
+    @staticmethod
+    def _load_float32_plane(
+            root: Path,
+            raw_path: Any,
+            shape: tuple[int, int],
+            label: str) -> np.ndarray:
+        if not isinstance(raw_path, str):
+            raise MlProtocolError(f"ML {label} path is invalid")
+        path = Path(raw_path)
+        if (
+                path.parent != root
+                or path.is_symlink()
+                or not path.is_file()):
+            raise MlProtocolError(f"ML worker returned an unexpected {label} path")
+        expected_bytes = shape[0] * shape[1] * DEPTH_FLOAT_DTYPE.itemsize
+        if path.stat().st_size != expected_bytes:
+            raise MlProtocolError(f"ML {label} payload size is invalid")
+        values = np.fromfile(path, dtype=DEPTH_FLOAT_DTYPE)
+        values = values.reshape(shape).astype(np.float32, copy=False)
+        if not np.isfinite(values).all():
+            raise MlProtocolError(f"ML {label} contains non-finite values")
+        return np.ascontiguousarray(values)
 
     def shutdown(self, timeout: float = 1.0) -> None:
         self._stop_process(timeout)

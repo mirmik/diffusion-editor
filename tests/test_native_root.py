@@ -758,3 +758,83 @@ def test_reconstruction_point_artifact_is_loaded_as_point_cloud(tmp_path) -> Non
 
     assert root._load_reconstruction_artifact(artifact)
     assert loaded == [str(path)]
+
+
+def test_latest_depth_cloud_is_uploaded_directly_and_keeps_3d_context() -> None:
+    application = _application()
+    image = np.zeros((3, 4, 4), dtype=np.uint8)
+    image[:, :, 3] = 255
+    application.layer_stack.init_from_image(image)
+    layer = application.layer_stack.active_layer
+    positions = np.array(
+        [[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=np.float32)
+    colors = np.array(
+        [[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32)
+
+    class Cloud:
+        point_count = 2
+
+    cloud = Cloud()
+    cloud.positions = positions
+    cloud.colors = colors
+    cloud.confidence = np.array([1.0, 4.0], dtype=np.float32)
+    application.latest_depth_point_cloud = cloud
+    application._latest_depth_point_cloud_layer_ids = frozenset((layer.id,))
+    uploads = []
+
+    class Viewport:
+        def load_point_cloud_data(
+                self,
+                uploaded_positions,
+                uploaded_colors,
+                *,
+                fit_camera=None,
+                confidence_colors=None,
+                color_mode="image",
+                confidence_legend="",
+        ):
+            uploads.append((
+                uploaded_positions,
+                uploaded_colors,
+                fit_camera,
+                confidence_colors,
+                color_mode,
+                confidence_legend,
+            ))
+            return len(uploaded_positions)
+
+    class View:
+        def __init__(self):
+            self.contexts = []
+
+        def set_reconstruction_context(self, visible, status=""):
+            self.contexts.append((visible, status))
+
+    root = NativeEditorRoot.__new__(NativeEditorRoot)
+    root.application = application
+    root.view = View()
+    root.canvas = None
+    root.canvas_controls_coordinator = None
+    root._presented_reconstruction_id = "old-reconstruction"
+    root._presented_depth_point_cloud_layer_id = None
+    root._ensure_reconstruction_viewport = lambda: Viewport()
+
+    root._view_depth_point_cloud()
+    root._sync_reconstruction_selection(None)
+
+    np.testing.assert_array_equal(uploads[0][0], positions)
+    np.testing.assert_array_equal(uploads[0][1], colors)
+    assert uploads[0][2] is True
+    assert uploads[0][3].shape == (2, 3)
+    np.testing.assert_allclose(
+        uploads[0][3][0], np.array((48, 18, 59)) / 255.0)
+    np.testing.assert_allclose(
+        uploads[0][3][1], np.array((122, 4, 3)) / 255.0)
+    assert uploads[0][4] == "confidence"
+    assert "P2–P98" in uploads[0][5]
+    assert root._presented_reconstruction_id is None
+    assert root._presented_depth_point_cloud_layer_id == layer.id
+    assert root.view.contexts[-1] == (True, "Depth point cloud")
+    assert "2 colored points" in application.status_text
+    assert "confidence colors" in application.status_text
+    application.close()

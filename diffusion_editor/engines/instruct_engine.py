@@ -27,6 +27,7 @@ class InstructEngine:
         self._loaded = False
         self._loaded_profile_id: str | None = None
         self._loaded_parameters: dict[str, object] = {}
+        self._loaded_lora_adapters: tuple[dict[str, object], ...] = ()
         self.model_info: dict = {}
 
     @property
@@ -45,22 +46,37 @@ class InstructEngine:
             self,
             profile_id: str,
             parameters: dict[str, object],
+            lora_adapters=None,
     ) -> bool:
         if self.loaded_profile_id != profile_id:
             return False
         profile = image_edit_profile(profile_id)
-        return self._loaded_parameters == profile.load_values(parameters)
+        normalized_adapters = tuple(
+            adapter.to_dict()
+            for adapter in profile.normalize_lora_adapters(lora_adapters)
+        )
+        return (
+            self._loaded_parameters == profile.load_values(parameters)
+            and self._loaded_lora_adapters == normalized_adapters
+        )
 
     def submit_load(
             self,
             profile_id: str = LEGACY_INSTRUCT_PROFILE_ID,
             parameters: dict[str, object] | None = None,
+            lora_adapters=None,
             *,
             job_id: str | None = None):
-        normalized = image_edit_profile(profile_id).normalize(parameters)
+        profile = image_edit_profile(profile_id)
+        normalized = profile.normalize(parameters)
+        normalized_adapters = tuple(
+            adapter.to_dict()
+            for adapter in profile.normalize_lora_adapters(lora_adapters)
+        )
         return self._tasks.submit(
             "load",
-            lambda cancel: self._load(profile_id, normalized, cancel),
+            lambda cancel: self._load(
+                profile_id, normalized, normalized_adapters, cancel),
             job_id=job_id,
             name="image-edit-load",
             on_error=lambda _exc: log.exception(
@@ -68,10 +84,14 @@ class InstructEngine:
             ),
         )
 
-    def _load(self, profile_id, parameters, cancel):
+    def _load(self, profile_id, parameters, lora_adapters, cancel):
         result = self._client.request(
             "load_image_edit",
-            {"profile_id": profile_id, "parameters": parameters},
+            {
+                "profile_id": profile_id,
+                "parameters": parameters,
+                "lora_adapters": list(lora_adapters),
+            },
             cancel,
         )
         self.model_info = dict(result)
@@ -79,6 +99,7 @@ class InstructEngine:
         self._loaded_profile_id = profile_id
         self._loaded_parameters = image_edit_profile(
             profile_id).load_values(parameters)
+        self._loaded_lora_adapters = tuple(lora_adapters)
         return True
 
     def submit_request(
@@ -102,11 +123,18 @@ class InstructEngine:
             self, request: ImageEditRequest | InstructRequest, cancel):
         if isinstance(request, InstructRequest):
             request = request.to_image_edit()
+        profile = image_edit_profile(request.model_profile_id)
+        lora_adapters = [
+            adapter.to_dict()
+            for adapter in profile.normalize_lora_adapters(
+                request.lora_adapters)
+        ]
         result = self._client.request(
             "image_edit",
             {
                 "profile_id": request.model_profile_id,
                 "parameters": request.parameters,
+                "lora_adapters": lora_adapters,
             },
             cancel,
             images={
@@ -136,4 +164,5 @@ class InstructEngine:
             self._loaded = False
             self._loaded_profile_id = None
             self._loaded_parameters = {}
+            self._loaded_lora_adapters = ()
             self.model_info = {}

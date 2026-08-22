@@ -620,7 +620,8 @@ class DiffusionRequestBuildResult:
 @dataclass(frozen=True)
 class EnginePollEvent:
     task_type: Literal[
-        "load", "load_ip_adapter", "inference", "segmentation", "reconstruction"
+        "load", "load_ip_adapter", "inference", "segmentation", "depth",
+        "reconstruction"
     ]
     result: object | None = None
     error: str | None = None
@@ -640,6 +641,7 @@ class ImageEditRequest:
     image: Image.Image
     model_profile_id: str
     parameters: dict[str, object]
+    lora_adapters: tuple[dict[str, object], ...] | None = None
     reference_image: Image.Image | None = None
 
 
@@ -803,17 +805,197 @@ class SegmentationResult:
     provenance: GenerationProvenance | None = None
 
 
-DEPTH_ANYTHING_V2_SMALL_MODEL_ID = (
-    "depth-anything/Depth-Anything-V2-Small-hf"
+class DepthBackend(str, Enum):
+    TRANSFORMERS = "transformers"
+    DA3 = "da3"
+
+
+class DepthValueKind(str, Enum):
+    """Numerical meaning of one canonical float depth sample."""
+
+    DIRECT_METRIC = "direct_metric"
+    DIRECT_SCALE_AMBIGUOUS = "direct_scale_ambiguous"
+    INVERSE_RELATIVE = "inverse_relative"
+
+
+@dataclass(frozen=True)
+class DepthModelProfile:
+    stable_id: str
+    title: str
+    model_id: str
+    backend: DepthBackend
+    layer_name: str
+    value_kind: DepthValueKind
+    process_resolution: int | None = None
+    predicts_intrinsics: bool = False
+    use_ray_pose: bool = False
+    direct_depth: bool = False
+    metric: bool = False
+    license_name: str = ""
+
+
+DEPTH_MODEL_PROFILES = (
+    DepthModelProfile(
+        stable_id="da3-nested-giant-large-1.1",
+        title="DA3 Nested Giant Large 1.1",
+        model_id="depth-anything/DA3NESTED-GIANT-LARGE-1.1",
+        backend=DepthBackend.DA3,
+        layer_name="Depth DA3 Nested",
+        value_kind=DepthValueKind.DIRECT_METRIC,
+        process_resolution=1008,
+        predicts_intrinsics=True,
+        use_ray_pose=True,
+        direct_depth=True,
+        metric=True,
+        license_name="CC-BY-NC-4.0",
+    ),
+    DepthModelProfile(
+        stable_id="da3-mono-large",
+        title="DA3 Mono Large",
+        model_id="depth-anything/DA3MONO-LARGE",
+        backend=DepthBackend.DA3,
+        layer_name="Depth DA3 Mono",
+        value_kind=DepthValueKind.DIRECT_SCALE_AMBIGUOUS,
+        process_resolution=1008,
+        direct_depth=True,
+        license_name="Apache-2.0",
+    ),
+    DepthModelProfile(
+        stable_id="depth-pro",
+        title="Apple Depth Pro",
+        model_id="apple/DepthPro-hf",
+        backend=DepthBackend.TRANSFORMERS,
+        layer_name="Depth Pro",
+        value_kind=DepthValueKind.DIRECT_METRIC,
+        predicts_intrinsics=True,
+        direct_depth=True,
+        metric=True,
+        license_name="Apple AMLR",
+    ),
+    DepthModelProfile(
+        stable_id="v2-large",
+        title="Depth Anything V2 Large",
+        model_id="depth-anything/Depth-Anything-V2-Large-hf",
+        backend=DepthBackend.TRANSFORMERS,
+        layer_name="Depth V2 Large",
+        value_kind=DepthValueKind.INVERSE_RELATIVE,
+        license_name="CC-BY-NC-4.0",
+    ),
+    DepthModelProfile(
+        stable_id="v2-small",
+        title="Depth Anything V2 Small",
+        model_id="depth-anything/Depth-Anything-V2-Small-hf",
+        backend=DepthBackend.TRANSFORMERS,
+        layer_name="Depth V2 Small",
+        value_kind=DepthValueKind.INVERSE_RELATIVE,
+        license_name="Apache-2.0",
+    ),
 )
+
+DEFAULT_DEPTH_MODEL_PROFILE_ID = "da3-nested-giant-large-1.1"
+DEPTH_ANYTHING_V2_SMALL_MODEL_ID = DEPTH_MODEL_PROFILES[-1].model_id
+
+
+def depth_model_profile(stable_id: str) -> DepthModelProfile:
+    for profile in DEPTH_MODEL_PROFILES:
+        if profile.stable_id == stable_id:
+            return profile
+    raise ValueError(f"Unknown depth model profile: {stable_id}")
 
 
 @dataclass(frozen=True)
 class DepthEstimationRequest:
+    """Model input for full-frame monocular depth inference.
+
+    Subject/selection masks deliberately do not belong to this request. They
+    are post-inference output constraints owned by DepthGenerationController,
+    so the model always retains every scene cue in the composite image.
+    """
+
     image: np.ndarray
-    model_id: str = DEPTH_ANYTHING_V2_SMALL_MODEL_ID
+    profile_id: str = DEFAULT_DEPTH_MODEL_PROFILE_ID
+
+    @property
+    def profile(self) -> DepthModelProfile:
+        return depth_model_profile(self.profile_id)
+
+    @property
+    def model_id(self) -> str:
+        return self.profile.model_id
 
 
 @dataclass(frozen=True)
 class DepthEstimationResult:
+    """Canonical, unquantized depth and its camera calibration.
+
+    ``depth_map`` is always the model-derived float32 field. Display rasters
+    must be derived from it and must never be fed back into geometry.
+    """
+
     depth_map: np.ndarray
+    profile_id: str = DEFAULT_DEPTH_MODEL_PROFILE_ID
+    value_kind: DepthValueKind = DepthValueKind.DIRECT_SCALE_AMBIGUOUS
+    intrinsics: np.ndarray | None = None
+    confidence: np.ndarray | None = None
+    field_of_view_degrees: float | None = None
+    scale_factor: float | None = None
+
+    def __post_init__(self) -> None:
+        depth = np.asarray(self.depth_map)
+        if depth.dtype != np.float32 or depth.ndim != 2 or depth.size == 0:
+            raise ValueError(
+                "canonical depth must be a non-empty float32 2D array")
+        if not np.isfinite(depth).all():
+            raise ValueError("canonical depth must contain only finite values")
+        depth = np.array(depth, dtype=np.float32, order="C", copy=True)
+        depth.flags.writeable = False
+        object.__setattr__(self, "depth_map", depth)
+
+        try:
+            kind = DepthValueKind(self.value_kind)
+        except ValueError as exc:
+            raise ValueError("canonical depth value convention is invalid") from exc
+        object.__setattr__(self, "value_kind", kind)
+
+        intrinsics = self.intrinsics
+        if intrinsics is not None:
+            intrinsics = np.asarray(intrinsics)
+            if (
+                    intrinsics.dtype != np.float32
+                    or intrinsics.shape != (3, 3)
+                    or not np.isfinite(intrinsics).all()
+                    or intrinsics[0, 0] <= 0.0
+                    or intrinsics[1, 1] <= 0.0):
+                raise ValueError("canonical depth intrinsics are invalid")
+            if abs(float(np.linalg.det(intrinsics))) <= 1.0e-12:
+                raise ValueError("canonical depth intrinsics are singular")
+            intrinsics = np.array(
+                intrinsics, dtype=np.float32, order="C", copy=True)
+            intrinsics.flags.writeable = False
+            object.__setattr__(self, "intrinsics", intrinsics)
+
+        confidence = self.confidence
+        if confidence is not None:
+            confidence = np.asarray(confidence)
+            if (
+                    confidence.dtype != np.float32
+                    or confidence.shape != depth.shape
+                    or not np.isfinite(confidence).all()):
+                raise ValueError("canonical depth confidence is invalid")
+            confidence = np.array(
+                confidence, dtype=np.float32, order="C", copy=True)
+            confidence.flags.writeable = False
+            object.__setattr__(self, "confidence", confidence)
+
+        for name in ("field_of_view_degrees", "scale_factor"):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            value = float(value)
+            if not math.isfinite(value):
+                raise ValueError(f"canonical depth {name} is invalid")
+            if name == "field_of_view_degrees" and not 0.0 < value < 180.0:
+                raise ValueError("canonical depth field of view is invalid")
+            if name == "scale_factor" and value <= 0.0:
+                raise ValueError("canonical depth scale factor is invalid")
+            object.__setattr__(self, name, value)

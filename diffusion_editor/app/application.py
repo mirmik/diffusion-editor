@@ -9,11 +9,16 @@ import time
 from typing import Any, Callable, Protocol
 
 import numpy as np
+from PIL import Image
 from tcbase import log
 
 from ..agent.tools import create_editor_tool_registry
 from ..document.document_service import DocumentService
-from ..document.commands import AddLayerCommand, SetLayerSelectionCommand
+from ..document.commands import (
+    AddDepthVisualizationCommand,
+    AddLayerCommand,
+    SetLayerSelectionCommand,
+)
 from ..document.history import HistoryManager
 from ..document.layer import Layer
 from ..document.layer_stack import LayerStack
@@ -27,6 +32,11 @@ from ..engines.lama_engine import LamaEngine
 from ..engines.segmentation_engine import SegmentationEngine
 from ..generation.diffusion_controller import DiffusionGenerationController
 from ..generation.depth_controller import DepthGenerationController
+from ..generation.depth_point_cloud import (
+    DepthPointCloudData,
+    project_depth_point_cloud,
+)
+from ..generation.depth_visualization import colorize_depth
 from ..generation.instruct_controller import InstructGenerationController
 from ..generation.job_context import (
     ApplyFrozenGeneratedResultCommand,
@@ -42,6 +52,11 @@ from ..generation.result_mapper import (
     map_segmentation_result,
 )
 from ..generation.segmentation_controller import SegmentationGenerationController
+from ..generation.types import (
+    DepthEstimationResult,
+    DepthValueKind,
+    depth_model_profile,
+)
 from ..grounding.controller import GroundingController
 from .presentation import PanelUpdate, ViewPorts
 from .settings import Settings
@@ -99,6 +114,12 @@ class _ShutdownResource:
     close: Callable[[], None]
 
 
+@dataclass(frozen=True)
+class _PendingSubjectDepth:
+    profile_id: str
+    layer_id: str
+
+
 class EditorApplication:
     """Owns domain state, controllers and deterministic application shutdown.
 
@@ -125,6 +146,11 @@ class EditorApplication:
         self.clipboard: np.ndarray | None = None
         self.clipboard_pos: tuple[int, int] | None = None
         self.history_replaying = False
+        self._pending_subject_depth: _PendingSubjectDepth | None = None
+        self.latest_depth_point_cloud: DepthPointCloudData | None = None
+        self.latest_depth_point_cloud_error: str | None = None
+        self.latest_depth_result: DepthEstimationResult | None = None
+        self._latest_depth_point_cloud_layer_ids: frozenset[str] = frozenset()
 
         self.layer_stack = LayerStack()
         self.session = DocumentSession()
@@ -199,6 +225,11 @@ class EditorApplication:
             engine=self.depth_engine,
             composite=lambda: np.ascontiguousarray(
                 self.layer_stack.composite()
+            ),
+            selection=lambda: (
+                None
+                if self.layer_stack.selection.is_empty
+                else self.layer_stack.selection.data
             ),
             document_state=document_state,
         )
@@ -430,6 +461,46 @@ class EditorApplication:
     def request_stop(self) -> None:
         self.running = False
 
+    def depth_point_cloud_for_layer(
+            self, layer: Layer | None) -> DepthPointCloudData | None:
+        if (
+                layer is None
+                or layer.id not in self._latest_depth_point_cloud_layer_ids):
+            return None
+        return self.latest_depth_point_cloud
+
+    def has_depth_point_cloud_context(self, layer: Layer | None) -> bool:
+        return (
+            layer is not None
+            and layer.id in self._latest_depth_point_cloud_layer_ids
+        )
+
+    def start_subject_depth(
+            self,
+            layer: Layer,
+            profile_id: str,
+    ) -> str | None:
+        """Segment the foreground, then start masked depth inference."""
+
+        if (
+                self._pending_subject_depth is not None
+                or self.segmentation_controller.is_busy
+                or self.depth_controller.is_busy):
+            return None
+        try:
+            depth_model_profile(profile_id)
+        except ValueError as exc:
+            return str(exc)
+        event = self.segmentation_controller.start_select_background_selection(
+            layer)
+        if event.status is None:
+            return None
+        self._pending_subject_depth = _PendingSubjectDepth(
+            profile_id=profile_id,
+            layer_id=layer.id,
+        )
+        return "Isolating subject for depth..."
+
     def close(self) -> None:
         """Stop workers and GPU resources in stable phase/registration order."""
         if self.closed:
@@ -627,16 +698,50 @@ class EditorApplication:
             self.set_status(status)
         elif event.selection_result is not None:
             context, seg_mask = event.selection_result
-            _layer, rejection = self._resolve_generation_target(context)
+            layer, rejection = self._resolve_generation_target(context)
             if rejection is not None:
+                self._pending_subject_depth = None
                 self.set_status(rejection)
+                return
+            pending = self._pending_subject_depth
+            if pending is not None:
+                self._pending_subject_depth = None
+                if layer is None or layer.id != pending.layer_id:
+                    self.set_status(
+                        "Subject depth cancelled: target layer changed"
+                    )
+                    return
+                foreground_mask = 255 - np.asarray(
+                    seg_mask, dtype=np.uint8)
+                if not np.any(foreground_mask > 0):
+                    self.set_status(
+                        "Subject depth: foreground segmentation found nothing"
+                    )
+                    return
+                depth_event = self.depth_controller.start(
+                    layer,
+                    pending.profile_id,
+                    output_mask=foreground_mask,
+                )
+                self.set_status(
+                    depth_event.status
+                    or "Subject depth: failed to start depth estimation"
+                )
                 return
             self.document.execute(SetLayerSelectionCommand(
                 mask=seg_mask,
                 label="Select Background",
             ))
             self.set_status("Background selected")
+        elif event.segmentation_error is not None:
+            self._pending_subject_depth = None
+            if event.status:
+                self.set_status(event.status)
         elif event.status:
+            if (
+                    self._pending_subject_depth is not None
+                    and not self.segmentation_controller.is_busy):
+                self._pending_subject_depth = None
             self.set_status(event.status)
 
     def _poll_lama(self) -> None:
@@ -816,26 +921,147 @@ class EditorApplication:
         if event is None:
             return
         if event.depth_result is not None:
-            context, depth_map = event.depth_result
+            context, depth_result, output_mask = event.depth_result
+            depth_map = depth_result.depth_map
             _layer, rejection = self._resolve_generation_target(context)
             if rejection is not None:
                 self.set_status(rejection)
                 return
             expected_shape = (self.layer_stack.height, self.layer_stack.width)
+            if output_mask is None:
+                alpha = np.full(expected_shape, 255, dtype=np.uint8)
+            else:
+                alpha = np.asarray(output_mask, dtype=np.uint8)
+                if alpha.shape != expected_shape:
+                    self.set_status(
+                        "Depth result rejected: output mask size does not "
+                        "match canvas"
+                    )
+                    return
+            source = (
+                context.input_array.to_array()
+                if context.input_array is not None else None
+            )
+            depth_height, depth_width = depth_map.shape
+            mask_for_depth = output_mask
+            source_for_depth = source
             if depth_map.shape != expected_shape:
+                if output_mask is not None:
+                    mask_for_depth = np.asarray(
+                        Image.fromarray(output_mask, "L").resize(
+                            (depth_width, depth_height),
+                            Image.Resampling.LANCZOS,
+                        ),
+                        dtype=np.uint8,
+                    )
+                if source is not None:
+                    source_for_depth = np.asarray(
+                        Image.fromarray(source).resize(
+                            (depth_width, depth_height),
+                            Image.Resampling.LANCZOS,
+                        ),
+                        dtype=np.uint8,
+                    )
+            preview = colorize_depth(
+                depth_map,
+                mask=mask_for_depth,
+                near_is_high=(
+                    depth_result.value_kind
+                    is DepthValueKind.INVERSE_RELATIVE
+                ),
+            )
+            preview_rgb = preview.rgb
+            if preview_rgb.shape[:2] != expected_shape:
+                preview_rgb = np.asarray(
+                    Image.fromarray(preview_rgb, "RGB").resize(
+                        (expected_shape[1], expected_shape[0]),
+                        Image.Resampling.LANCZOS,
+                    ),
+                    dtype=np.uint8,
+                )
+            preview_rgba = np.dstack((preview_rgb, alpha))
+            point_cloud = None
+            point_cloud_error = None
+            if source_for_depth is not None:
+                try:
+                    point_cloud = project_depth_point_cloud(
+                        source_for_depth,
+                        depth_map,
+                        mask=mask_for_depth,
+                        confidence=depth_result.confidence,
+                        intrinsics=depth_result.intrinsics,
+                        value_kind=depth_result.value_kind,
+                        fallback_fov_y_degrees=(
+                            55.0
+                            if depth_result.value_kind
+                            is DepthValueKind.INVERSE_RELATIVE
+                            else None
+                        ),
+                    )
+                except ValueError as exc:
+                    point_cloud_error = str(exc)
+                    log.error(f"Depth point-cloud projection failed: {exc}")
+            profile_id = context.provenance("profile_id")
+            try:
+                profile = depth_model_profile(profile_id or "")
+            except ValueError:
                 self.set_status(
-                    "Depth result rejected: output size does not match canvas"
+                    "Depth result rejected: unknown model profile"
                 )
                 return
-            alpha = np.full(expected_shape, 255, dtype=np.uint8)
-            rgba = np.dstack((depth_map, depth_map, depth_map, alpha))
-            self.document.execute(AddLayerCommand(
-                name=self.layer_stack.next_name("Depth Map"),
-                image=np.ascontiguousarray(rgba),
-                label="Create Depth Map",
+            base_name = self.layer_stack.next_name(profile.layer_name)
+            self.document.execute(AddDepthVisualizationCommand(
+                name=f"{base_name} Preview (float32 source)",
+                preview_image=np.ascontiguousarray(preview_rgba),
+                label=f"Create Depth Map ({profile.title})",
             ))
+            self.latest_depth_result = depth_result
+            preview_layer = self.layer_stack.active_layer
+            self._latest_depth_point_cloud_layer_ids = frozenset(
+                layer.id
+                for layer in (preview_layer,)
+                if layer is not None
+            )
+            if point_cloud is not None:
+                self.latest_depth_point_cloud = point_cloud
+                self.latest_depth_point_cloud_error = None
+            else:
+                self.latest_depth_point_cloud = None
+                self.latest_depth_point_cloud_error = (
+                    point_cloud_error or "source image is unavailable"
+                )
+            if depth_result.value_kind is DepthValueKind.DIRECT_METRIC:
+                depth_kind = "metric float32 with model camera calibration"
+            elif depth_result.intrinsics is not None:
+                depth_kind = (
+                    "scale-ambiguous direct float32 with model camera "
+                    "calibration"
+                )
+            elif depth_result.value_kind is DepthValueKind.INVERSE_RELATIVE:
+                depth_kind = (
+                    "inverse-relative float32; approximate 55° camera"
+                )
+            else:
+                depth_kind = (
+                    "scale-ambiguous direct float32; no camera calibration"
+                )
+            mask_status = (
+                "; full-frame inference; output mask applied afterward"
+                if output_mask is not None else ""
+            )
+            cloud_status = (
+                ""
+                if self.latest_depth_point_cloud_error is None
+                else "; point cloud unavailable: "
+                f"{self.latest_depth_point_cloud_error}"
+            )
             self.set_status(
-                "Depth map created (white is closer, black is farther)"
+                f"{profile.title}: {depth_kind} depth map created "
+                f"at raw {depth_width}x{depth_height} model resolution "
+                f"(cold is farther, warm is closer; contrast uses "
+                f"{preview.low:.6g}…{preview.high:.6g}; canonical values "
+                f"remain unquantized"
+                f"{mask_status}{cloud_status})"
             )
         elif event.status:
             self.set_status(event.status)

@@ -46,6 +46,8 @@ from ..generation.reconstruction_workspace import (
     pixal3d_presented_operations,
 )
 from .native_reconstruction_viewport import (
+    POINT_CLOUD_COLOR_LABELS,
+    POINT_CLOUD_COLOR_MODES,
     RECONSTRUCTION_SHADING_LABELS,
     RECONSTRUCTION_SHADING_MODES,
 )
@@ -165,10 +167,49 @@ COMMAND_SPECS = (
     NativeCommandSpec("layer.detect", "Detect Objects…"),
     NativeCommandSpec(
         "ai.depth_map",
-        "Create Depth Map",
+        "Depth Map — DA3 Nested Giant 1.1",
         tooltip=(
-            "Create a grayscale depth layer from the current image using "
-            "Depth Anything V2 Small"
+            "Create metric depth with a predicted camera matrix using the "
+            "highest-quality Depth Anything 3 profile"
+        ),
+    ),
+    NativeCommandSpec(
+        "ai.depth_map.subject",
+        "Depth Map — Character Only (DA3)",
+        tooltip=(
+            "Automatically isolate the foreground character and create a "
+            "depth map with a transparent background"
+        ),
+    ),
+    NativeCommandSpec(
+        "ai.depth_map.da3_mono",
+        "Depth Map — DA3 Mono Large",
+        tooltip=(
+            "Create high-quality direct relative depth without camera "
+            "calibration using Depth Anything 3 Mono Large"
+        ),
+    ),
+    NativeCommandSpec(
+        "ai.depth_map.depth_pro",
+        "Depth Map — Apple Depth Pro",
+        tooltip="Create a metric depth layer using Apple Depth Pro",
+    ),
+    NativeCommandSpec(
+        "ai.depth_map.v2_large",
+        "Depth Map — V2 Large",
+        tooltip="Create a relative depth layer using Depth Anything V2 Large",
+    ),
+    NativeCommandSpec(
+        "ai.depth_map.v2_small",
+        "Depth Map — V2 Small",
+        tooltip="Create a fast relative depth layer using Depth Anything V2 Small",
+    ),
+    NativeCommandSpec(
+        "ai.depth_point_cloud",
+        "View Depth as Point Cloud",
+        tooltip=(
+            "Project the latest depth result into a colored Termin point "
+            "cloud with orbit controls"
         ),
     ),
     NativeCommandSpec(
@@ -260,6 +301,14 @@ MENU_COMMANDS = (
         "AI",
         (
             "ai.depth_map",
+            "ai.depth_map.subject",
+            None,
+            "ai.depth_map.da3_mono",
+            "ai.depth_map.depth_pro",
+            "ai.depth_map.v2_large",
+            "ai.depth_map.v2_small",
+            None,
+            "ai.depth_point_cloud",
         ),
     ),
     (
@@ -397,6 +446,8 @@ class NativeEditorView:
         self.reconstruction_toolbar_model = None
         self.reconstruction_toolbar = None
         self.reconstruction_shading_combo = None
+        self.reconstruction_point_color_combo = None
+        self.reconstruction_point_color_legend = None
         self.reconstruction_buttons = {}
         self.reconstruction_stage_buttons = {}
         self.reconstruction_stage_checks = {}
@@ -407,6 +458,7 @@ class NativeEditorView:
         self._syncing_reconstruction_parameters = False
         self._syncing_reconstruction_refine = False
         self._syncing_reconstruction_refine_placement = False
+        self._syncing_reconstruction_point_color = False
         self.reconstruction_parameter_controls = {}
         self.reconstruction_parameter_widgets = {}
         self.reconstruction_seed_buttons = {}
@@ -749,6 +801,47 @@ class NativeEditorView:
         shading_row.add_flex_child(shading_label, 1.0)
         shading_row.add_fixed_child(shading_combo.widget, 108.0)
         toolbar.add_preferred_child(shading_row)
+
+        point_color_row = self._document.create_hstack(
+            "DiffusionEditorReconstructionPointColorRow"
+        )
+        point_color_row.set_layout_spacing(4.0)
+        point_color_label = self._document.create_label(
+            "Point color", "DiffusionEditorReconstructionPointColorLabel"
+        )
+        point_color_combo = self._document.create_combo_box()
+        point_color_combo.widget.stable_id = (
+            "diffusion-editor.reconstruction.point-color"
+        )
+        for mode in POINT_CLOUD_COLOR_MODES:
+            point_color_combo.add_item(POINT_CLOUD_COLOR_LABELS[mode])
+        point_color_combo.selected_index = 0
+        point_color_combo.widget.enabled = False
+        set_point_color_mode = getattr(
+            viewport_view, "set_point_cloud_color_mode", None)
+
+        def activate_point_color(index, *_rest):
+            if self._syncing_reconstruction_point_color:
+                return
+            if not 0 <= index < len(POINT_CLOUD_COLOR_MODES):
+                return
+            if callable(set_point_color_mode):
+                set_point_color_mode(POINT_CLOUD_COLOR_MODES[index])
+
+        self._connections.append(point_color_combo.connect_changed(
+            activate_point_color
+        ))
+        point_color_row.add_flex_child(point_color_label, 1.0)
+        point_color_row.add_fixed_child(point_color_combo.widget, 108.0)
+        toolbar.add_preferred_child(point_color_row)
+        point_color_legend = self._document.create_label(
+            "", "DiffusionEditorReconstructionPointColorLegend"
+        )
+        point_color_legend.stable_id = (
+            "diffusion-editor.reconstruction.point-color-legend"
+        )
+        point_color_legend.visible = False
+        toolbar.add_preferred_child(point_color_legend)
 
         status = self._document.create_label(
             "Empty", "DiffusionEditorReconstructionStatus"
@@ -1827,6 +1920,8 @@ class NativeEditorView:
         self.reconstruction_toolbar_model = toolbar_model
         self.reconstruction_toolbar = toolbar
         self.reconstruction_shading_combo = shading_combo
+        self.reconstruction_point_color_combo = point_color_combo
+        self.reconstruction_point_color_legend = point_color_legend
         self.reconstruction_buttons = reconstruction_buttons
         self.reconstruction_stage_buttons = stage_buttons
         self.reconstruction_stage_checks = stage_checks
@@ -1887,6 +1982,31 @@ class NativeEditorView:
         self.reconstruction_status = status
         self.reconstruction_panel = panel
         self._select_reconstruction_workspace_operation("source.prepare")
+        self._request_repaint()
+
+    def set_reconstruction_point_color_state(
+            self,
+            has_confidence: bool,
+            mode: str = "image",
+            legend: str = "",
+    ) -> None:
+        combo = self.reconstruction_point_color_combo
+        label = self.reconstruction_point_color_legend
+        if combo is None or label is None:
+            return
+        normalized = str(mode).strip().lower()
+        if normalized not in POINT_CLOUD_COLOR_MODES:
+            normalized = "image"
+        if normalized == "confidence" and not has_confidence:
+            normalized = "image"
+        self._syncing_reconstruction_point_color = True
+        try:
+            combo.selected_index = POINT_CLOUD_COLOR_MODES.index(normalized)
+            combo.widget.enabled = bool(has_confidence)
+            label.text = str(legend) if has_confidence else ""
+            label.visible = bool(has_confidence)
+        finally:
+            self._syncing_reconstruction_point_color = False
         self._request_repaint()
 
     def mount_reconstruction_refine_viewport(self, viewport_view) -> None:

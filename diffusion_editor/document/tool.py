@@ -17,6 +17,7 @@ from ..generation.provenance import (
 from ..generation.image_edit_profiles import (
     LEGACY_INSTRUCT_PROFILE_ID,
     image_edit_profile,
+    normalize_profile_lora_store,
     normalize_profile_store,
 )
 
@@ -90,6 +91,7 @@ class InstructTool(Tool):
                  seed: int = -1,
                  model_profile_id: str = LEGACY_INSTRUCT_PROFILE_ID,
                  profile_parameters: dict[str, dict] | None = None,
+                 profile_lora_adapters: dict[str, list[dict]] | None = None,
                  reference_layer_id: str | None = None,
                  reference_layer_name_hint: str = "",
                  reference_image: Image.Image | None = None,
@@ -101,6 +103,10 @@ class InstructTool(Tool):
         self.patch_h = patch_h
         # Keep parameters for every profile so switching models is lossless.
         self.profile_parameters = normalize_profile_store(profile_parameters)
+        self.profile_lora_adapters = normalize_profile_lora_store(
+            profile_lora_adapters,
+            legacy_profile_parameters=profile_parameters,
+        )
         self.model_profile_id = model_profile_id
         self.reference_layer_id = reference_layer_id
         self.reference_layer_name_hint = reference_layer_name_hint
@@ -123,6 +129,12 @@ class InstructTool(Tool):
     def parameters(self) -> dict:
         return self.profile_parameters[self.model_profile_id]
 
+    @property
+    def lora_adapters(self):
+        profile = image_edit_profile(self.model_profile_id)
+        return profile.normalize_lora_adapters(
+            self.profile_lora_adapters[self.model_profile_id])
+
     def set_profile(self, profile_id: str) -> None:
         image_edit_profile(profile_id)
         self.model_profile_id = profile_id
@@ -130,6 +142,13 @@ class InstructTool(Tool):
     def set_parameter(self, stable_id: str, value) -> None:
         parameter = image_edit_profile(self.model_profile_id).parameter(stable_id)
         self.parameters[stable_id] = parameter.normalize(value)
+
+    def set_lora_adapters(self, values) -> None:
+        profile = image_edit_profile(self.model_profile_id)
+        self.profile_lora_adapters[self.model_profile_id] = [
+            adapter.to_dict()
+            for adapter in profile.normalize_lora_adapters(values)
+        ]
 
     # Compatibility surface for old document commands and integrations.
     @property

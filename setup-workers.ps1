@@ -13,6 +13,8 @@ $BootstrapArgs = if ($env:WORKERS_BOOTSTRAP_PYTHON) { @() } else { @("-3.11") }
 $Accelerator = if ($env:ML_ACCELERATOR) { $env:ML_ACCELERATOR } else { "auto" }
 $WorkersPython = Join-Path $WorkersVenv "Scripts/python.exe"
 $SenseNovaOverlay = Join-Path $WorkersVenv "share/diffusion-editor/sensenova-u1"
+$Da3Source = Join-Path $WorkersVenv "share/diffusion-editor/depth-anything-3"
+$Da3Revision = "3d835ec1a5802d64a8b8b15f817a1ab54809bfe4"
 
 if ($Accelerator -eq "auto") {
     $NvidiaSmi = Get-Command nvidia-smi -ErrorAction SilentlyContinue
@@ -91,16 +93,26 @@ if ($Accelerator -eq "cpu") {
     --target $SenseNovaOverlay `
     -r requirements-workers-sensenova.txt
 
+& $WorkersPython -m pip install -r requirements-workers-da3.txt
+if (-not (Test-Path (Join-Path $Da3Source ".git") -PathType Container)) {
+    New-Item -ItemType Directory -Force (Split-Path -Parent $Da3Source) |
+        Out-Null
+    git clone https://github.com/ByteDance-Seed/Depth-Anything-3.git $Da3Source
+}
+git -C $Da3Source fetch --depth 1 origin $Da3Revision
+git -C $Da3Source checkout --detach $Da3Revision
+
 & $WorkersPython -m pip check
 $env:ML_ACCELERATOR_RESOLVED = $Accelerator
 $PreviousPythonPath = $env:PYTHONPATH
 $env:PYTHONPATH = if ($PreviousPythonPath) {
-    "$SenseNovaOverlay$([IO.Path]::PathSeparator)$PreviousPythonPath"
+    "$(Join-Path $Da3Source 'src')$([IO.Path]::PathSeparator)$SenseNovaOverlay$([IO.Path]::PathSeparator)$PreviousPythonPath"
 } else {
-    $SenseNovaOverlay
+    "$(Join-Path $Da3Source 'src')$([IO.Path]::PathSeparator)$SenseNovaOverlay"
 }
 & $WorkersPython -c @'
 from diffusion_editor.workers.lama_model import LamaModel
+from depth_anything_3.api import DepthAnything3
 import accelerate
 import cv2
 import diffusers

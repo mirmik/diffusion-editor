@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import math
 import os
 from pathlib import Path
+import re
 from typing import Any, Iterable
 
 
 LEGACY_INSTRUCT_PROFILE_ID = "instruct-pix2pix"
 QWEN_IMAGE_EDIT_PROFILE_ID = "qwen-image-edit-2511"
+QWEN_MULTIPLE_ANGLES_PROFILE_ID = "qwen-image-edit-2511-multiple-angles"
 FLUX2_KLEIN_PROFILE_ID = "flux2-klein-4b"
 SENSENOVA_U15_PROFILE_ID = "sensenova-u1.5-8b-mot-preview"
 DEFAULT_IMAGE_EDIT_PROFILE_ID = QWEN_IMAGE_EDIT_PROFILE_ID
@@ -74,6 +77,26 @@ class ImageEditParameter:
 
 
 @dataclass(frozen=True)
+class ImageEditLoraAdapter:
+    """One ordered LoRA adapter in an image-edit load configuration."""
+
+    stable_id: str
+    label: str
+    source: str
+    weight: float = 1.0
+    enabled: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "stable_id": self.stable_id,
+            "label": self.label,
+            "source": self.source,
+            "weight": self.weight,
+            "enabled": self.enabled,
+        }
+
+
+@dataclass(frozen=True)
 class ImageEditProfile:
     stable_id: str
     title: str
@@ -81,6 +104,7 @@ class ImageEditProfile:
     model_id: str
     description: str
     parameters: tuple[ImageEditParameter, ...]
+    default_lora_adapters: tuple[ImageEditLoraAdapter, ...] = ()
     primary: bool = False
     fast: bool = False
     max_input_images: int = 1
@@ -114,9 +138,63 @@ class ImageEditProfile:
             if parameter.load_time
         }
 
+    def normalize_lora_adapters(
+        self,
+        values: Iterable[ImageEditLoraAdapter | dict[str, Any]] | None,
+    ) -> tuple[ImageEditLoraAdapter, ...]:
+        source = self.default_lora_adapters if values is None else values
+        return normalize_lora_adapters(source)
+
 
 def _choice(value: str, label: str | None = None) -> ParameterChoice:
     return ParameterChoice(value=value, label=label or value)
+
+
+def normalize_lora_adapters(
+    values: Iterable[ImageEditLoraAdapter | dict[str, Any]] | None,
+) -> tuple[ImageEditLoraAdapter, ...]:
+    if values is None:
+        return ()
+    result: list[ImageEditLoraAdapter] = []
+    used_ids: set[str] = set()
+    for index, raw in enumerate(values):
+        if isinstance(raw, ImageEditLoraAdapter):
+            data = raw.to_dict()
+        elif isinstance(raw, dict):
+            data = raw
+        else:
+            continue
+        source = str(data.get("source", "")).strip()
+        fallback_id = f"lora-{index + 1}"
+        stable_id = re.sub(
+            r"[^a-zA-Z0-9_-]+", "-",
+            str(data.get("stable_id", fallback_id)).strip(),
+        ).strip("-") or fallback_id
+        candidate = stable_id
+        suffix = 2
+        while candidate in used_ids:
+            candidate = f"{stable_id}-{suffix}"
+            suffix += 1
+        stable_id = candidate
+        used_ids.add(stable_id)
+        label = str(data.get("label", ""))
+        if not label.strip():
+            label = Path(source).stem if source else f"LoRA {index + 1}"
+        try:
+            weight = float(data.get("weight", 1.0))
+        except (TypeError, ValueError):
+            weight = 1.0
+        if not math.isfinite(weight):
+            weight = 1.0
+        weight = max(-4.0, min(weight, 4.0))
+        result.append(ImageEditLoraAdapter(
+            stable_id=stable_id,
+            label=label,
+            source=source,
+            weight=weight,
+            enabled=bool(data.get("enabled", True)),
+        ))
+    return tuple(result)
 
 
 def _runtime_parameters(
@@ -201,6 +279,10 @@ _DEFAULT_QWEN_LORA = Path(
     "~/soft/ComfyUI/models/loras/"
     "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
 ).expanduser()
+_DEFAULT_QWEN_MULTIPLE_ANGLES_LORA = Path(
+    "~/soft/ComfyUI/models/loras/"
+    "qwen-image-edit-2511-multiple-angles-lora.safetensors"
+).expanduser()
 _DEFAULT_QWEN_TRANSFORMER = Path(
     "~/soft/ComfyUI/models/diffusion_models/"
     "qwen_image_edit_2511_fp8mixed.safetensors"
@@ -212,6 +294,11 @@ _DEFAULT_QWEN_TEXT_ENCODER = Path(
 _QWEN_LORA = os.environ.get(
     "DIFFUSION_EDITOR_QWEN_IMAGE_EDIT_LORA",
     str(_DEFAULT_QWEN_LORA) if _DEFAULT_QWEN_LORA.is_file() else "",
+)
+_QWEN_MULTIPLE_ANGLES_LORA = os.environ.get(
+    "DIFFUSION_EDITOR_QWEN_MULTIPLE_ANGLES_LORA",
+    str(_DEFAULT_QWEN_MULTIPLE_ANGLES_LORA)
+    if _DEFAULT_QWEN_MULTIPLE_ANGLES_LORA.is_file() else "",
 )
 _QWEN_TRANSFORMER = os.environ.get(
     "DIFFUSION_EDITOR_QWEN_IMAGE_EDIT_TRANSFORMER",
@@ -226,6 +313,76 @@ _QWEN_TEXT_ENCODER = os.environ.get(
 _QWEN_LOCAL_FP8 = bool(_QWEN_TRANSFORMER and _QWEN_TEXT_ENCODER)
 
 
+def _qwen_parameters(
+    *,
+    prompt_placeholder: str = "Describe the requested edit",
+    include_multiple_angles: bool = False,
+) -> tuple[ImageEditParameter, ...]:
+    parameters = (
+        ImageEditParameter(
+            "prompt", "Prompt", ParameterKind.TEXT, "", "Conditioning",
+            placeholder=prompt_placeholder,
+            description=(
+                "Multiple Angles format: <sks> azimuth elevation distance."
+                if include_multiple_angles else ""
+            ),
+        ),
+        ImageEditParameter(
+            "negative_prompt", "Negative prompt", ParameterKind.TEXT,
+            "", "Conditioning",
+        ),
+        ImageEditParameter(
+            "true_cfg_scale", "True CFG scale", ParameterKind.FLOAT,
+            1.0, "Sampling", 0.0, 20.0, 0.1, 2,
+        ),
+        ImageEditParameter(
+            "guidance_scale", "Guidance scale", ParameterKind.FLOAT,
+            1.0, "Sampling", 0.0, 20.0, 0.1, 2,
+        ),
+        ImageEditParameter(
+            "steps", "Steps", ParameterKind.INTEGER,
+            4 if _QWEN_LORA else 40, "Sampling", 1, 100, 1,
+        ),
+        ImageEditParameter(
+            "seed", "Seed", ParameterKind.INTEGER, -1, "Sampling",
+            -1, 2**32 - 1, 1,
+        ),
+        ImageEditParameter(
+            "width", "Width (0 = source)", ParameterKind.INTEGER,
+            0, "Output", 0, 4096, 1,
+        ),
+        ImageEditParameter(
+            "height", "Height (0 = source)", ParameterKind.INTEGER,
+            0, "Output", 0, 4096, 1,
+        ),
+        ImageEditParameter(
+            "sigmas", "Sigmas (comma-separated)", ParameterKind.STRING,
+            "", "Sampling",
+        ),
+        ImageEditParameter(
+            "max_sequence_length", "Max sequence length",
+            ParameterKind.INTEGER, 512, "Conditioning", 1, 1024, 1,
+        ),
+    )
+    return parameters + (
+        ImageEditParameter(
+            "transformer_checkpoint", "Transformer checkpoint",
+            ParameterKind.STRING, _QWEN_TRANSFORMER, "Model",
+            placeholder="Empty = transformer from Model",
+            description="Standalone scaled-FP8 safetensors override.",
+            load_time=True,
+        ),
+        ImageEditParameter(
+            "text_encoder_checkpoint", "Text encoder checkpoint",
+            ParameterKind.STRING, _QWEN_TEXT_ENCODER, "Model",
+            placeholder="Empty = text encoder from Model",
+            description="Standalone scaled-FP8 safetensors override.",
+            load_time=True,
+        ),
+    ) + _runtime_parameters(
+        _QWEN_MODEL, cpu_offload=_QWEN_LOCAL_FP8)
+
+
 _PROFILES = (
     ImageEditProfile(
         stable_id=QWEN_IMAGE_EDIT_PROFILE_ID,
@@ -235,74 +392,49 @@ _PROFILES = (
         description="Primary profile; best preservation of source geometry.",
         primary=True,
         max_input_images=2,
-        parameters=(
-            ImageEditParameter(
-                "prompt", "Prompt", ParameterKind.TEXT, "", "Conditioning",
-                placeholder="Describe the requested edit",
+        parameters=_qwen_parameters(),
+        default_lora_adapters=(
+            ImageEditLoraAdapter(
+                "lightning",
+                "Lightning 4-step",
+                _QWEN_LORA,
+                1.0,
+                bool(_QWEN_LORA),
             ),
-            ImageEditParameter(
-                "negative_prompt", "Negative prompt", ParameterKind.TEXT,
-                "", "Conditioning",
+        ),
+    ),
+    ImageEditProfile(
+        stable_id=QWEN_MULTIPLE_ANGLES_PROFILE_ID,
+        title="Qwen Image Edit 2511 — Multiple Angles",
+        provider="diffusers.qwen_image_edit_plus",
+        model_id=_QWEN_MODEL,
+        description=(
+            "Camera-angle control with the <sks> azimuth elevation distance "
+            "prompt format."
+        ),
+        max_input_images=2,
+        parameters=_qwen_parameters(
+            prompt_placeholder=(
+                "<sks> front-left quarter view elevated shot medium shot"
             ),
-            ImageEditParameter(
-                "true_cfg_scale", "True CFG scale", ParameterKind.FLOAT,
-                1.0, "Sampling", 0.0, 20.0, 0.1, 2,
+            include_multiple_angles=True,
+        ),
+        default_lora_adapters=(
+            ImageEditLoraAdapter(
+                "lightning",
+                "Lightning 4-step",
+                _QWEN_LORA,
+                1.0,
+                bool(_QWEN_LORA),
             ),
-            ImageEditParameter(
-                "guidance_scale", "Guidance scale", ParameterKind.FLOAT,
-                1.0, "Sampling", 0.0, 20.0, 0.1, 2,
+            ImageEditLoraAdapter(
+                "multiple-angles",
+                "Multiple Angles",
+                _QWEN_MULTIPLE_ANGLES_LORA,
+                0.9,
+                bool(_QWEN_MULTIPLE_ANGLES_LORA),
             ),
-            ImageEditParameter(
-                "steps", "Steps", ParameterKind.INTEGER,
-                4 if _QWEN_LORA else 40, "Sampling",
-                1, 100, 1,
-            ),
-            ImageEditParameter(
-                "seed", "Seed", ParameterKind.INTEGER, -1, "Sampling",
-                -1, 2**32 - 1, 1,
-            ),
-            ImageEditParameter(
-                "width", "Width (0 = source)", ParameterKind.INTEGER,
-                0, "Output", 0, 4096, 1,
-            ),
-            ImageEditParameter(
-                "height", "Height (0 = source)", ParameterKind.INTEGER,
-                0, "Output", 0, 4096, 1,
-            ),
-            ImageEditParameter(
-                "sigmas", "Sigmas (comma-separated)", ParameterKind.STRING,
-                "", "Sampling",
-            ),
-            ImageEditParameter(
-                "max_sequence_length", "Max sequence length",
-                ParameterKind.INTEGER, 512, "Conditioning", 1, 1024, 1,
-            ),
-            ImageEditParameter(
-                "lora_path", "LoRA path", ParameterKind.STRING,
-                _QWEN_LORA, "Model",
-                load_time=True,
-            ),
-            ImageEditParameter(
-                "lora_scale", "LoRA scale", ParameterKind.FLOAT,
-                1.0, "Model", -4.0, 4.0, 0.05, 2,
-                load_time=True,
-            ),
-            ImageEditParameter(
-                "transformer_checkpoint", "Transformer checkpoint",
-                ParameterKind.STRING, _QWEN_TRANSFORMER, "Model",
-                placeholder="Empty = transformer from Model",
-                description="Standalone scaled-FP8 safetensors override.",
-                load_time=True,
-            ),
-            ImageEditParameter(
-                "text_encoder_checkpoint", "Text encoder checkpoint",
-                ParameterKind.STRING, _QWEN_TEXT_ENCODER, "Model",
-                placeholder="Empty = text encoder from Model",
-                description="Standalone scaled-FP8 safetensors override.",
-                load_time=True,
-            ),
-        ) + _runtime_parameters(
-            _QWEN_MODEL, cpu_offload=_QWEN_LOCAL_FP8),
+        ),
     ),
     ImageEditProfile(
         stable_id=FLUX2_KLEIN_PROFILE_ID,
@@ -311,6 +443,7 @@ _PROFILES = (
         model_id=_FLUX_MODEL,
         description="Fast profile; more creative and less locality-preserving.",
         fast=True,
+        max_input_images=2,
         parameters=(
             ImageEditParameter(
                 "prompt", "Prompt", ParameterKind.TEXT, "", "Conditioning",
@@ -360,6 +493,7 @@ _PROFILES = (
             "Unified multimodal GGUF editor with strong instruction "
             "following and material rendering."
         ),
+        max_input_images=2,
         parameters=(
             ImageEditParameter(
                 "prompt", "Prompt", ParameterKind.TEXT, "", "Conditioning",
@@ -555,6 +689,55 @@ def normalize_profile_store(
                 stored["cpu_offload"] = profile.parameter(
                     "cpu_offload").default
         result[profile.stable_id] = profile.normalize(stored)
+    return result
+
+
+def normalize_profile_lora_store(
+    values: dict[str, list[dict[str, Any]]] | None,
+    *,
+    legacy_profile_parameters: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Normalize per-profile adapter stacks and migrate flat Qwen fields."""
+
+    source = values if isinstance(values, dict) else {}
+    legacy = (
+        legacy_profile_parameters
+        if isinstance(legacy_profile_parameters, dict) else {}
+    )
+    result: dict[str, list[dict[str, Any]]] = {}
+    for profile in _PROFILES:
+        stored = source.get(profile.stable_id)
+        if isinstance(stored, (list, tuple)):
+            adapters = profile.normalize_lora_adapters(stored)
+        else:
+            old_parameters = legacy.get(profile.stable_id)
+            migrated: list[dict[str, Any]] | None = None
+            if isinstance(old_parameters, dict) and (
+                    "lora_path" in old_parameters
+                    or "angle_lora_path" in old_parameters):
+                migrated = []
+                if "lora_path" in old_parameters:
+                    path = str(old_parameters.get("lora_path", ""))
+                    migrated.append({
+                        "stable_id": "lightning",
+                        "label": "Lightning 4-step",
+                        "source": path,
+                        "weight": old_parameters.get("lora_scale", 1.0),
+                        "enabled": bool(path.strip()),
+                    })
+                if "angle_lora_path" in old_parameters:
+                    path = str(old_parameters.get("angle_lora_path", ""))
+                    migrated.append({
+                        "stable_id": "multiple-angles",
+                        "label": "Multiple Angles",
+                        "source": path,
+                        "weight": old_parameters.get(
+                            "angle_lora_scale", 0.9),
+                        "enabled": bool(path.strip()),
+                    })
+            adapters = profile.normalize_lora_adapters(migrated)
+        result[profile.stable_id] = [
+            adapter.to_dict() for adapter in adapters]
     return result
 
 

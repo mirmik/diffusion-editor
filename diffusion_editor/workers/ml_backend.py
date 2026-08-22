@@ -8,6 +8,8 @@ import os
 import json
 from pathlib import Path
 import secrets
+import sys
+import tempfile
 from typing import Any, Callable
 
 import numpy as np
@@ -27,7 +29,6 @@ from ..generation.provenance import (
 from ..generation.image_edit_profiles import (
     FLUX2_KLEIN_PROFILE_ID,
     LEGACY_INSTRUCT_PROFILE_ID,
-    QWEN_IMAGE_EDIT_PROFILE_ID,
     SENSENOVA_U15_PROFILE_ID,
     image_edit_profile,
     parse_float_list,
@@ -59,6 +60,7 @@ class RealMlBackend:
         self._instruct_device: str | None = None
         self._instruct_dtype: str | None = None
         self._image_edit_profile_id: str | None = None
+        self._image_edit_lora_adapters: tuple[dict[str, Any], ...] = ()
         self._dino_model = None
         self._dino_processor = None
         self._dino_key: tuple[str, str] | None = None
@@ -116,6 +118,7 @@ class RealMlBackend:
             StableDiffusionXLPipeline,
         )
 
+        self._unload_depth()
         self.unload_diffusion()
         model_path = str(data["model_path"])
         device = self._device(data.get("device"))
@@ -207,8 +210,39 @@ class RealMlBackend:
         self._instruct_device = None
         self._instruct_dtype = None
         self._image_edit_profile_id = None
+        self._image_edit_lora_adapters = ()
         del pipe
         self._release_accelerator_memory()
+
+    def _unload_depth(self) -> None:
+        model = self._depth_model
+        had_model = model is not None
+        self._depth_model = None
+        self._depth_processor = None
+        self._depth_key = None
+        del model
+        if had_model:
+            self._release_accelerator_memory()
+
+    def _prepare_depth_memory(self) -> None:
+        """Give one high-quality depth model exclusive ML-worker VRAM."""
+
+        if self._diffusion_pipe is not None:
+            self.unload_diffusion()
+        if self._instruct_pipe is not None:
+            self.unload_image_edit()
+        dino_model = self._dino_model
+        sam_model = self._sam_model
+        had_detection_model = dino_model is not None or sam_model is not None
+        self._dino_model = None
+        self._dino_processor = None
+        self._dino_key = None
+        self._sam_model = None
+        self._sam_processor = None
+        self._sam_key = None
+        del dino_model, sam_model
+        if had_detection_model:
+            self._release_accelerator_memory()
 
     def load_ip_adapter(self) -> dict[str, Any]:
         if self._diffusion_pipe is None:
@@ -377,6 +411,8 @@ class RealMlBackend:
         profile_id = str(data["profile_id"])
         profile = image_edit_profile(profile_id)
         parameters = profile.normalize(data.get("parameters"))
+        lora_adapters = profile.normalize_lora_adapters(
+            data.get("lora_adapters"))
         device = self._device(str(parameters["device"]))
         dtype = self._configured_dtype(str(parameters["dtype"]), device)
         model = str(parameters["model"])
@@ -426,6 +462,7 @@ class RealMlBackend:
         # A second heavyweight pipeline must never overlap the currently
         # loaded one in RAM/VRAM.  Keep the backend truthfully unloaded if any
         # part of the new load fails after this point.
+        self._unload_depth()
         self.unload_image_edit()
         load_kwargs: dict[str, Any] = {
             "torch_dtype": dtype,
@@ -435,7 +472,7 @@ class RealMlBackend:
         if revision is not None:
             load_kwargs["revision"] = revision
         component_mode = "upstream"
-        if profile_id == QWEN_IMAGE_EDIT_PROFILE_ID:
+        if profile.provider == "diffusers.qwen_image_edit_plus":
             transformer_path = str(
                 parameters["transformer_checkpoint"]).strip()
             text_encoder_path = str(
@@ -461,18 +498,6 @@ class RealMlBackend:
                 component_mode = "local-scaled-fp8"
             pipe = QwenImageEditPlusPipeline.from_pretrained(
                 model, **load_kwargs)
-            lora_path = str(parameters["lora_path"]).strip()
-            if lora_path:
-                pipe.load_lora_weights(
-                    str(Path(lora_path).expanduser()),
-                    adapter_name="image_edit",
-                )
-                self._cast_adapter_parameters(
-                    pipe.transformer, "image_edit", dtype)
-                pipe.set_adapters(
-                    ["image_edit"],
-                    adapter_weights=[float(parameters["lora_scale"])],
-                )
         elif profile_id == FLUX2_KLEIN_PROFILE_ID:
             pipe = Flux2KleinPipeline.from_pretrained(model, **load_kwargs)
         elif profile_id == SENSENOVA_U15_PROFILE_ID:
@@ -502,6 +527,40 @@ class RealMlBackend:
                 pipe.scheduler.config)
         else:  # protected by image_edit_profile; keeps type narrowing explicit
             raise ValueError(f"Unsupported image edit profile: {profile_id}")
+        active_adapters = tuple(
+            adapter for adapter in lora_adapters
+            if adapter.enabled and adapter.source
+        )
+        if active_adapters:
+            if profile_id == SENSENOVA_U15_PROFILE_ID:
+                raise ValueError(
+                    "SenseNova standalone runtime does not support LoRA "
+                    "adapters"
+                )
+            adapter_names: list[str] = []
+            adapter_weights: list[float] = []
+            for index, adapter in enumerate(active_adapters):
+                adapter_name = (
+                    f"image_edit_{index}_"
+                    f"{adapter.stable_id.replace('-', '_')}"
+                )
+                pipe.load_lora_weights(
+                    str(Path(adapter.source).expanduser()),
+                    adapter_name=adapter_name,
+                )
+                adapter_model = getattr(
+                    pipe, "transformer", getattr(pipe, "unet", None))
+                if adapter_model is None:
+                    raise RuntimeError(
+                        f"{profile.title} pipeline has no LoRA target model")
+                self._cast_adapter_parameters(
+                    adapter_model, adapter_name, dtype)
+                adapter_names.append(adapter_name)
+                adapter_weights.append(adapter.weight)
+            pipe.set_adapters(
+                adapter_names,
+                adapter_weights=adapter_weights,
+            )
         if profile_id != SENSENOVA_U15_PROFILE_ID:
             if bool(parameters["vae_tiling"]):
                 pipe.vae.enable_tiling()
@@ -517,6 +576,8 @@ class RealMlBackend:
         self._instruct_device = device
         self._instruct_dtype = str(dtype).removeprefix("torch.")
         self._image_edit_profile_id = profile_id
+        self._image_edit_lora_adapters = tuple(
+            adapter.to_dict() for adapter in lora_adapters)
         return {
             "loaded": True,
             "profile_id": profile_id,
@@ -610,11 +671,24 @@ class RealMlBackend:
                 f"Image edit profile is not loaded: {profile_id}")
         profile = image_edit_profile(profile_id)
         parameters = profile.normalize(data.get("parameters"))
+        requested_adapters = tuple(
+            adapter.to_dict()
+            for adapter in profile.normalize_lora_adapters(
+                data.get("lora_adapters"))
+        )
+        if requested_adapters != self._image_edit_lora_adapters:
+            raise RuntimeError(
+                "Image edit LoRA configuration is not loaded")
         seed = self._resolve_seed(int(parameters["seed"]))
         if profile_id == SENSENOVA_U15_PROFILE_ID:
-            result = self._instruct_pipe.edit(image, parameters, seed)
+            result = self._instruct_pipe.edit(
+                image,
+                parameters,
+                seed,
+                reference_image=reference_image,
+            )
             provenance = self._image_edit_provenance(
-                profile_id, parameters, seed, result.size)
+                profile_id, parameters, requested_adapters, seed, result.size)
             return result, seed, provenance.to_dict()
         generator = torch.Generator(device="cpu").manual_seed(seed)
         kwargs: dict[str, Any] = {
@@ -623,6 +697,11 @@ class RealMlBackend:
             "num_inference_steps": int(parameters["steps"]),
             "generator": generator,
         }
+        if reference_image is not None and profile.max_input_images > 1:
+            kwargs["image"] = [
+                image.convert("RGB"),
+                reference_image.convert("RGB"),
+            ]
         width = int(parameters.get("width", 0))
         height = int(parameters.get("height", 0))
         if width > 0:
@@ -638,12 +717,7 @@ class RealMlBackend:
             if not isinstance(parsed, dict):
                 raise ValueError("attention_kwargs must be a JSON object")
             kwargs["attention_kwargs"] = parsed
-        if profile_id == QWEN_IMAGE_EDIT_PROFILE_ID:
-            if reference_image is not None:
-                kwargs["image"] = [
-                    image.convert("RGB"),
-                    reference_image.convert("RGB"),
-                ]
+        if profile.provider == "diffusers.qwen_image_edit_plus":
             kwargs.update({
                 "negative_prompt": str(parameters["negative_prompt"]),
                 "true_cfg_scale": float(parameters["true_cfg_scale"]),
@@ -667,7 +741,7 @@ class RealMlBackend:
             })
         result = self._instruct_pipe(**kwargs).images[0]
         provenance = self._image_edit_provenance(
-            profile_id, parameters, seed, result.size)
+            profile_id, parameters, requested_adapters, seed, result.size)
         return result, seed, provenance.to_dict()
 
     # Compatibility wrappers for older callers of the worker implementation.
@@ -775,6 +849,7 @@ class RealMlBackend:
             self,
             profile_id: str,
             parameters: dict[str, Any],
+            lora_adapters: tuple[dict[str, Any], ...],
             seed: int,
             size: tuple[int, int],
     ) -> GenerationProvenance:
@@ -790,6 +865,7 @@ class RealMlBackend:
         request = RequestProvenance.capture(operation, {
             "model_profile_id": profile_id,
             "parameters": parameters,
+            "lora_adapters": list(lora_adapters),
         })
         return GenerationProvenance(
             operation=operation,
@@ -827,29 +903,53 @@ class RealMlBackend:
         data: dict[str, Any],
         image: Image.Image,
         progress: Callable[[str], None],
-    ) -> Image.Image:
+    ) -> dict[str, Any]:
+        backend = str(data.get("backend", "transformers"))
+        if backend == "da3":
+            return self._depth_da3(data, image, progress)
+        if backend != "transformers":
+            raise ValueError(f"Unsupported depth backend: {backend}")
+        return self._depth_transformers(data, image, progress)
+
+    def _depth_transformers(
+        self,
+        data: dict[str, Any],
+        image: Image.Image,
+        progress: Callable[[str], None],
+    ) -> dict[str, Any]:
         import torch
         from huggingface_hub import try_to_load_from_cache
         from transformers import AutoImageProcessor, AutoModelForDepthEstimation
 
         device = self._device(data.get("device"))
         model_id = str(data["model_id"])
-        key = (model_id, device)
+        title = str(data.get("title", model_id.split("/")[-1]))
+        key = (f"transformers:{model_id}", device)
         if self._depth_key != key:
+            self._prepare_depth_memory()
             cached = try_to_load_from_cache(model_id, "config.json") is not None
             progress(
                 f"Loading {model_id.split('/')[-1]} "
                 f"{'from cache' if cached else '(first run downloads weights)'}..."
             )
+            old_model = self._depth_model
+            self._depth_model = None
+            self._depth_processor = None
+            self._depth_key = None
+            del old_model
+            self._release_accelerator_memory()
             self._depth_processor = AutoImageProcessor.from_pretrained(model_id)
             self._depth_model = (
-                AutoModelForDepthEstimation.from_pretrained(model_id)
+                AutoModelForDepthEstimation.from_pretrained(
+                    model_id,
+                    dtype=self._dtype(device),
+                )
                 .to(device)
                 .eval()
             )
             self._depth_key = key
 
-        progress("Depth Anything V2 Small: estimating depth...")
+        progress(f"{title}: estimating depth...")
         processor = self._depth_processor
         model = self._depth_model
         inputs = processor(images=image.convert("RGB"), return_tensors="pt")
@@ -860,8 +960,9 @@ class RealMlBackend:
             outputs,
             target_sizes=[(image.height, image.width)],
         )
+        processed_depth = processed[0]
         depth = (
-            processed[0]["predicted_depth"]
+            processed_depth["predicted_depth"]
             .detach()
             .float()
             .cpu()
@@ -875,17 +976,149 @@ class RealMlBackend:
             )
         if not np.isfinite(depth).all():
             raise RuntimeError("Depth Anything returned non-finite values")
-        minimum = float(depth.min())
-        maximum = float(depth.max())
-        if maximum - minimum <= np.finfo(np.float32).eps:
-            normalized = np.zeros(depth.shape, dtype=np.uint8)
+        depth = np.ascontiguousarray(depth, dtype=np.float32)
+
+        field_of_view = self._optional_depth_scalar(
+            processed_depth.get("field_of_view"))
+        focal_length = self._optional_depth_scalar(
+            processed_depth.get("focal_length"))
+        intrinsics = None
+        if focal_length is not None:
+            intrinsics = np.array([
+                [focal_length, 0.0, image.width * 0.5],
+                [0.0, focal_length, image.height * 0.5],
+                [0.0, 0.0, 1.0],
+            ], dtype=np.float32)
+        return {
+            "depth": depth,
+            "intrinsics": intrinsics,
+            "confidence": None,
+            "field_of_view_degrees": field_of_view,
+            "scale_factor": None,
+            "value_kind": str(data["value_kind"]),
+        }
+
+    def _depth_da3(
+        self,
+        data: dict[str, Any],
+        image: Image.Image,
+        progress: Callable[[str], None],
+    ) -> dict[str, Any]:
+        import torch
+        from huggingface_hub import try_to_load_from_cache
+
+        source = os.environ.get("DIFFUSION_EDITOR_DA3_SOURCE", "").strip()
+        if source:
+            source_path = Path(source).expanduser()
         else:
-            normalized = np.clip(
-                (depth - minimum) / (maximum - minimum) * 255.0,
-                0.0,
-                255.0,
-            ).astype(np.uint8)
-        return Image.fromarray(normalized, "L")
+            source_path = (
+                Path(sys.prefix)
+                / "share"
+                / "diffusion-editor"
+                / "depth-anything-3"
+                / "src"
+            )
+        if not (source_path / "depth_anything_3" / "api.py").is_file():
+            raise RuntimeError(
+                "Depth Anything 3 runtime not found. Run ./setup-workers.sh "
+                "or set DIFFUSION_EDITOR_DA3_SOURCE."
+            )
+        source_text = str(source_path)
+        if source_text not in sys.path:
+            sys.path.insert(0, source_text)
+        os.environ.setdefault(
+            "MPLCONFIGDIR",
+            str(Path(tempfile.gettempdir()) / "diffusion-editor-matplotlib"),
+        )
+        try:
+            from depth_anything_3.api import DepthAnything3
+        except ImportError as exc:
+            raise RuntimeError(
+                "Depth Anything 3 dependencies are incomplete. "
+                "Run ./setup-workers.sh."
+            ) from exc
+
+        device = self._device(data.get("device"))
+        model_id = str(data["model_id"])
+        title = str(data.get("title", "DA3 Mono Large"))
+        key = (f"da3:{model_id}", device)
+        if self._depth_key != key:
+            self._prepare_depth_memory()
+            cached = try_to_load_from_cache(
+                model_id, "model.safetensors") is not None
+            progress(
+                f"Loading {model_id.split('/')[-1]} "
+                f"{'from cache' if cached else '(first run downloads weights)'}..."
+            )
+            old_model = self._depth_model
+            self._depth_model = None
+            self._depth_processor = None
+            self._depth_key = None
+            del old_model
+            self._release_accelerator_memory()
+            self._depth_model = (
+                DepthAnything3.from_pretrained(model_id)
+                .to(device)
+                .eval()
+            )
+            self._depth_key = key
+
+        resolution = int(data.get("process_resolution") or 504)
+        progress(f"{title}: estimating depth at {resolution}px...")
+        prediction = self._depth_model.inference(
+            [image.convert("RGB")],
+            process_res=resolution,
+            use_ray_pose=bool(data.get("use_ray_pose", False)),
+        )
+        depth = np.asarray(prediction.depth[0], dtype=np.float32)
+        if not np.isfinite(depth).all():
+            raise RuntimeError("Depth Anything 3 returned non-finite values")
+        intrinsics = (
+            np.asarray(prediction.intrinsics[0], dtype=np.float32)
+            if prediction.intrinsics is not None else None
+        )
+        confidence = (
+            np.asarray(prediction.conf[0], dtype=np.float32)
+            if prediction.conf is not None else None
+        )
+        if confidence is not None and not np.isfinite(confidence).all():
+            raise RuntimeError(
+                "Depth Anything 3 confidence contains non-finite values")
+        if intrinsics is not None and (
+                intrinsics.shape != (3, 3)
+                or not np.isfinite(intrinsics).all()):
+            raise RuntimeError(
+                "Depth Anything 3 returned invalid camera intrinsics")
+        scale_factor = self._optional_depth_scalar(prediction.scale_factor)
+        return {
+            "depth": np.ascontiguousarray(depth, dtype=np.float32),
+            "intrinsics": (
+                np.ascontiguousarray(intrinsics, dtype=np.float32)
+                if intrinsics is not None else None
+            ),
+            "confidence": (
+                np.ascontiguousarray(confidence, dtype=np.float32)
+                if confidence is not None else None
+            ),
+            "field_of_view_degrees": None,
+            "scale_factor": scale_factor,
+            "value_kind": (
+                "direct_metric"
+                if bool(prediction.is_metric)
+                else "direct_scale_ambiguous"
+            ),
+        }
+
+    @staticmethod
+    def _optional_depth_scalar(value: Any) -> float | None:
+        if value is None:
+            return None
+        if hasattr(value, "detach"):
+            value = value.detach().float().cpu().item()
+        result = float(value)
+        if not np.isfinite(result):
+            raise RuntimeError("Depth model returned non-finite camera metadata")
+        return result
 
     def grounding(
         self,
@@ -904,6 +1137,7 @@ class RealMlBackend:
         model_id = str(data["model_id"])
         key = (model_id, device)
         if self._dino_key != key:
+            self._unload_depth()
             cached = try_to_load_from_cache(model_id, "model.safetensors") is not None
             progress(
                 f"Loading {model_id.split('/')[-1]} "
@@ -975,6 +1209,7 @@ class RealMlBackend:
         model_id = str(data["sam2_model_id"])
         key = (model_id, device)
         if self._sam_key != key:
+            self._unload_depth()
             cached = try_to_load_from_cache(model_id, "model.safetensors") is not None
             self._sam_processor = Sam2Processor.from_pretrained(
                 model_id, local_files_only=cached

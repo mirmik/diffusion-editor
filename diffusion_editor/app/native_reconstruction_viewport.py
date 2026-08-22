@@ -303,6 +303,11 @@ RECONSTRUCTION_SHADING_LABELS = {
     "normals": "Normals",
     "wireframe": "Wireframe",
 }
+POINT_CLOUD_COLOR_MODES = ("image", "confidence")
+POINT_CLOUD_COLOR_LABELS = {
+    "image": "Image",
+    "confidence": "Confidence",
+}
 _SHADING_MODE_IDS = {
     "flat": 0.0,
     "smooth": 1.0,
@@ -399,6 +404,11 @@ class _OrbitCamera:
         radius = max(float(np.linalg.norm(maximum - minimum)) * 0.65, 0.25)
         self._camera.target = Vec3(*map(float, center))
         self._camera.distance = radius * 2.7
+        # OrbitCamera recomputes its clipping planes from fitted_radius on
+        # every zoom.  Keep it in sync with this cloud; otherwise the native
+        # default radius can clip a large reconstruction after the first
+        # wheel event.
+        self._camera.fitted_radius = radius
         self._camera.near = max(radius * 0.001, 0.001)
         self._camera.far = max(radius * 20.0, 10.0)
         self._reset_orientation()
@@ -558,12 +568,16 @@ class NativeReconstructionViewport:
         graphics_owner,
         request_repaint: Callable[[], None],
         resource_namespace: str = "viewport",
+        point_color_state_changed: (
+            Callable[[bool, str, str], None] | None
+        ) = None,
     ) -> None:
         self._resource_namespace = _allocate_resource_namespace(
             resource_namespace
         )
         self._graphics = Tgfx2Context.from_runtime(graphics_owner)
         self._request_repaint = request_repaint
+        self._point_color_state_changed = point_color_state_changed
         self._camera = _OrbitCamera()
         self._light_direction = self._camera.direction_from_target()
         self._shading_mode = "flat"
@@ -577,6 +591,11 @@ class NativeReconstructionViewport:
             Callable[[ReconstructionRefinePlacement], None] | None
         ) = None
         self._point_cloud = PointCloud()
+        self._point_cloud_positions: np.ndarray | None = None
+        self._point_cloud_image_colors: np.ndarray | None = None
+        self._point_cloud_confidence_colors: np.ndarray | None = None
+        self._point_cloud_confidence_legend = ""
+        self._point_cloud_color_mode = "image"
         self._point_cloud_renderer = PointCloudRenderer()
         self._point_cloud_style = PointCloudStyle()
         self._point_cloud_style.size_px = 5.0
@@ -670,6 +689,14 @@ class NativeReconstructionViewport:
     def shading_mode(self) -> str:
         return self._shading_mode
 
+    @property
+    def point_cloud_color_mode(self) -> str:
+        return self._point_cloud_color_mode
+
+    @property
+    def point_cloud_has_confidence(self) -> bool:
+        return self._point_cloud_confidence_colors is not None
+
     def set_shading_mode(self, mode: str) -> None:
         normalized = str(mode).strip().lower()
         if normalized not in RECONSTRUCTION_SHADING_MODES:
@@ -677,6 +704,33 @@ class NativeReconstructionViewport:
         if normalized == self._shading_mode:
             return
         self._shading_mode = normalized
+        self.invalidate()
+
+    def set_point_cloud_color_mode(self, mode: str) -> None:
+        """Switch uploaded point colors without changing point positions."""
+
+        self._require_open()
+        normalized = str(mode).strip().lower()
+        if normalized not in POINT_CLOUD_COLOR_MODES:
+            raise ValueError(f"unsupported point-cloud color mode: {mode}")
+        if self._point_cloud_positions is None:
+            raise ValueError("no point cloud is loaded")
+        if (
+                normalized == "confidence"
+                and self._point_cloud_confidence_colors is None):
+            raise ValueError("the point cloud has no confidence colors")
+        if normalized == self._point_cloud_color_mode:
+            return
+        colors = (
+            self._point_cloud_confidence_colors
+            if normalized == "confidence"
+            else self._point_cloud_image_colors
+        )
+        if colors is None or not self._point_cloud.upload_srgb(
+                self._graphics.context, self._point_cloud_positions, colors):
+            raise RuntimeError("Termin failed to update point-cloud colors")
+        self._point_cloud_color_mode = normalized
+        self._notify_point_color_state()
         self.invalidate()
 
     def light_from_camera(self) -> None:
@@ -728,6 +782,7 @@ class NativeReconstructionViewport:
         self._destroy_model_textures()
         self._mesh_items.clear()
         self._point_cloud.release(self._graphics.context)
+        self._clear_point_color_data()
         self._glb_documents.clear()
         self._model_transform = np.eye(4, dtype=np.float32)
         self.invalidate()
@@ -744,6 +799,7 @@ class NativeReconstructionViewport:
             raise RuntimeError("Generated GLB contains no meshes")
         self._destroy_model_textures()
         self._point_cloud.release(self._graphics.context)
+        self._clear_point_color_data()
         self._glb_documents = [source]
         self._mesh_items = mesh_items
         if (
@@ -796,6 +852,7 @@ class NativeReconstructionViewport:
             raise RuntimeError("Refine comparison requires base and local meshes")
         self._destroy_model_textures()
         self._point_cloud.release(self._graphics.context)
+        self._clear_point_color_data()
         self._glb_documents = [reference, editable]
         # Draw the proposal first.  With the normal depth test, coincident
         # base fragments then fail the equal-depth test instead of hiding the
@@ -819,20 +876,94 @@ class NativeReconstructionViewport:
         self._require_open()
         from ..native_ply import load_ply_points
 
-        had_model = bool(self._mesh_items) or not self._point_cloud.empty
         data = load_ply_points(path)
+        return self.load_point_cloud_data(
+            data.positions,
+            data.colors,
+            fit_camera=fit_camera,
+        )
+
+    def load_point_cloud_data(
+            self,
+            positions: np.ndarray,
+            colors: np.ndarray,
+            *,
+            fit_camera: bool | None = None,
+            confidence_colors: np.ndarray | None = None,
+            color_mode: str = "image",
+            confidence_legend: str = "",
+    ) -> int:
+        """Upload an in-memory sRGB point cloud without a file round-trip."""
+
+        self._require_open()
+        positions = np.ascontiguousarray(positions, dtype=np.float32)
+        colors = np.ascontiguousarray(colors, dtype=np.float32)
+        if (
+                positions.ndim != 2
+                or positions.shape[1:] != (3,)
+                or len(positions) == 0):
+            raise ValueError("Point cloud positions must be a non-empty Nx3 array")
+        if colors.shape != positions.shape:
+            raise ValueError("Point cloud colors must match the Nx3 positions")
+        if not np.isfinite(positions).all() or not np.isfinite(colors).all():
+            raise ValueError("Point cloud data must be finite")
+        colors = np.ascontiguousarray(np.clip(colors, 0.0, 1.0))
+        normalized_mode = str(color_mode).strip().lower()
+        if normalized_mode not in POINT_CLOUD_COLOR_MODES:
+            raise ValueError(
+                f"unsupported point-cloud color mode: {color_mode}")
+        if confidence_colors is not None:
+            confidence_colors = np.ascontiguousarray(
+                confidence_colors, dtype=np.float32)
+            if confidence_colors.shape != positions.shape:
+                raise ValueError(
+                    "Point cloud confidence colors must match Nx3 positions")
+            if not np.isfinite(confidence_colors).all():
+                raise ValueError("Point cloud confidence colors must be finite")
+            confidence_colors = np.ascontiguousarray(
+                np.clip(confidence_colors, 0.0, 1.0))
+        elif normalized_mode == "confidence":
+            raise ValueError("the point cloud has no confidence colors")
+        upload_colors = (
+            confidence_colors
+            if normalized_mode == "confidence"
+            else colors
+        )
+        had_model = bool(self._mesh_items) or not self._point_cloud.empty
         if not self._point_cloud.upload_srgb(
-            self._graphics.context, data.positions, data.colors
+            self._graphics.context, positions, upload_colors
         ):
             raise RuntimeError("Termin failed to upload the reconstruction point cloud")
+        self._point_cloud_positions = positions
+        self._point_cloud_image_colors = colors
+        self._point_cloud_confidence_colors = confidence_colors
+        self._point_cloud_confidence_legend = str(confidence_legend)
+        self._point_cloud_color_mode = normalized_mode
         self._destroy_model_textures()
         self._mesh_items.clear()
         self._glb_documents.clear()
         if _should_fit_camera(had_model, fit_camera):
-            self._camera.fit(data.positions.min(axis=0), data.positions.max(axis=0))
+            self._camera.fit(positions.min(axis=0), positions.max(axis=0))
             self._light_direction = self._camera.direction_from_target()
+        self._notify_point_color_state()
         self.invalidate()
-        return len(data.positions)
+        return len(positions)
+
+    def _clear_point_color_data(self) -> None:
+        self._point_cloud_positions = None
+        self._point_cloud_image_colors = None
+        self._point_cloud_confidence_colors = None
+        self._point_cloud_confidence_legend = ""
+        self._point_cloud_color_mode = "image"
+        self._notify_point_color_state()
+
+    def _notify_point_color_state(self) -> None:
+        if self._point_color_state_changed is not None:
+            self._point_color_state_changed(
+                self.point_cloud_has_confidence,
+                self._point_cloud_color_mode,
+                self._point_cloud_confidence_legend,
+            )
 
     def invalidate(self) -> None:
         if self._closed:

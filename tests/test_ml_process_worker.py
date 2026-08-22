@@ -140,15 +140,24 @@ def test_fake_worker_smokes_model_families_without_main_imports():
         )
         depth = client.request(
             "depth",
-            {"model_id": "depth-anything/Depth-Anything-V2-Small-hf"},
+            {
+                "profile_id": "v2-small",
+                "model_id": "depth-anything/Depth-Anything-V2-Small-hf",
+                "backend": "transformers",
+                "title": "Depth Anything V2 Small",
+                "direct_depth": False,
+                "value_kind": "inverse_relative",
+            },
             threading.Event(),
             images={"image": _image()},
         )
-        assert depth["image"].mode == "L"
-        assert depth["image"].size == (8, 6)
-        depth_array = np.asarray(depth["image"])
-        assert depth_array[0, 0] == 255
-        assert depth_array[0, -1] == 0
+        depth_array = depth["depth"]
+        assert depth_array.shape == (6, 8)
+        assert depth_array.dtype == np.float32
+        assert depth_array[0, 0] == pytest.approx(1.0)
+        assert depth_array[0, -1] == pytest.approx(2.0)
+        assert depth["value_kind"] == "inverse_relative"
+        assert depth["intrinsics"] is None
         assert grounding["detections"][0]["label"] == "object"
         assert grounding["detections"][0]["mask"].shape == (6, 8)
         assert client.is_running
@@ -158,6 +167,63 @@ def test_fake_worker_smokes_model_families_without_main_imports():
     finally:
         client.shutdown()
     assert not client.is_running
+
+
+def test_depth_float_payload_round_trips_exact_values_and_camera(tmp_path):
+    depth = np.array([
+        [0.12345679, 12.75],
+        [1024.5, 1.0e-5],
+    ], dtype="<f4")
+    confidence = np.array([
+        [0.25, 0.5],
+        [0.75, 1.0],
+    ], dtype="<f4")
+    depth_path = tmp_path / "depth.f32"
+    confidence_path = tmp_path / "confidence.f32"
+    depth.tofile(depth_path)
+    confidence.tofile(confidence_path)
+    intrinsics = [
+        [777.25, 0.0, 1.125],
+        [0.0, 778.5, 0.875],
+        [0.0, 0.0, 1.0],
+    ]
+
+    result = MlProcessClient._materialize_result(tmp_path, {
+        "depth_path": str(depth_path),
+        "depth_shape": [2, 2],
+        "depth_dtype": "float32-le",
+        "confidence_path": str(confidence_path),
+        "intrinsics": intrinsics,
+        "value_kind": "direct_metric",
+        "field_of_view_degrees": 54.125,
+        "scale_factor": 1.0,
+    })
+
+    assert result["depth"].dtype == np.float32
+    np.testing.assert_array_equal(result["depth"], depth)
+    np.testing.assert_array_equal(result["confidence"], confidence)
+    np.testing.assert_array_equal(
+        result["intrinsics"], np.asarray(intrinsics, dtype=np.float32))
+
+
+@pytest.mark.parametrize(("values", "shape", "error"), (
+    (np.array([1.0], dtype="<f4"), [1, 2], "payload size"),
+    (np.array([np.nan], dtype="<f4"), [1, 1], "non-finite"),
+))
+def test_depth_float_payload_rejects_corrupt_data(
+        tmp_path, values, shape, error):
+    path = tmp_path / "depth.f32"
+    values.tofile(path)
+
+    with pytest.raises(MlProtocolError, match=error):
+        MlProcessClient._materialize_result(tmp_path, {
+            "depth_path": str(path),
+            "depth_shape": shape,
+            "depth_dtype": "float32-le",
+            "confidence_path": None,
+            "intrinsics": None,
+            "value_kind": "direct_scale_ambiguous",
+        })
 
 
 @pytest.mark.parametrize(
@@ -170,18 +236,29 @@ def test_fake_worker_smokes_model_families_without_main_imports():
 )
 def test_fake_worker_smokes_image_edit_profiles(profile_id):
     client = _client()
-    parameters = image_edit_profile(profile_id).defaults()
+    profile = image_edit_profile(profile_id)
+    parameters = profile.defaults()
+    lora_adapters = [
+        adapter.to_dict() for adapter in profile.default_lora_adapters]
     parameters.update({"prompt": "change only the body", "seed": 20260820})
     try:
         loaded = client.request(
             "load_image_edit",
-            {"profile_id": profile_id, "parameters": parameters},
+            {
+                "profile_id": profile_id,
+                "parameters": parameters,
+                "lora_adapters": lora_adapters,
+            },
             threading.Event(),
         )
         assert loaded["profile_id"] == profile_id
         result = client.request(
             "image_edit",
-            {"profile_id": profile_id, "parameters": parameters},
+            {
+                "profile_id": profile_id,
+                "parameters": parameters,
+                "lora_adapters": lora_adapters,
+            },
             threading.Event(),
             images={"image": _image()},
         )
@@ -192,6 +269,12 @@ def test_fake_worker_smokes_image_edit_profiles(profile_id):
             result["provenance"]["request"]["parameters"]
             ["model_profile_id"] == profile_id
         )
+        assert (
+            result["provenance"]["request"]["parameters"]
+            ["lora_adapters"] == [
+                adapter.to_dict() for adapter in profile.default_lora_adapters
+            ]
+        )
     finally:
         client.shutdown()
 
@@ -200,19 +283,26 @@ def test_image_edit_engine_reloads_only_for_load_time_parameters():
     engine = InstructEngine(client=_client())
     profile = image_edit_profile(QWEN_IMAGE_EDIT_PROFILE_ID)
     parameters = profile.defaults()
+    adapters = tuple(
+        adapter.to_dict() for adapter in profile.default_lora_adapters)
     try:
-        assert engine.submit_load(QWEN_IMAGE_EDIT_PROFILE_ID, parameters)
+        assert engine.submit_load(
+            QWEN_IMAGE_EDIT_PROFILE_ID, parameters, adapters)
         assert _poll(engine).error is None
         assert engine.loaded_configuration_matches(
-            QWEN_IMAGE_EDIT_PROFILE_ID, parameters)
+            QWEN_IMAGE_EDIT_PROFILE_ID, parameters, adapters)
         changed_prompt = {**parameters, "prompt": "another edit"}
         assert engine.loaded_configuration_matches(
-            QWEN_IMAGE_EDIT_PROFILE_ID, changed_prompt)
+            QWEN_IMAGE_EDIT_PROFILE_ID, changed_prompt, adapters)
         changed_dtype = {**parameters, "dtype": "float16"}
         assert not engine.loaded_configuration_matches(
-            QWEN_IMAGE_EDIT_PROFILE_ID, changed_dtype)
+            QWEN_IMAGE_EDIT_PROFILE_ID, changed_dtype, adapters)
+        changed_adapters = [dict(adapter) for adapter in adapters]
+        changed_adapters[0]["weight"] = 0.65
+        assert not engine.loaded_configuration_matches(
+            QWEN_IMAGE_EDIT_PROFILE_ID, changed_prompt, changed_adapters)
         assert engine.submit_request(ImageEditRequest(
-            _image(), QWEN_IMAGE_EDIT_PROFILE_ID, changed_prompt))
+            _image(), QWEN_IMAGE_EDIT_PROFILE_ID, changed_prompt, adapters))
         assert _poll(engine).result.seed == 4343
     finally:
         engine.shutdown()

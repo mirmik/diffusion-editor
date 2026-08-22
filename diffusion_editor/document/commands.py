@@ -181,6 +181,42 @@ class AddLayerCommand:
 
 
 @dataclass(frozen=True)
+class AddDepthVisualizationCommand:
+    """Add one display-only preview of a canonical float depth artifact."""
+
+    name: str
+    preview_image: np.ndarray
+    label: str = "Create Depth Map"
+
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
+        if layer_stack.width == 0 or layer_stack.height == 0:
+            return None
+        old_active_id = (
+            layer_stack.active_layer.id
+            if layer_stack.active_layer is not None else None)
+        preview_layer = Layer(
+            self.name,
+            self.preview_image.shape[1],
+            self.preview_image.shape[0],
+            self.preview_image,
+        )
+        layer_stack.insert_layer(preview_layer)
+
+        def undo() -> None:
+            layer_stack.remove_layer(preview_layer)
+            _restore_active(layer_stack, old_active_id)
+
+        def redo() -> None:
+            layer_stack.insert_layer(preview_layer)
+
+        return CommandDelta(
+            undo,
+            redo,
+            int(self.preview_image.nbytes),
+        )
+
+
+@dataclass(frozen=True)
 class AddReconstructionLayerCommand:
     name: str
     label: str = "New 3D Reconstruction"
@@ -1076,6 +1112,7 @@ class UpdateImageEditToolCommand:
     layer: Layer
     model_profile_id: str
     profile_parameters: dict[str, dict]
+    profile_lora_adapters: dict[str, list[dict]]
     label: str = "Update AI Edit Settings"
 
     def apply(self, layer_stack: LayerStack) -> None:
@@ -1084,6 +1121,8 @@ class UpdateImageEditToolCommand:
             return
         tool.model_profile_id = self.model_profile_id
         tool.profile_parameters = copy.deepcopy(self.profile_parameters)
+        tool.profile_lora_adapters = copy.deepcopy(
+            self.profile_lora_adapters)
         layer_stack.publish_change(
             DocumentChangeKind.METADATA, layers=(self.layer,))
 
@@ -1093,26 +1132,34 @@ class UpdateImageEditToolCommand:
             return None
         old_profile = tool.model_profile_id
         old_parameters = copy.deepcopy(tool.profile_parameters)
+        old_adapters = copy.deepcopy(tool.profile_lora_adapters)
         new_parameters = copy.deepcopy(self.profile_parameters)
+        new_adapters = copy.deepcopy(self.profile_lora_adapters)
         if (
                 old_profile == self.model_profile_id
-                and old_parameters == new_parameters):
+                and old_parameters == new_parameters
+                and old_adapters == new_adapters):
             return None
 
-        def assign(profile_id: str, parameters: dict[str, dict]) -> None:
+        def assign(
+                profile_id: str,
+                parameters: dict[str, dict],
+                adapters: dict[str, list[dict]]) -> None:
             tool.model_profile_id = profile_id
             tool.profile_parameters = copy.deepcopy(parameters)
+            tool.profile_lora_adapters = copy.deepcopy(adapters)
             layer_stack.publish_change(
                 DocumentChangeKind.METADATA, layers=(self.layer,))
 
-        assign(self.model_profile_id, new_parameters)
+        assign(self.model_profile_id, new_parameters, new_adapters)
         size = len(repr((
-            old_profile, old_parameters,
-            self.model_profile_id, new_parameters,
+            old_profile, old_parameters, old_adapters,
+            self.model_profile_id, new_parameters, new_adapters,
         )).encode("utf-8"))
         return CommandDelta(
-            lambda: assign(old_profile, old_parameters),
-            lambda: assign(self.model_profile_id, new_parameters),
+            lambda: assign(old_profile, old_parameters, old_adapters),
+            lambda: assign(
+                self.model_profile_id, new_parameters, new_adapters),
             size,
             coalesce_key=("image-edit-tool", self.layer.id),
         )

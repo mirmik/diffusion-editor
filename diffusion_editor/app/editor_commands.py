@@ -15,7 +15,17 @@ from ..document.commands import (
     RemoveLayerCommand,
     SelectAllCommand,
 )
+from ..generation.types import DEFAULT_DEPTH_MODEL_PROFILE_ID
 from .application import EditorApplication
+
+
+_DEPTH_COMMAND_PROFILES = {
+    "ai.depth_map": DEFAULT_DEPTH_MODEL_PROFILE_ID,
+    "ai.depth_map.da3_mono": "da3-mono-large",
+    "ai.depth_map.depth_pro": "depth-pro",
+    "ai.depth_map.v2_large": "v2-large",
+    "ai.depth_map.v2_small": "v2-small",
+}
 
 
 class EditorCommandCoordinator:
@@ -49,7 +59,15 @@ class EditorCommandCoordinator:
             "layer.new": self.new_layer,
             "layer.remove": self.remove_layer,
             "layer.flatten": self.flatten_layers,
-            "ai.depth_map": self.create_depth_map,
+            **{
+                command_id: (
+                    lambda profile_id=profile_id:
+                    self.create_depth_map(profile_id)
+                )
+                for command_id, profile_id in _DEPTH_COMMAND_PROFILES.items()
+            },
+            "ai.depth_map.subject": self.create_subject_depth,
+            "ai.depth_point_cloud": self.view_depth_point_cloud,
             "view.fit": self.fit,
         }
         self.refresh()
@@ -93,10 +111,23 @@ class EditorCommandCoordinator:
                 len(layers) > 1
                 and all(layer.contributes_to_composite for layer in layers)
             ),
-            "ai.depth_map": (
+            **{
+                command_id: (
+                    canvas_ready
+                    and active is not None
+                    and not self._application.depth_controller.is_busy
+                    and not self._application.segmentation_controller.is_busy
+                )
+                for command_id in _DEPTH_COMMAND_PROFILES
+            },
+            "ai.depth_map.subject": (
                 canvas_ready
                 and active is not None
                 and not self._application.depth_controller.is_busy
+                and not self._application.segmentation_controller.is_busy
+            ),
+            "ai.depth_point_cloud": (
+                self._application.has_depth_point_cloud_context(active)
             ),
             "view.fit": canvas_ready and self._fit_in_view is not None,
         }
@@ -185,16 +216,35 @@ class EditorCommandCoordinator:
     def flatten_layers(self) -> None:
         self._execute(FlattenLayersCommand(), "Layers flattened")
 
-    def create_depth_map(self) -> None:
+    def create_depth_map(
+            self,
+            profile_id: str = DEFAULT_DEPTH_MODEL_PROFILE_ID) -> None:
         self._before_mutation()
         layer = self._stack.active_layer
         if layer is None:
             self.refresh()
             return
-        event = self._application.depth_controller.start(layer)
+        event = self._application.depth_controller.start(layer, profile_id)
         if event.status is not None:
             self._application.set_status(event.status)
         self.refresh()
+
+    def create_subject_depth(self) -> None:
+        self._before_mutation()
+        layer = self._stack.active_layer
+        if layer is None:
+            self.refresh()
+            return
+        status = self._application.start_subject_depth(
+            layer, DEFAULT_DEPTH_MODEL_PROFILE_ID)
+        if status is not None:
+            self._application.set_status(status)
+        self.refresh()
+
+    def view_depth_point_cloud(self) -> None:
+        self._application.set_status(
+            "Depth point-cloud preview requires the native Termin viewport"
+        )
 
     def fit(self) -> None:
         if self._fit_in_view is not None:

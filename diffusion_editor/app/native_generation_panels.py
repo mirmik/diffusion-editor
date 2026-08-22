@@ -14,6 +14,7 @@ from .generation_panels import (
     GenerationPhase,
 )
 from ..generation.image_edit_profiles import (
+    ImageEditLoraAdapter,
     ParameterKind,
     all_image_edit_parameters,
 )
@@ -48,6 +49,9 @@ class NativeGenerationPanels:
         self._image_edit_reference_ids: list[str | None] = []
         self._image_edit_profile_ids: list[str] = []
         self._image_edit_widgets: dict[str, object] = {}
+        self._image_edit_lora_rows: list[dict[str, object]] = []
+        self._image_edit_lora_catalog_paths: list[str] = []
+        self._image_edit_lora_catalog_labels: list[str] = []
         self._image_edit_choice_values: dict[str, list[str]] = {}
         self._image_edit_specs = {
             parameter.stable_id: parameter
@@ -191,6 +195,18 @@ class NativeGenerationPanels:
             active_parameters = {
                 parameter.stable_id for parameter in instruct.parameters}
             values = instruct.parameter_values or {}
+            instruct_busy = instruct.phase in {
+                GenerationPhase.LOADING,
+                GenerationPhase.RUNNING,
+            }
+            lora_enabled = (
+                instruct.supports_lora_adapters and not instruct_busy)
+            self.image_edit_add_lora_button.widget.enabled = lora_enabled
+            self._sync_image_edit_lora_rows(
+                instruct.lora_adapters,
+                instruct.lora_catalog,
+                enabled=lora_enabled,
+            )
             for parameter_id, widget in self._image_edit_widgets.items():
                 supported = parameter_id in active_parameters
                 widget.widget.visible = True
@@ -216,10 +232,6 @@ class NativeGenerationPanels:
             self.instruct_status.text = (
                 f"{instruct.phase.value}: {instruct.message}")
             self.instruct_info.text = instruct.layer_info
-            instruct_busy = instruct.phase in {
-                GenerationPhase.LOADING,
-                GenerationPhase.RUNNING,
-            }
             self.instruct_load_button.widget.enabled = (
                 not instruct_busy)
             self.instruct_run_button.widget.enabled = not instruct_busy
@@ -246,6 +258,7 @@ class NativeGenerationPanels:
             return
         self._closed = True
         self._on_intent = lambda _intent: None
+        self._image_edit_lora_rows.clear()
         self._connections.clear()
 
     def _build_diffusion(self, content) -> None:
@@ -438,6 +451,20 @@ class NativeGenerationPanels:
         self.instruct_load_button = self._button(
             content, "Load Model", "instruct.load-model",
             lambda: self._emit(GenerationAction.LOAD_MODEL))
+        self._caption(
+            content, "LoRA adapters", "instruct.lora-adapters.caption")
+        self.image_edit_lora_container = self._document.create_vstack(
+            "NativeImageEditLoraStack")
+        self.image_edit_lora_container.stable_id = (
+            "diffusion-editor.generation.instruct.lora-adapters")
+        self.image_edit_lora_container.set_layout_spacing(4.0)
+        content.add_preferred_child(self.image_edit_lora_container)
+        self.image_edit_add_lora_button = self._button(
+            content,
+            "+ Add LoRA",
+            "instruct.lora-adapters.add",
+            lambda: self._emit(GenerationAction.ADD_IMAGE_EDIT_LORA),
+        )
         for parameter in all_image_edit_parameters():
             parameter_id = parameter.stable_id
             suffix = f"instruct.parameter.{parameter_id.replace('_', '-')}"
@@ -515,6 +542,163 @@ class NativeGenerationPanels:
         self.instruct_clear_mask_button = self._button(
             content, "Clear Mask", "instruct.clear-mask",
             lambda: self._emit(GenerationAction.CLEAR_MASK))
+
+    def _sync_image_edit_lora_rows(
+            self,
+            adapters: tuple[ImageEditLoraAdapter, ...],
+            catalog,
+            *,
+            enabled: bool) -> None:
+        current_ids = [
+            str(row["stable_id"]) for row in self._image_edit_lora_rows]
+        next_ids = [adapter.stable_id for adapter in adapters]
+        catalog_paths = ["", *(item.stable_id for item in catalog)]
+        catalog_labels = [
+            "Custom / Hugging Face…", *(item.name for item in catalog)]
+        catalog_changed = (
+            catalog_paths != self._image_edit_lora_catalog_paths
+            or catalog_labels != self._image_edit_lora_catalog_labels
+        )
+        if current_ids != next_ids or catalog_changed:
+            for row in self._image_edit_lora_rows:
+                row["connections"].clear()
+                self._document.destroy_widget_recursive(
+                    row["root"].handle)
+            self._image_edit_lora_catalog_paths = catalog_paths
+            self._image_edit_lora_catalog_labels = catalog_labels
+            self._image_edit_lora_rows = [
+                self._create_image_edit_lora_row(
+                    adapter, catalog_labels)
+                for adapter in adapters
+            ]
+        for index, (row, adapter) in enumerate(zip(
+                self._image_edit_lora_rows, adapters)):
+            row["enabled"].checked = adapter.enabled
+            row["label"].text = adapter.label
+            row["source"].text = adapter.source
+            row["weight"].value = adapter.weight
+            try:
+                row["catalog"].selected_index = catalog_paths.index(
+                    adapter.source)
+            except ValueError:
+                row["catalog"].selected_index = 0
+            row["enabled"].widget.enabled = enabled
+            row["label"].widget.enabled = enabled
+            row["source"].widget.enabled = enabled
+            row["catalog"].widget.enabled = enabled
+            row["weight"].widget.enabled = enabled
+            row["up"].widget.enabled = enabled and index > 0
+            row["down"].widget.enabled = (
+                enabled and index + 1 < len(adapters))
+            row["remove"].widget.enabled = enabled
+
+    def _create_image_edit_lora_row(
+            self,
+            adapter: ImageEditLoraAdapter,
+            catalog_labels: list[str]) -> dict[str, object]:
+        adapter_id = adapter.stable_id
+        suffix = f"instruct.lora-adapter.{adapter_id}"
+        root = self._document.create_vstack("NativeImageEditLoraRow")
+        root.stable_id = f"diffusion-editor.generation.{suffix}"
+        root.set_layout_spacing(2.0)
+        header = self._document.create_hstack("NativeImageEditLoraHeader")
+        header.set_layout_spacing(2.0)
+        enabled = self._document.create_checkbox(adapter.enabled)
+        enabled.widget.stable_id = (
+            f"diffusion-editor.generation.{suffix}.enabled")
+        label = self._document.create_text_input(adapter.label)
+        label.widget.stable_id = (
+            f"diffusion-editor.generation.{suffix}.label")
+        label.placeholder = "Adapter name"
+        weight = self._document.create_slider_edit(adapter.weight)
+        weight.widget.stable_id = (
+            f"diffusion-editor.generation.{suffix}.weight")
+        weight.label = "Weight"
+        weight.set_range(-4.0, 4.0)
+        weight.set_step(0.05)
+        weight.set_decimals(2)
+        up = self._document.create_button("↑")
+        down = self._document.create_button("↓")
+        remove = self._document.create_button("×")
+        up.widget.stable_id = f"diffusion-editor.generation.{suffix}.up"
+        down.widget.stable_id = f"diffusion-editor.generation.{suffix}.down"
+        remove.widget.stable_id = (
+            f"diffusion-editor.generation.{suffix}.remove")
+        header.add_preferred_child(enabled.widget)
+        header.add_flex_child(label.widget, 1.0)
+        header.add_fixed_child(weight.widget, 112.0)
+        header.add_fixed_child(up.widget, 28.0)
+        header.add_fixed_child(down.widget, 28.0)
+        header.add_fixed_child(remove.widget, 28.0)
+        catalog = self._document.create_combo_box()
+        catalog.widget.stable_id = (
+            f"diffusion-editor.generation.{suffix}.catalog")
+        self._fill_combo(catalog, catalog_labels)
+        source = self._document.create_text_input(adapter.source)
+        source.widget.stable_id = (
+            f"diffusion-editor.generation.{suffix}.source")
+        source.placeholder = "Local path or Hugging Face repository"
+        root.add_preferred_child(header)
+        root.add_preferred_child(catalog.widget)
+        root.add_preferred_child(source.widget)
+        self.image_edit_lora_container.add_preferred_child(root)
+        update = lambda field, value: self._emit(
+            GenerationAction.UPDATE_IMAGE_EDIT_LORA,
+            (adapter_id, field, value),
+        )
+        connections = [
+            enabled.connect_changed(
+                lambda changed: update("enabled", changed)),
+            label.connect_changed(
+                lambda changed: update("label", changed)),
+            source.connect_changed(
+                lambda changed: update("source", changed)),
+            weight.connect_changed(
+                lambda changed: update("weight", changed)),
+            catalog.connect_changed(
+                lambda index, *_rest: self._select_image_edit_lora_catalog(
+                    adapter_id, index)),
+            up.connect_clicked(lambda: self._emit(
+                GenerationAction.MOVE_IMAGE_EDIT_LORA,
+                (adapter_id, -1),
+            )),
+            down.connect_clicked(lambda: self._emit(
+                GenerationAction.MOVE_IMAGE_EDIT_LORA,
+                (adapter_id, 1),
+            )),
+            remove.connect_clicked(lambda: self._emit(
+                GenerationAction.REMOVE_IMAGE_EDIT_LORA,
+                adapter_id,
+            )),
+        ]
+        return {
+            "stable_id": adapter_id,
+            "root": root,
+            "enabled": enabled,
+            "label": label,
+            "source": source,
+            "catalog": catalog,
+            "weight": weight,
+            "up": up,
+            "down": down,
+            "remove": remove,
+            "connections": connections,
+        }
+
+    def _select_image_edit_lora_catalog(
+            self, adapter_id: str, index: int) -> None:
+        if self._syncing or self._closed:
+            return
+        if not 0 < index < len(self._image_edit_lora_catalog_paths):
+            return
+        self._emit(
+            GenerationAction.UPDATE_IMAGE_EDIT_LORA,
+            (
+                adapter_id,
+                "source",
+                self._image_edit_lora_catalog_paths[index],
+            ),
+        )
 
     def _build_mask(self, content) -> None:
         self.mask_size = self._slider(

@@ -1,0 +1,13 @@
+# Minimal runtime surface imported by the official Depth Anything 3 API.
+# The upstream project is consumed from a pinned source checkout; its full
+# training, visualization, and 3D-reconstruction dependency set is not needed.
+addict==2.4.0
+einops==0.8.2
+evo==1.37.0
+matplotlib==3.11.1
+moviepy==1.0.3
+omegaconf==2.3.1
+pillow-heif==1.5.0
+plyfile==1.1.5
+pycolmap==4.1.1
+trimesh==5.0.0

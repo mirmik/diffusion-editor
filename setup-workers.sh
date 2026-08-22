@@ -13,6 +13,8 @@ WORKERS_BOOTSTRAP_PYTHON="$(
 ML_ACCELERATOR="${ML_ACCELERATOR:-auto}"
 WORKERS_PYTHON="$WORKERS_VENV/bin/python"
 SENSENOVA_OVERLAY="$WORKERS_VENV/share/diffusion-editor/sensenova-u1"
+DA3_SOURCE="$WORKERS_VENV/share/diffusion-editor/depth-anything-3"
+DA3_REVISION="3d835ec1a5802d64a8b8b15f817a1ab54809bfe4"
 
 if [ "$ML_ACCELERATOR" = auto ]; then
     if [ -r /proc/driver/nvidia/version ]; then
@@ -79,10 +81,23 @@ fi
     --target "$SENSENOVA_OVERLAY" \
     -r requirements-workers-sensenova.txt
 
+# Depth Anything 3's published package metadata pulls its training and full
+# 3D toolchain into the editor. Keep a reviewed minimal runtime beside the
+# worker instead and pin the official source checkout used by the API.
+"$WORKERS_PYTHON" -m pip install -r requirements-workers-da3.txt
+if [ ! -d "$DA3_SOURCE/.git" ]; then
+    mkdir -p "$(dirname "$DA3_SOURCE")"
+    git clone https://github.com/ByteDance-Seed/Depth-Anything-3.git \
+        "$DA3_SOURCE"
+fi
+git -C "$DA3_SOURCE" fetch --depth 1 origin "$DA3_REVISION"
+git -C "$DA3_SOURCE" checkout --detach "$DA3_REVISION"
+
 "$WORKERS_PYTHON" -m pip check
-PYTHONPATH="$SENSENOVA_OVERLAY${PYTHONPATH:+:$PYTHONPATH}" \
+PYTHONPATH="$DA3_SOURCE/src:$SENSENOVA_OVERLAY${PYTHONPATH:+:$PYTHONPATH}" \
 ML_ACCELERATOR_RESOLVED="$ML_ACCELERATOR" "$WORKERS_PYTHON" -c '
 from diffusion_editor.workers.lama_model import LamaModel
+from depth_anything_3.api import DepthAnything3
 import accelerate
 import cv2
 import diffusers

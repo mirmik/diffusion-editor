@@ -72,7 +72,7 @@ def _tensor_to_image(batch) -> Image.Image:
 
 
 class SenseNovaImageEditPipeline:
-    """Own a loaded U1 model/tokenizer and expose one-image editing."""
+    """Own a loaded U1 model/tokenizer and expose image editing."""
 
     scheduler = None
 
@@ -156,6 +156,8 @@ class SenseNovaImageEditPipeline:
             image: Image.Image,
             parameters: dict[str, Any],
             seed: int,
+            *,
+            reference_image: Image.Image | None = None,
     ) -> Image.Image:
         import torch
 
@@ -171,16 +173,24 @@ class SenseNovaImageEditPipeline:
             _PATCH_SIZE * _PATCH_SIZE,
             math.floor(float(parameters["target_megapixels"]) * 1_000_000),
         )
-        source = image.convert("RGB")
-        resized_height, resized_width = self._smart_resize(
-            height=source.height,
-            width=source.width,
-            factor=_PATCH_SIZE,
-            min_pixels=target_pixels,
-            max_pixels=target_pixels,
-        )
-        source = source.resize(
-            (resized_width, resized_height), Image.Resampling.LANCZOS)
+        inputs = [image]
+        if reference_image is not None:
+            inputs.append(reference_image)
+        sources = []
+        for input_image in inputs:
+            source = input_image.convert("RGB")
+            resized_height, resized_width = self._smart_resize(
+                height=source.height,
+                width=source.width,
+                factor=_PATCH_SIZE,
+                min_pixels=target_pixels,
+                max_pixels=target_pixels,
+            )
+            sources.append(source.resize(
+                (resized_width, resized_height),
+                Image.Resampling.LANCZOS,
+            ))
+        source = sources[0]
         width = int(parameters["width"])
         height = int(parameters["height"])
         if bool(width) != bool(height):
@@ -206,7 +216,7 @@ class SenseNovaImageEditPipeline:
             output = model.it2i_generate(
                 self.tokenizer,
                 prompt,
-                [source],
+                sources,
                 image_size=(width, height),
                 cfg_scale=float(parameters["cfg_scale"]),
                 img_cfg_scale=float(parameters["img_cfg_scale"]),

@@ -133,6 +133,7 @@ def _serialize_instruct_tool(tool: InstructTool, file_key: str) -> dict:
         "seed": tool.seed,
         "model_profile_id": tool.model_profile_id,
         "profile_parameters": tool.profile_parameters,
+        "profile_lora_adapters": tool.profile_lora_adapters,
         "reference_layer_id": tool.reference_layer_id,
         "reference_layer_name_hint": tool.reference_layer_name_hint,
         "reference_file": (
@@ -237,6 +238,11 @@ def _load_instruct_tool(d: dict, zf: zipfile.ZipFile) -> ToolLoadResult:
         profile_parameters=(
             d.get("profile_parameters")
             if isinstance(d.get("profile_parameters"), dict)
+            else None
+        ),
+        profile_lora_adapters=(
+            d.get("profile_lora_adapters")
+            if isinstance(d.get("profile_lora_adapters"), dict)
             else None
         ),
         reference_layer_id=d.get("reference_layer_id"),

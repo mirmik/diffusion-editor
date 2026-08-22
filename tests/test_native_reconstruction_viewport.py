@@ -47,6 +47,22 @@ def test_fit_resets_camera_to_pixal3d_front() -> None:
     ), abs=1e-6)
 
 
+def test_fit_keeps_native_zoom_clipping_matched_to_cloud_bounds() -> None:
+    camera = _OrbitCamera()
+    minimum = np.asarray((-1.0, -16.0, -2.0), dtype=np.float32)
+    maximum = np.asarray((1.0, -7.0, 2.0), dtype=np.float32)
+    expected_radius = float(np.linalg.norm(maximum - minimum)) * 0.65
+
+    camera.fit(minimum, maximum)
+    assert camera._camera.fitted_radius == pytest.approx(expected_radius)
+
+    # Native OrbitCamera recalculates near/far during zoom.  The whole fitted
+    # bounding sphere must remain between them after that recalculation.
+    camera.zoom(1.0)
+    assert camera._camera.near <= camera._camera.distance - expected_radius
+    assert camera._camera.far >= camera._camera.distance + expected_radius
+
+
 def test_comparison_loads_fit_only_the_first_model_by_default() -> None:
     assert _should_fit_camera(False, None)
     assert not _should_fit_camera(True, None)

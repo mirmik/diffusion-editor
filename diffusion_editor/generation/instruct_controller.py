@@ -129,13 +129,22 @@ class InstructGenerationController:
             self,
             profile_id: str = LEGACY_INSTRUCT_PROFILE_ID,
             parameters: dict[str, object] | None = None,
+            lora_adapters=None,
     ) -> InstructControllerEvent:
         if self._engine.is_busy or self._active_operation_id is not None:
             return InstructControllerEvent()
         operation_id = self._job_id_factory()
+        profile = image_edit_profile(profile_id)
+        normalized_adapters = tuple(
+            adapter.to_dict()
+            for adapter in profile.normalize_lora_adapters(lora_adapters)
+        )
         submitted = self._submit_load(
-            profile_id, parameters or image_edit_profile(profile_id).defaults(),
-            operation_id)
+            profile_id,
+            parameters or profile.defaults(),
+            normalized_adapters,
+            operation_id,
+        )
         if not submitted:
             return InstructControllerEvent()
         self._active_operation_id = operation_id
@@ -158,7 +167,10 @@ class InstructGenerationController:
         needs_load = not self._engine.is_loaded
         if callable(matches):
             needs_load = not matches(
-                job.request.model_profile_id, job.request.parameters)
+                job.request.model_profile_id,
+                job.request.parameters,
+                job.request.lora_adapters,
+            )
         elif hasattr(self._engine, "loaded_profile_id"):
             needs_load = (
                 getattr(self._engine, "loaded_profile_id")
@@ -168,6 +180,7 @@ class InstructGenerationController:
             submitted = self._submit_load(
                 job.request.model_profile_id,
                 job.request.parameters,
+                job.request.lora_adapters,
                 job.context.job_id,
             )
             if not submitted:
@@ -210,6 +223,8 @@ class InstructGenerationController:
             return InstructControllerEvent(
                 status="No source patch for instruction")
         parameters = copy.deepcopy(tool.parameters)
+        lora_adapters = tuple(
+            adapter.to_dict() for adapter in tool.lora_adapters)
         reference_image = None
         profile = image_edit_profile(tool.model_profile_id)
         if profile.max_input_images > 1:
@@ -229,6 +244,7 @@ class InstructGenerationController:
             image=input_image.to_image(),
             model_profile_id=tool.model_profile_id,
             parameters=parameters,
+            lora_adapters=lora_adapters,
             reference_image=(
                 frozen_reference.to_image()
                 if frozen_reference is not None else None),
@@ -253,6 +269,7 @@ class InstructGenerationController:
                 {
                     "model_profile_id": request.model_profile_id,
                     "parameters": request.parameters,
+                    "lora_adapters": list(request.lora_adapters),
                     "input_image_hash": input_image.content_hash,
                     "reference_image_hash": (
                         frozen_reference.content_hash
@@ -266,6 +283,7 @@ class InstructGenerationController:
             self,
             profile_id: str,
             parameters: dict[str, object],
+            lora_adapters,
             job_id: str,
     ) -> bool:
         if hasattr(self._engine, "loaded_profile_id"):
@@ -274,6 +292,7 @@ class InstructGenerationController:
                 "submit_load",
                 profile_id,
                 parameters,
+                lora_adapters,
                 job_id=job_id,
             )
         return submit_with_job_id(

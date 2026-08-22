@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 import zipfile
 
+import numpy as np
 from PIL import Image
 from tcbase import log
 from termin.dispatch import Dispatcher, DispatchStats
@@ -84,6 +85,7 @@ from ..canvas.edit_transactions import CanvasEditTransactionCoordinator
 from ..canvas.native_editor_canvas import NativeEditorCanvas
 from ..engines.reconstruction_engine import ReconstructionEngine
 from ..generation.reconstruction_controller import ReconstructionController
+from ..generation.depth_visualization import colorize_confidence
 from ..automation import start_editor_automation
 from .native_reconstruction_viewport import NativeReconstructionViewport
 
@@ -356,6 +358,7 @@ class NativeEditorRoot:
         self._reconstruction_job_node_id: str | None = None
         self._reconstruction_parent_run_id: str | None = None
         self._presented_reconstruction_id: str | None = None
+        self._presented_depth_point_cloud_layer_id: str | None = None
         self._active_reconstruction_workspace = None
         self.automation = None
 
@@ -636,6 +639,10 @@ class NativeEditorRoot:
                 for command_id, handler in (
                         self.command_coordinator.handlers.items()):
                     self.view.set_command_handler(command_id, handler)
+                self.view.set_command_handler(
+                    "ai.depth_point_cloud",
+                    self._view_depth_point_cloud,
+                )
                 if command_handlers is not None:
                     for command_id, handler in command_handlers.items():
                         self.view.set_command_handler(command_id, handler)
@@ -1315,6 +1322,67 @@ class NativeEditorRoot:
         viewport.light_from_camera()
         self.application.set_status("3D light set from current camera")
 
+    def _view_depth_point_cloud(self) -> None:
+        layer = self.application.layer_stack.active_layer
+        cloud = self.application.depth_point_cloud_for_layer(layer)
+        if cloud is None or layer is None:
+            reason = getattr(
+                self.application, "latest_depth_point_cloud_error", None)
+            self.application.set_status(
+                f"Depth point cloud unavailable: {reason}"
+                if reason and self.application.has_depth_point_cloud_context(
+                    layer)
+                else "Select the latest depth preview layer"
+            )
+            return
+        try:
+            viewport = self._ensure_reconstruction_viewport()
+            confidence_colors = None
+            color_mode = "image"
+            confidence_legend = ""
+            confidence = getattr(cloud, "confidence", None)
+            if confidence is not None:
+                confidence_preview = colorize_confidence(confidence)
+                confidence_colors = np.ascontiguousarray(
+                    confidence_preview.rgb.astype(np.float32) / 255.0
+                )
+                color_mode = "confidence"
+                confidence_legend = (
+                    "Confidence: cold low → warm high; "
+                    f"P2–P98 {confidence_preview.low:.4g}…"
+                    f"{confidence_preview.high:.4g}"
+                )
+            count = viewport.load_point_cloud_data(
+                cloud.positions,
+                cloud.colors,
+                fit_camera=True,
+                confidence_colors=confidence_colors,
+                color_mode=color_mode,
+                confidence_legend=confidence_legend,
+            )
+            self._presented_reconstruction_id = None
+            self._presented_depth_point_cloud_layer_id = layer.id
+            set_context = getattr(
+                self.view, "set_reconstruction_context", None)
+            if callable(set_context):
+                set_context(True, "Depth point cloud")
+            calibration = (
+                "approximate camera"
+                if getattr(cloud, "approximate_camera", False)
+                else "model camera calibration"
+            )
+            self.application.set_status(
+                f"Depth point cloud: {count:,} colored points; "
+                f"raw model coordinates, {calibration}; "
+                f"{'confidence colors (cold low, warm high); ' if confidence is not None else ''}"
+                "drag to orbit, wheel to zoom"
+            )
+        except Exception as exc:
+            log.exception("Failed to display depth point cloud")
+            self.application.set_status(
+                f"Cannot display depth point cloud: {exc}"
+            )
+
     def _poll_reconstruction(self) -> None:
         controller = self.reconstruction_controller
         if controller is None:
@@ -1981,12 +2049,21 @@ class NativeEditorRoot:
         if self.canvas is not None:
             self.canvas.set_selection_as_mask(node is not None)
         if node is None:
+            active = self.application.layer_stack.active_layer
+            if (
+                    active is not None
+                    and active.id
+                    == self._presented_depth_point_cloud_layer_id):
+                if callable(set_context):
+                    set_context(True, "Depth point cloud")
+                return
             coordinator = self.canvas_controls_coordinator
             if coordinator is not None and coordinator.selection_state.edit_mode:
                 self._set_reconstruction_mask_painting(False)
             if callable(set_context):
                 set_context(False)
             return
+        self._presented_depth_point_cloud_layer_id = None
         viewport = self._ensure_reconstruction_viewport()
         if callable(set_context):
             set_context(True, node.reconstruction_status.value)
@@ -2039,6 +2116,11 @@ class NativeEditorRoot:
             graphics_owner=graphics,
             request_repaint=self.composition.request_repaint,
             resource_namespace="primary",
+            point_color_state_changed=getattr(
+                self.view,
+                "set_reconstruction_point_color_state",
+                None,
+            ),
         )
         mount(viewport)
         self.reconstruction_viewport = viewport

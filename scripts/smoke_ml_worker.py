@@ -109,7 +109,14 @@ def main() -> int:
         )
         depth = client.request(
             "depth",
-            {"model_id": "depth-anything/Depth-Anything-V2-Small-hf"},
+            {
+                "profile_id": "v2-small",
+                "model_id": "depth-anything/Depth-Anything-V2-Small-hf",
+                "backend": "transformers",
+                "title": "Depth Anything V2 Small",
+                "direct_depth": False,
+                "value_kind": "inverse_relative",
+            },
             cancel,
             images={"image": np.asarray(image.convert("RGBA"))},
             on_progress=print,
@@ -118,7 +125,7 @@ def main() -> int:
             "ML worker smoke OK:",
             f"diffusion={diffusion['image'].size}",
             f"instruct={instruct['image'].size}",
-            f"depth={depth['image'].size}",
+            f"depth={depth['depth'].shape}/{depth['depth'].dtype}",
             f"detections={len(grounding['detections'])}",
         )
         return 0

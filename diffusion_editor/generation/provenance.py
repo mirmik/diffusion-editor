@@ -485,6 +485,8 @@ def capture_tool_state(tool: object | None) -> RequestProvenance:
                 "model_profile_id": str(getattr(
                     tool, "model_profile_id", "instruct-pix2pix")),
                 "profile_parameters": profile_parameters,
+                "profile_lora_adapters": getattr(
+                    tool, "profile_lora_adapters", {}),
                 "reference_layer_id": getattr(
                     tool, "reference_layer_id", None),
                 "reference_image_name_hint": str(getattr(

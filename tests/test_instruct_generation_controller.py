@@ -1,5 +1,6 @@
 import numpy as np
 from PIL import Image
+import pytest
 
 from diffusion_editor.generation.instruct_controller import (
     InstructGenerationController,
@@ -12,7 +13,9 @@ from diffusion_editor.document.layer import Layer
 from diffusion_editor.document.layer_stack import LayerStack
 from diffusion_editor.document.tool import InstructTool
 from diffusion_editor.generation.image_edit_profiles import (
+    FLUX2_KLEIN_PROFILE_ID,
     QWEN_IMAGE_EDIT_PROFILE_ID,
+    SENSENOVA_U15_PROFILE_ID,
 )
 
 
@@ -100,11 +103,16 @@ def test_start_apply_without_mask_or_manual_patch_uses_full_composite():
     ) == (0, 0, 20, 14)
 
 
-def test_qwen_start_apply_resolves_second_image_from_layer():
+@pytest.mark.parametrize("profile_id", [
+    QWEN_IMAGE_EDIT_PROFILE_ID,
+    FLUX2_KLEIN_PROFILE_ID,
+    SENSENOVA_U15_PROFILE_ID,
+])
+def test_multi_image_profile_resolves_second_image_from_layer(profile_id):
     stack, layer = _stack_with_instruct_layer()
     reference = next(item for item in stack.all_layers() if item is not layer)
     reference.image[:, :] = (90, 80, 70, 255)
-    layer.tool.set_profile(QWEN_IMAGE_EDIT_PROFILE_ID)
+    layer.tool.set_profile(profile_id)
     layer.tool.reference_layer_id = reference.id
     layer.tool.reference_layer_name_hint = reference.name
     engine = _Engine()
@@ -139,6 +147,27 @@ def test_qwen_start_apply_reports_missing_second_image_layer():
     event = controller.start_apply(layer)
 
     assert event.status == "AI Edit reference missing: Old portrait"
+
+
+def test_qwen_request_captures_effective_lora_stack():
+    _stack, layer = _stack_with_instruct_layer()
+    layer.tool.set_profile(QWEN_IMAGE_EDIT_PROFILE_ID)
+    adapters = [adapter.to_dict() for adapter in layer.tool.lora_adapters]
+    adapters[0]["weight"] = 0.6
+    layer.tool.set_lora_adapters(adapters)
+    engine = _Engine()
+    controller = InstructGenerationController(
+        engine=engine,
+        composite_below=lambda _layer: _rgba(
+            16, 16, (10, 20, 30, 255)),
+    )
+
+    event = controller.start_apply(layer)
+
+    assert event.status == "Applying instruction..."
+    request = engine.calls[-1][1]
+    assert request.lora_adapters[0]["stable_id"] == "lightning"
+    assert request.lora_adapters[0]["weight"] == 0.6
 
 
 def test_poll_model_load_resumes_pending_instruction():

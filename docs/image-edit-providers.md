@@ -23,12 +23,32 @@ AI Edit — один доменный инструмент и один generatio
 effective parameters. Worker выполняет `load_image_edit` и `image_edit`, а
 seed, model identity, profile ID и полный effective parameter set попадают в
 provenance. Смена prompt/steps не перезагружает модель; смена model, revision,
-dtype, device, offload, VAE tiling или LoRA вызывает reload.
+dtype, device, offload, VAE tiling или состав стека LoRA вызывает reload.
+
+LoRA не являются фиксированными scalar-параметрами профиля. Каждый AI Edit
+tool хранит отдельный упорядоченный стек для каждого profile ID. Строка стека
+содержит устойчивый ID, отображаемое имя, source (локальный путь либо Hugging
+Face repository), enabled и weight. Native-панель позволяет добавлять и
+удалять строки, менять порядок, путь, включение и вес; фиксированного числа
+слотов нет. Стек сохраняется в `.deproj`, входит в provenance и load identity.
+
+Каждая строка также показывает каталог `Installed LoRA`. Он рекурсивно
+сканирует `~/soft/ComfyUI/models/loras`, Forge `models/Lora`, соседние
+`Lora`/`loras` относительно настроенного каталога checkpoints и дополнительные
+пути из setting `lora_dirs` или `DIFFUSION_EDITOR_LORA_DIRS` (разделитель —
+системный `PATH`). Символические ссылки на один файл дедуплицируются, служебная
+`.cache` пропускается. `Custom / Hugging Face…` сохраняет ручной source для
+repo ID и нестандартных путей.
 
 ## Встроенные профили
 
 - `qwen-image-edit-2511` — `QwenImageEditPlusPipeline`, основной профиль.
   По умолчанию используются 4 шага при найденной Lightning LoRA, иначе 40.
+- `qwen-image-edit-2511-multiple-angles` — тот же Qwen pipeline с отдельным
+  адаптером
+  [`fal/Qwen-Image-Edit-2511-Multiple-Angles-LoRA`](https://huggingface.co/fal/Qwen-Image-Edit-2511-Multiple-Angles-LoRA).
+  Начальный стек содержит Lightning и Multiple Angles с независимыми весами
+  `1.0` и `0.9`; пользователь может изменить или дополнить его.
 - `flux2-klein-4b` — `Flux2KleinPipeline`, быстрый distilled профиль с четырьмя
   шагами.
 - `sensenova-u1.5-8b-mot-preview` — standalone `sensenova_u1` image-to-image
@@ -54,6 +74,19 @@ ComfyUI. FP8 Linear-веса остаются сжатыми при хранен
 исходный dtype. Upstream `Model` при этом остаётся источником конфигурации,
 processor, tokenizer, scheduler и VAE. Чтобы вернуться к полному upstream BF16,
 нужно очистить оба component checkpoint поля.
+
+Multiple Angles автоматически ищется в
+`~/soft/ComfyUI/models/loras/qwen-image-edit-2511-multiple-angles-lora.safetensors`.
+Другой default задаётся через
+`DIFFUSION_EDITOR_QWEN_MULTIPLE_ANGLES_LORA`. Prompt начинается с `<sks>` и
+затем задаёт азимут, высоту камеры и дистанцию именно в таком порядке, например
+`<sks> front-left quarter view elevated shot medium shot`. Обычный Qwen-профиль
+этот адаптер не загружает.
+
+Старые документы с плоскими `lora_path`, `lora_scale`, `angle_lora_path` и
+`angle_lora_scale` мигрируют в две строки стека при чтении. После следующего
+сохранения используются только `profile_lora_adapters`; старые поля обратно не
+записываются.
 
 Для локального Qwen по умолчанию включён `Component CPU offload`: text encoder
 и transformer последовательно занимают GPU, а не находятся там одновременно.
@@ -94,6 +127,13 @@ Opt-in проверка не входит в обычный pytest и не ск�
   --input input.png --output /tmp/flux-edit.png \
   --prompt "change only the car body" \
   --model /path/to/diffusers-pipeline --local-files-only
+```
+
+Дополнительные LoRA для smoke задаются повторяемым аргументом:
+
+```bash
+--lora /path/to/first.safetensors 0.8 \
+--lora org/second-lora 0.55
 ```
 
 Локальный SenseNova Q8 smoke:

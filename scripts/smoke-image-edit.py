@@ -46,6 +46,13 @@ def _arguments() -> argparse.Namespace:
         default=None,
     )
     parser.add_argument("--lora-path", default=None)
+    parser.add_argument(
+        "--lora",
+        action="append",
+        nargs=2,
+        metavar=("SOURCE", "WEIGHT"),
+        help="Append one LoRA adapter; may be repeated.",
+    )
     parser.add_argument("--gguf-checkpoint", default=None)
     parser.add_argument("--target-megapixels", type=float, default=None)
     parser.add_argument("--cfg-scale", type=float, default=None)
@@ -75,7 +82,6 @@ def main() -> int:
         "steps": args.steps,
         "dtype": args.dtype,
         "device": args.device,
-        "lora_path": args.lora_path,
         "gguf_checkpoint": args.gguf_checkpoint,
         "target_megapixels": args.target_megapixels,
         "cfg_scale": args.cfg_scale,
@@ -89,6 +95,28 @@ def main() -> int:
         if value is not None and key in parameters:
             overrides[key] = value
     parameters.update(overrides)
+    lora_adapters = [
+        adapter.to_dict() for adapter in profile.default_lora_adapters]
+    if args.lora_path is not None:
+        if lora_adapters:
+            lora_adapters[0].update(
+                source=args.lora_path, enabled=bool(args.lora_path))
+        else:
+            lora_adapters.append({
+                "stable_id": "smoke-lora-1",
+                "label": Path(args.lora_path).stem or "LoRA 1",
+                "source": args.lora_path,
+                "weight": 1.0,
+                "enabled": bool(args.lora_path),
+            })
+    for index, (source, weight) in enumerate(args.lora or (), start=1):
+        lora_adapters.append({
+            "stable_id": f"smoke-custom-{index}",
+            "label": Path(source).stem or f"Custom LoRA {index}",
+            "source": source,
+            "weight": float(weight),
+            "enabled": True,
+        })
     cancel = threading.Event()
     client = MlProcessClient(python=args.worker_python)
     try:
@@ -100,13 +128,21 @@ def main() -> int:
                 {
                     "profile_id": preload.stable_id,
                     "parameters": preload.defaults(),
+                    "lora_adapters": [
+                        adapter.to_dict()
+                        for adapter in preload.default_lora_adapters
+                    ],
                 },
                 cancel,
                 on_progress=print,
             )
         loaded = client.request(
             "load_image_edit",
-            {"profile_id": profile.stable_id, "parameters": parameters},
+            {
+                "profile_id": profile.stable_id,
+                "parameters": parameters,
+                "lora_adapters": lora_adapters,
+            },
             cancel,
             on_progress=print,
         )
@@ -117,7 +153,11 @@ def main() -> int:
         with Image.open(args.input) as source:
             result = client.request(
                 "image_edit",
-                {"profile_id": profile.stable_id, "parameters": parameters},
+                {
+                    "profile_id": profile.stable_id,
+                    "parameters": parameters,
+                    "lora_adapters": lora_adapters,
+                },
                 cancel,
                 images={"image": source.convert("RGB")},
                 on_progress=print,

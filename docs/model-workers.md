@@ -28,7 +28,10 @@ The former feature-specific setup scripts remain compatibility wrappers around
 the shared installer.
 
 `requirements-workers.in` contains the reviewed direct CPU requirements.
-`requirements-workers.txt` is the complete exact Linux lock. Regenerate it
+`requirements-workers.txt` is the complete exact Linux lock. The official
+Depth Anything 3 source and its minimal, exact dependency overlay are pinned
+separately by `setup-workers.sh` and `requirements-workers-da3.txt`. Regenerate
+the main lock
 with:
 
 ```sh
@@ -38,7 +41,8 @@ uv pip compile --python-version 3.11 --python-platform x86_64-manylinux_2_28 \
   requirements-workers.in -o requirements-workers.txt
 ```
 
-All packages install from wheels. The project owns the small Big-LaMa
+The main lock installs from wheels. DA3's minimal overlay currently includes
+the upstream `moviepy` 1.0.3 source distribution. The project owns the small Big-LaMa
 TorchScript adapter directly, so the abandoned `simple-lama-inpainting`
 package no longer forces obsolete NumPy, Pillow, OpenCV, and PyTorch versions.
 `LAMA_MODEL` and `LAMA_MODEL_URL` retain their previous meanings.

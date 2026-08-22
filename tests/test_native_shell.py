@@ -59,6 +59,12 @@ EXPECTED_COMMANDS = (
     "layer.flatten",
     "layer.detect",
     "ai.depth_map",
+    "ai.depth_map.subject",
+    "ai.depth_map.da3_mono",
+    "ai.depth_map.depth_pro",
+    "ai.depth_map.v2_large",
+    "ai.depth_map.v2_small",
+    "ai.depth_point_cloud",
     "generation.3d",
     "generation.3d_cancel",
     "view.3d_light_from_camera",
@@ -90,7 +96,17 @@ def test_ai_menu_contains_depth_map_tool():
         if menu_id == "ai"
     )
 
-    assert ai_menu == ("ai.depth_map",)
+    assert ai_menu == (
+        "ai.depth_map",
+        "ai.depth_map.subject",
+        None,
+        "ai.depth_map.da3_mono",
+        "ai.depth_map.depth_pro",
+        "ai.depth_map.v2_large",
+        "ai.depth_map.v2_small",
+        None,
+        "ai.depth_point_cloud",
+    )
 
 
 def _snapshot_by_id(document):
@@ -295,9 +311,13 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar(
         def __init__(self, widget):
             self.widget = widget
             self.shading_modes = []
+            self.point_color_modes = []
 
         def set_shading_mode(self, mode):
             self.shading_modes.append(mode)
+
+        def set_point_cloud_color_mode(self, mode):
+            self.point_color_modes.append(mode)
 
     canvas = document.create_vstack("TestCanvas")
     canvas.stable_id = "test.canvas"
@@ -538,6 +558,23 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar(
         view.reconstruction_shading_combo.selected_index = 1
         assert mounted_viewport.shading_modes == ["smooth"]
         assert mounted_refine_viewport.shading_modes == ["flat", "smooth"]
+        assert view.reconstruction_point_color_combo.item_count == 2
+        assert [
+            view.reconstruction_point_color_combo.item_text(index)
+            for index in range(view.reconstruction_point_color_combo.item_count)
+        ] == ["Image", "Confidence"]
+        assert view.reconstruction_point_color_combo.widget.enabled is False
+        view.set_reconstruction_point_color_state(
+            True,
+            "confidence",
+            "Confidence: cold low → warm high; P2–P98 1.2…3.4",
+        )
+        assert view.reconstruction_point_color_combo.selected_index == 1
+        assert view.reconstruction_point_color_combo.widget.enabled is True
+        assert view.reconstruction_point_color_legend.visible is True
+        assert "1.2…3.4" in view.reconstruction_point_color_legend.text
+        view.reconstruction_point_color_combo.selected_index = 0
+        assert mounted_viewport.point_color_modes == ["image"]
         selected_stages = []
         view.set_reconstruction_stage_handler(selected_stages.append)
         view._activate_reconstruction_stage(ReconstructionStage.HR_COORDINATES)

@@ -1,9 +1,11 @@
 import numpy as np
+import pytest
 
 from diffusion_editor.app.application import EditorApplication, EngineSet
 from diffusion_editor.app.editor_commands import EditorCommandCoordinator
 from diffusion_editor.generation.types import (
     DepthEstimationResult,
+    DepthValueKind,
     EnginePollEvent,
     SegmentationResult,
 )
@@ -142,7 +144,36 @@ def test_select_background_command_submits_full_composite_segmentation():
     application.close()
 
 
-def test_depth_map_command_adds_undoable_grayscale_layer():
+def _depth_result(
+        height: int,
+        width: int,
+        profile_id: str = "da3-nested-giant-large-1.1",
+        *,
+        with_confidence: bool = False,
+) -> DepthEstimationResult:
+    depth = (
+        np.arange(height * width, dtype=np.float32).reshape((height, width))
+        + 1.0
+    )
+    intrinsics = np.array([
+        [10.0, 0.0, width * 0.5],
+        [0.0, 10.0, height * 0.5],
+        [0.0, 0.0, 1.0],
+    ], dtype=np.float32)
+    return DepthEstimationResult(
+        depth,
+        profile_id=profile_id,
+        value_kind=DepthValueKind.DIRECT_METRIC,
+        intrinsics=intrinsics,
+        confidence=(
+            np.arange(height * width, dtype=np.float32).reshape(
+                (height, width)) + 1.0
+            if with_confidence else None
+        ),
+    )
+
+
+def test_depth_map_command_keeps_float_source_and_adds_one_preview():
     application = _application()
     image = np.full((4, 5, 4), (12, 34, 56, 255), dtype=np.uint8)
     application.layer_stack.init_from_image(image)
@@ -159,10 +190,12 @@ def test_depth_map_command_adds_undoable_grayscale_layer():
     np.testing.assert_array_equal(requests[0].image, image)
     assert application.command_states["ai.depth_map"] == (False, False)
     context = application.depth_controller.pending_context
-    depth = np.arange(20, dtype=np.uint8).reshape((4, 5))
+    # DA3 keeps its native model grid and camera matrix. Only the display
+    # derivative is resized back to the 4x5 document.
+    result = _depth_result(2, 3, with_confidence=True)
     events = [EnginePollEvent(
         task_type="depth",
-        result=DepthEstimationResult(depth),
+        result=result,
         job_id=context.job_id,
     )]
     application.depth_engine.poll_event = (
@@ -172,15 +205,192 @@ def test_depth_map_command_adds_undoable_grayscale_layer():
     application.poll()
 
     assert len(application.layer_stack.all_layers()) == 2
-    layer = application.layer_stack.active_layer
-    assert layer.name == "Depth Map 0"
-    np.testing.assert_array_equal(layer.image[:, :, 0], depth)
-    np.testing.assert_array_equal(layer.image[:, :, 1], depth)
-    np.testing.assert_array_equal(layer.image[:, :, 2], depth)
-    assert np.all(layer.image[:, :, 3] == 255)
-    assert application.status_text.startswith("Depth map created")
+    preview_layer = application.layer_stack.active_layer
+    assert preview_layer.name == (
+        "Depth DA3 Nested 0 Preview (float32 source)"
+    )
+    assert preview_layer.visible is True
+    assert preview_layer.image.shape == (4, 5, 4)
+    assert preview_layer.visible is True
+    assert application.latest_depth_result is result
+    assert application.latest_depth_result.depth_map.dtype == np.float32
+    np.testing.assert_array_equal(
+        application.latest_depth_result.depth_map, result.depth_map)
+    assert application.latest_depth_point_cloud is not None
+    assert application.latest_depth_point_cloud.point_count == 6
+    assert application.latest_depth_point_cloud.source_size == (3, 2)
+    np.testing.assert_array_equal(
+        application.latest_depth_point_cloud.confidence,
+        result.confidence.reshape(-1),
+    )
+    commands.refresh()
+    assert application.command_states["ai.depth_point_cloud"] == (
+        True,
+        False,
+    )
+    assert application.status_text.startswith("DA3 Nested Giant Large 1.1:")
     application.document.undo()
     assert len(application.layer_stack.all_layers()) == 1
+    commands.refresh()
+    assert application.command_states["ai.depth_point_cloud"] == (
+        False,
+        False,
+    )
+    application.document.redo()
+    assert len(application.layer_stack.all_layers()) == 2
+    assert application.layer_stack.active_layer.name == preview_layer.name
+    application.close()
+
+
+def test_depth_preview_reports_when_soft_mask_removes_all_cloud_points():
+    application = _application()
+    image = np.full((4, 5, 4), (12, 34, 56, 255), dtype=np.uint8)
+    application.layer_stack.init_from_image(image)
+    application.layer_stack.selection.data[:] = 0.25
+    requests = []
+    application.depth_engine.submit_request = (
+        lambda request, **_kwargs: requests.append(request) or True
+    )
+    commands = EditorCommandCoordinator(application)
+
+    commands.handlers["ai.depth_map.depth_pro"]()
+    context = application.depth_controller.pending_context
+    assert not hasattr(requests[0], "output_mask")
+    np.testing.assert_array_equal(requests[0].image, image)
+    events = [EnginePollEvent(
+        task_type="depth",
+        result=_depth_result(2, 3, "depth-pro"),
+        job_id=context.job_id,
+    )]
+    application.depth_engine.poll_event = (
+        lambda: events.pop(0) if events else None
+    )
+
+    application.poll()
+    commands.refresh()
+
+    assert application.latest_depth_point_cloud is None, (
+        application.status_text,
+        [layer.name for layer in application.layer_stack.all_layers()],
+    )
+    assert application.latest_depth_point_cloud_error == (
+        "depth point-cloud mask contains no foreground"
+    ), (
+        application.status_text,
+        [layer.name for layer in application.layer_stack.all_layers()],
+    )
+    assert "point cloud unavailable" in application.status_text
+    assert application.command_states["ai.depth_point_cloud"] == (
+        True,
+        False,
+    )
+    application.close()
+
+
+@pytest.mark.parametrize(("command_id", "profile_id"), (
+    ("ai.depth_map", "da3-nested-giant-large-1.1"),
+    ("ai.depth_map.da3_mono", "da3-mono-large"),
+    ("ai.depth_map.depth_pro", "depth-pro"),
+    ("ai.depth_map.v2_large", "v2-large"),
+    ("ai.depth_map.v2_small", "v2-small"),
+))
+def test_depth_map_commands_select_explicit_profile(command_id, profile_id):
+    application = _application()
+    image = np.zeros((4, 5, 4), dtype=np.uint8)
+    image[:, :, 3] = 255
+    application.layer_stack.init_from_image(image)
+    requests = []
+    application.depth_engine.submit_request = (
+        lambda request, **_kwargs: requests.append(request) or True
+    )
+    commands = EditorCommandCoordinator(application)
+
+    commands.handlers[command_id]()
+
+    assert requests[0].profile_id == profile_id
+    application.close()
+
+
+def test_subject_depth_segments_foreground_and_makes_background_transparent():
+    application = _application()
+    image = np.full((4, 5, 4), (12, 34, 56, 255), dtype=np.uint8)
+    application.layer_stack.init_from_image(image)
+    segmentation_requests = []
+    depth_requests = []
+    application.engines.segmentation.submit_request = (
+        lambda request, **_kwargs:
+        segmentation_requests.append(request) or True
+    )
+    application.depth_engine.submit_request = (
+        lambda request, **_kwargs: depth_requests.append(request) or True
+    )
+    commands = EditorCommandCoordinator(application)
+
+    commands.handlers["ai.depth_map.subject"]()
+
+    assert application.status_text == "Isolating subject for depth..."
+    assert len(segmentation_requests) == 1
+    assert depth_requests == []
+    background = np.full((4, 5), 255, dtype=np.uint8)
+    background[:, 1:4] = 0
+    application.engines.segmentation.poll_result = EnginePollEvent(
+        task_type="segmentation",
+        result=SegmentationResult(mask=background),
+    )
+
+    application.poll()
+
+    assert len(depth_requests) == 1
+    foreground = 255 - background
+    assert not hasattr(depth_requests[0], "output_mask")
+    np.testing.assert_array_equal(depth_requests[0].image, image)
+    assert application.layer_stack.selection.is_empty
+
+    depth_result = _depth_result(4, 5)
+    depth_context = application.depth_controller.pending_context
+    depth_events = [EnginePollEvent(
+        task_type="depth",
+        result=depth_result,
+        job_id=depth_context.job_id,
+    )]
+    application.depth_engine.poll_event = (
+        lambda: depth_events.pop(0) if depth_events else None
+    )
+    application.poll()
+
+    depth_layers = [
+        layer for layer in application.layer_stack.all_layers()
+        if layer.name.startswith("Depth DA3 Nested")
+    ]
+    assert len(depth_layers) == 1
+    for layer in depth_layers:
+        np.testing.assert_array_equal(layer.image[:, :, 3], foreground)
+    assert "full-frame inference; output mask applied afterward" in (
+        application.status_text)
+    application.close()
+
+
+def test_subject_depth_can_retry_after_segmentation_error():
+    application = _application()
+    image = np.zeros((4, 5, 4), dtype=np.uint8)
+    image[:, :, 3] = 255
+    application.layer_stack.init_from_image(image)
+    requests = []
+    application.engines.segmentation.submit_request = (
+        lambda request, **_kwargs: requests.append(request) or True
+    )
+    commands = EditorCommandCoordinator(application)
+    commands.handlers["ai.depth_map.subject"]()
+    application.engines.segmentation.poll_result = EnginePollEvent(
+        task_type="segmentation",
+        error="segmentation failed",
+    )
+
+    application.poll()
+    commands.refresh()
+    commands.handlers["ai.depth_map.subject"]()
+
+    assert len(requests) == 2
     application.close()
 
 
