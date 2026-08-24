@@ -93,7 +93,13 @@ def main() -> int:
     keypoint_report = json.loads(keypoint_path.read_text(encoding="utf-8"))
     cache_views = {view["name"]: view for view in keypoint_report["views"]}
     view_names = [camera["name"] for camera in cameras]
-    joint_names = list(shared_module.JOINT_TO_BONE)
+    joint_names = list(shared_module.JOINT_TO_BONE_ENDPOINT)
+    body_joint_indices = [
+        joint_names.index(name) for name in shared_module.BODY_JOINT_NAMES
+    ]
+    foot_joint_indices = [
+        joint_names.index(name) for name in shared_module.FOOT_JOINT_NAMES
+    ]
 
     observations = []
     observation_weights = []
@@ -153,6 +159,11 @@ def main() -> int:
         full_rest = macro.shaped_vertices(full_base, macro_targets, macro_values)
         full_rest = regional_module.apply_regional(
             full_rest, regional_targets, regional_values)
+        reflect_template_forward = bool(
+            shared_report.get("template_forward_policy", {}).get(
+                "reflected_before_pose_fit", False))
+        if reflect_template_forward:
+            full_rest = full_rest * full_rest.new_tensor((1.0, 1.0, -1.0))
         body_rest = full_rest[:body_vertex_count]
     head_indices = [
         torch.tensor(indices, device=device, dtype=torch.long)
@@ -163,17 +174,30 @@ def main() -> int:
     shape_digest_before = _array_digest(
         full_rest.cpu().numpy(), bone_heads.cpu().numpy())
     bone_names = articulation["bone_names"]
-    joint_bone_indices = [
-        bone_names.index(shared_module.JOINT_TO_BONE[name])
-        for name in joint_names
-    ]
-    identity_skin = torch.eye(len(bone_names), device=device, dtype=dtype)
+    rig_data = json.loads(rig_path.read_text(encoding="utf-8"))
+    landmark_vertex_indices = []
+    landmark_bone_indices = []
+    for name in joint_names:
+        bone, endpoint = shared_module.JOINT_TO_BONE_ENDPOINT[name]
+        rig_joint = rig_data["bones"][bone][endpoint]
+        landmark_vertex_indices.append(torch.tensor(
+            rig_data["joints"][rig_joint], device=device, dtype=torch.long))
+        landmark_bone_indices.append(bone_names.index(bone))
+    with torch.no_grad():
+        rest_landmarks = shared_module._shaped_landmarks(
+            full_rest, landmark_vertex_indices)
+    landmark_skin = torch.zeros(
+        (len(joint_names), len(bone_names)), device=device, dtype=dtype)
+    landmark_skin[
+        torch.arange(len(joint_names), device=device),
+        torch.tensor(landmark_bone_indices, device=device),
+    ] = 1.0
     skin_weights = torch.from_numpy(articulation["weights"]).to(device)
     zero_scale = torch.zeros((), device=device)
     zero_translation = torch.zeros(3, device=device)
 
     shared_pose = torch.deg2rad(torch.tensor([
-        shared_report["shared_pose_axis_angle_degrees"][bone]
+        shared_report["shared_pose_axis_angle_degrees"].get(bone, [0.0, 0.0, 0.0])
         for bone in shared_module.POSE_BONES
     ], device=device, dtype=dtype))
     # Limits describe deviations from the common pose, not absolute rotations.
@@ -183,6 +207,7 @@ def main() -> int:
         35.0, 35.0,
         10.0, 10.0,
         20.0, 20.0,
+        30.0, 30.0,
         30.0, 30.0,
     ), device=device, dtype=dtype)[:, None]
     delta_limits = torch.deg2rad(delta_limit_degrees)
@@ -209,12 +234,14 @@ def main() -> int:
     image_heights = torch.tensor(
         [height for _width, height in sizes], device=device, dtype=dtype)
 
-    def posed_joints(pose: torch.Tensor) -> torch.Tensor:
-        all_heads = base.articulate_vertices(
-            bone_heads, bone_heads, articulation["parents"], identity_skin,
+    def posed_local_joints(pose: torch.Tensor) -> torch.Tensor:
+        return base.articulate_vertices(
+            rest_landmarks, bone_heads, articulation["parents"], landmark_skin,
             articulation["pose_bone_indices"], pose,
             zero_scale, zero_translation)
-        local = all_heads[joint_bone_indices]
+
+    def posed_joints(pose: torch.Tensor) -> torch.Tensor:
+        local = posed_local_joints(pose)
         return world_scale * (local @ world_rotation.T) + world_translation
 
     def project(view_index: int, world_joints: torch.Tensor) -> torch.Tensor:
@@ -331,6 +358,22 @@ def main() -> int:
         shared_pixels, observed_pixels, observation_weights_np, view_names)
     refined_overall, refined_per_view = shared_module._metrics(
         refined_pixels, observed_pixels, observation_weights_np, view_names)
+    shared_body_overall, shared_body_per_view = shared_module._metrics(
+        shared_pixels[:, body_joint_indices],
+        observed_pixels[:, body_joint_indices],
+        observation_weights_np[:, body_joint_indices], view_names)
+    refined_body_overall, refined_body_per_view = shared_module._metrics(
+        refined_pixels[:, body_joint_indices],
+        observed_pixels[:, body_joint_indices],
+        observation_weights_np[:, body_joint_indices], view_names)
+    shared_foot_overall, shared_foot_per_view = shared_module._metrics(
+        shared_pixels[:, foot_joint_indices],
+        observed_pixels[:, foot_joint_indices],
+        observation_weights_np[:, foot_joint_indices], view_names)
+    refined_foot_overall, refined_foot_per_view = shared_module._metrics(
+        refined_pixels[:, foot_joint_indices],
+        observed_pixels[:, foot_joint_indices],
+        observation_weights_np[:, foot_joint_indices], view_names)
     shared_grid = shared_module._draw_overlays(
         args.output_dir, "shared", image_paths, view_names, joint_names,
         observed_pixels, shared_pixels, observation_weights_np, shared_per_view)
@@ -339,6 +382,8 @@ def main() -> int:
         observed_pixels, refined_pixels, observation_weights_np, refined_per_view)
 
     faces = np.asarray(faces_np)
+    if reflect_template_forward:
+        faces = faces[:, (0, 2, 1)]
     pose_artifacts = {}
     with torch.no_grad():
         for view_index, view_name in enumerate(view_names):
@@ -382,6 +427,14 @@ def main() -> int:
             "refined_weighted_rms_pixels": after,
             "improvement_pixels": before - after,
             "improvement_percent": 100.0 * (before - after) / before,
+            "body12_shared_weighted_rms_pixels": shared_body_per_view[
+                view_name]["weighted_rms_pixels"],
+            "body12_refined_weighted_rms_pixels": refined_body_per_view[
+                view_name]["weighted_rms_pixels"],
+            "foot_shared_weighted_rms_pixels": shared_foot_per_view[
+                view_name]["weighted_rms_pixels"],
+            "foot_refined_weighted_rms_pixels": refined_foot_per_view[
+                view_name]["weighted_rms_pixels"],
             **pose_delta_summary[view_name],
         }
     pose_degrees = np.rad2deg(per_view_poses_np)
@@ -393,6 +446,11 @@ def main() -> int:
             "one frozen body shape and segment lengths; one independently "
             "refined major-bone pose per generated view"
         ),
+        "template_forward_policy": {
+            "inherited_from_shared_report": True,
+            "reflected_before_pose_fit": reflect_template_forward,
+            "face_winding_reversed_on_export": reflect_template_forward,
+        },
         "frozen_state": {
             "cameras": cameras_frozen,
             "camera_sha256_before": camera_digest_before,
@@ -418,10 +476,26 @@ def main() -> int:
         "shared_reprojection": {
             "overall": shared_overall,
             "per_view": shared_per_view,
+            "body12": {
+                "overall": shared_body_overall,
+                "per_view": shared_body_per_view,
+            },
+            "rigid_foot_targets": {
+                "overall": shared_foot_overall,
+                "per_view": shared_foot_per_view,
+            },
         },
         "refined_reprojection": {
             "overall": refined_overall,
             "per_view": refined_per_view,
+            "body12": {
+                "overall": refined_body_overall,
+                "per_view": refined_body_per_view,
+            },
+            "rigid_foot_targets": {
+                "overall": refined_foot_overall,
+                "per_view": refined_foot_per_view,
+            },
         },
         "optimization": {
             "iterations_per_view": args.iterations_per_view,
