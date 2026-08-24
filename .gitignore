@@ -2,6 +2,7 @@
 .venv-lama/
 .venv-ml/
 .venv-segmentation/
+.venv-pose/
 venv/
 __pycache__/
 *.pyc
@@ -11,6 +12,13 @@ build/
 dist/
 .pytest_cache/
 .termin-sdk
+
+# Downloaded training assets and generated visual inventory.
+data/character-assets/**/*.blend
+data/character-assets/**/previews/
+
+# Large generated canonical-head experiments; keep their small source specs in Git.
+data/canonical-experiments/
 
 .claude/
 .codex/

@@ -10,7 +10,6 @@ from diffusion_editor.generation.image_edit_profiles import (
     FLUX2_KLEIN_PROFILE_ID,
     LEGACY_INSTRUCT_PROFILE_ID,
     QWEN_IMAGE_EDIT_PROFILE_ID,
-    QWEN_MULTIPLE_ANGLES_PROFILE_ID,
     SENSENOVA_U15_PROFILE_ID,
     image_edit_profile,
 )
@@ -140,7 +139,6 @@ def test_failed_image_edit_reload_leaves_backend_unloaded(monkeypatch):
     "profile_id",
     [
         QWEN_IMAGE_EDIT_PROFILE_ID,
-        QWEN_MULTIPLE_ANGLES_PROFILE_ID,
         FLUX2_KLEIN_PROFILE_ID,
     ],
 )
@@ -225,8 +223,7 @@ def test_qwen_multiple_angles_loads_lightning_and_angle_adapters(monkeypatch):
         "diffusers",
         _fake_diffusers(FakeQwenPipeline),
     )
-    parameters = image_edit_profile(
-        QWEN_MULTIPLE_ANGLES_PROFILE_ID).defaults()
+    parameters = image_edit_profile(QWEN_IMAGE_EDIT_PROFILE_ID).defaults()
     parameters.update({
         "model": "fake/qwen-image-edit",
         "device": "cpu",
@@ -254,12 +251,16 @@ def test_qwen_multiple_angles_loads_lightning_and_angle_adapters(monkeypatch):
     )
 
     loaded = backend.load_image_edit({
-        "profile_id": QWEN_MULTIPLE_ANGLES_PROFILE_ID,
+        "profile_id": QWEN_IMAGE_EDIT_PROFILE_ID,
         "parameters": parameters,
         "lora_adapters": adapters,
     })
 
-    assert loaded["profile_id"] == QWEN_MULTIPLE_ANGLES_PROFILE_ID
+    assert loaded["profile_id"] == QWEN_IMAGE_EDIT_PROFILE_ID
+    assert loaded["active_lora_adapters"] == [
+        "image_edit_0_lightning", "image_edit_1_multiple_angles",
+    ]
+    assert loaded["active_lora_weights"] == [1.0, 0.9]
     assert captured["loaded"] == [
         ("/models/lightning.safetensors", "image_edit_0_lightning"),
         (

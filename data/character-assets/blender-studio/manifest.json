@@ -1,0 +1,91 @@
+{
+  "retrieved_at": "2026-08-23",
+  "license": "CC-BY",
+  "publisher": "Blender Foundation / Blender Studio",
+  "assets": [
+    {
+      "id": "snow",
+      "file": "snow.blend",
+      "sha256": "038463b0d793c2a619fbcd93a0220b21191f87079af03698e4056642d7032876",
+      "source": "https://studio.blender.org/characters/snow/v2/",
+      "cohort": "primary"
+    },
+    {
+      "id": "ellie",
+      "file": "ellie.blend",
+      "sha256": "3dd235218725a9e68890073bbeacb4820f9b34db65d44f80c31bb88696a3c54c",
+      "source": "https://studio.blender.org/characters/ellie/v1/",
+      "cohort": "primary"
+    },
+    {
+      "id": "jay",
+      "file": "jay.blend",
+      "sha256": "18383a3d25d68c6a91208e4240f2e4dfe67592739078f18b21cf257be91a8458",
+      "source": "https://studio.blender.org/characters/jay/v1/",
+      "cohort": "primary"
+    },
+    {
+      "id": "phil",
+      "file": "phil.blend",
+      "sha256": "b9671b4add7a7e52000c5dba3ddfa322fb0c0c85abf70ea3ad5fcf6499947e59",
+      "source": "https://studio.blender.org/characters/phil/v1/",
+      "cohort": "primary"
+    },
+    {
+      "id": "rex",
+      "file": "rex.blend",
+      "sha256": "7e0a774da5f309cde4eb9ba313890b554b9fd8d284d2b668a28f72b1380e5335",
+      "source": "https://studio.blender.org/characters/rex/v1/",
+      "cohort": "primary"
+    },
+    {
+      "id": "victoria",
+      "file": "victoria.blend",
+      "sha256": "852dc7bea686db2d59302679609bd0c438ef88936f3684dd193a74b3b292cd6b",
+      "source": "https://studio.blender.org/characters/victoria/v1/",
+      "cohort": "primary"
+    },
+    {
+      "id": "gabby",
+      "file": "gabby.blend",
+      "sha256": "80e0c2e8a7d97746bfa192104f07d36caecd32ff4bfc423f2a7ddbefacc065c4",
+      "source": "https://studio.blender.org/characters/gabby/v3/",
+      "cohort": "secondary-extreme"
+    },
+    {
+      "id": "lunte",
+      "file": "lunte.blend",
+      "sha256": "8c95c3a929dbceae20a0028d6e0066a3c855fe74ccb62829ff84072150f51360",
+      "source": "https://studio.blender.org/characters/lunte/v4/",
+      "cohort": "secondary-extreme"
+    },
+    {
+      "id": "elder_sprite",
+      "file": "elder_sprite.blend",
+      "sha256": "69788a4ca1898da47a9549caa34c3a5c8b636b7a181293d8088ff1dd024cd36d",
+      "source": "https://studio.blender.org/characters/elder-sprite/v1/",
+      "cohort": "secondary-extreme"
+    },
+    {
+      "id": "einar",
+      "file": "einar.blend",
+      "sha256": "1c6663da0a2e9d6822978467c244e9186edc76083bae2414e02f9e695e711f7b",
+      "source": "https://studio.blender.org/characters/einar/v1/",
+      "cohort": "needs-cleanup"
+    },
+    {
+      "id": "phileas",
+      "file": "phileas.blend",
+      "sha256": "9da377750f0db24147ba8a1cac3a459d96b80a71eb914f484360aecb539cdeba",
+      "source": "https://studio.blender.org/characters/phileas/v3/",
+      "cohort": "holdout-nonhumanoid"
+    },
+    {
+      "id": "pip",
+      "file": "pip.blend",
+      "sha256": "c8374273e6ed5cc6af142cb18af4705149338f147d72a555e203caf70466a64e",
+      "source": "https://studio.blender.org/characters/pip/v3/",
+      "cohort": "holdout-nonhumanoid"
+    }
+  ]
+}

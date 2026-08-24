@@ -4,12 +4,14 @@ import math
 
 import numpy as np
 import pytest
+from tcbase import Action
 
 from diffusion_editor.app.native_reconstruction_viewport import (
     _allocate_resource_namespace,
     RECONSTRUCTION_SHADING_MODES,
     _FRAGMENT_SHADER,
     _OrbitCamera,
+    _ViewportSurface,
     _SMOOTH_TEXTURED_VERTEX_SHADER,
     _SMOOTH_VERTEX_SHADER,
     _TEXTURED_FRAGMENT_SHADER,
@@ -19,6 +21,23 @@ from diffusion_editor.app.native_reconstruction_viewport import (
     _should_fit_camera,
     _wireframe_indices,
 )
+
+
+def test_viewport_surface_routes_keys_to_focused_handler() -> None:
+    calls = []
+    surface = _ViewportSurface(_OrbitCamera(), lambda: None)
+    surface.set_key_handler(
+        lambda key, scancode, action, modifiers:
+        calls.append((key, scancode, action, modifiers)) or True
+    )
+
+    assert surface.dispatch_key(262, 17, int(Action.PRESS), 0)
+    assert calls == [(262, 17, int(Action.PRESS), 0)]
+
+    surface.set_key_handler(None)
+    assert not surface.dispatch_key(262, 17, int(Action.PRESS), 0)
+    surface.close()
+    assert not surface.dispatch_key(262, 17, int(Action.PRESS), 0)
 
 
 def test_reconstruction_viewports_get_distinct_mesh_resource_namespaces() -> None:

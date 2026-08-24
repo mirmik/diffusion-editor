@@ -65,6 +65,9 @@ EXPECTED_COMMANDS = (
     "ai.depth_map.v2_large",
     "ai.depth_map.v2_small",
     "ai.depth_point_cloud",
+    "ai.pose.dwpose",
+    "ai.pose.mediapipe",
+    "ai.pose.silhouette",
     "generation.3d",
     "generation.3d_cancel",
     "view.3d_light_from_camera",
@@ -106,6 +109,10 @@ def test_ai_menu_contains_depth_map_tool():
         "ai.depth_map.v2_small",
         None,
         "ai.depth_point_cloud",
+        None,
+        "ai.pose.dwpose",
+        "ai.pose.mediapipe",
+        "ai.pose.silhouette",
     )
 
 

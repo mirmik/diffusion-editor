@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 from pathlib import Path
 import sys
@@ -14,8 +15,9 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from diffusion_editor.generation.image_edit_profiles import (
-    QWEN_MULTIPLE_ANGLES_PROFILE_ID,
+    QWEN_IMAGE_EDIT_PROFILE_ID,
     image_edit_profile,
+    qwen_multiple_angles_lora_adapter,
 )
 from diffusion_editor.workers.ml_backend import RealMlBackend
 
@@ -73,13 +75,20 @@ def main() -> int:
 
     import torch
     from diffusers.pipelines.qwenimage.pipeline_qwenimage_edit_plus import (
+        CONDITION_IMAGE_SIZE,
         calculate_dimensions,
     )
 
-    profile = image_edit_profile(QWEN_MULTIPLE_ANGLES_PROFILE_ID)
+    profile = image_edit_profile(QWEN_IMAGE_EDIT_PROFILE_ID)
     parameters = profile.defaults()
     parameters.update(seed=args.seed, steps=args.steps)
-    adapters = [adapter.to_dict() for adapter in profile.default_lora_adapters]
+    adapters = [
+        adapter.to_dict()
+        for adapter in (
+            *profile.default_lora_adapters,
+            qwen_multiple_angles_lora_adapter(),
+        )
+    ]
     backend = RealMlBackend()
     print("Loading Qwen Multiple Angles...", flush=True)
     loaded = backend.load_image_edit({
@@ -111,6 +120,55 @@ def main() -> int:
     grid_width = width // pipe.vae_scale_factor // 2
     grid_height = height // pipe.vae_scale_factor // 2
     target_tokens = grid_width * grid_height
+
+    elevation_degrees, elevation_descriptor = ELEVATIONS[args.elevation]
+    prompts = {
+        azimuth: (
+            f"<sks> {AZIMUTHS[azimuth]} {elevation_descriptor} medium shot"
+        )
+        for azimuth in azimuths
+    }
+    condition_images = []
+    for image in (front, back):
+        condition_width, condition_height = calculate_dimensions(
+            CONDITION_IMAGE_SIZE, image.width / image.height
+        )
+        condition_images.append(
+            pipe.image_processor.resize(
+                image, condition_height, condition_width
+            )
+        )
+    prompt_cache = {}
+    # Qwen-VL plus its two reference images is itself within a few MiB of the
+    # 32-GiB VRAM ceiling.  Conditioning runs only once per requested view, so
+    # favor deterministic low-memory layerwise offload here.
+    pipe.enable_sequential_cpu_offload()
+    for azimuth in azimuths:
+        print(f"Encoding conditioning for {azimuth:03d}°...", flush=True)
+        embeds, mask = pipe.encode_prompt(
+            image=condition_images,
+            prompt=prompts[azimuth],
+            device=pipe._execution_device,
+            num_images_per_prompt=1,
+            max_sequence_length=int(parameters["max_sequence_length"]),
+        )
+        prompt_cache[azimuth] = (
+            embeds.detach(),
+            mask.detach() if mask is not None else None,
+        )
+        pipe.maybe_free_model_hooks()
+
+    # The visual-language encoder is no longer needed after prompt/image
+    # conditioning has been materialized.  Releasing it gives the all-block
+    # float32 capture enough host-RAM headroom on a 64-GiB workstation.
+    pipe.maybe_free_model_hooks()
+    pipe.remove_all_hooks()
+    text_encoder = pipe.text_encoder
+    pipe.text_encoder = None
+    del text_encoder
+    gc.collect()
+    torch.cuda.empty_cache()
+    pipe.enable_sequential_cpu_offload()
 
     capture: dict[str, object] = {
         "enabled": False,
@@ -177,12 +235,9 @@ def main() -> int:
         ))
 
     manifest_views = []
-    elevation_degrees, elevation_descriptor = ELEVATIONS[args.elevation]
     try:
         for azimuth in azimuths:
-            prompt = (
-                f"<sks> {AZIMUTHS[azimuth]} {elevation_descriptor} medium shot"
-            )
+            prompt = prompts[azimuth]
             capture["enabled"] = True
             capture["step_by_timestep"] = {}
             capture["mods"] = {}
@@ -213,21 +268,24 @@ def main() -> int:
                 dtype=np.float32,
                 shape=(len(blocks), int(transformer.inner_dim)),
             )
-            view_parameters = dict(parameters)
-            view_parameters["prompt"] = prompt
             print(
                 f"Generating and capturing {args.elevation}/{azimuth:03d}°...",
                 flush=True,
             )
-            result, result_seed, _provenance = backend.image_edit(
-                {
-                    "profile_id": profile.stable_id,
-                    "parameters": view_parameters,
-                    "lora_adapters": adapters,
-                },
-                front,
-                back,
-            )
+            prompt_embeds, prompt_mask = prompt_cache[azimuth]
+            result = pipe(
+                image=[front, back],
+                prompt_embeds=prompt_embeds,
+                prompt_embeds_mask=prompt_mask,
+                width=width,
+                height=height,
+                num_inference_steps=args.steps,
+                generator=torch.Generator(device="cpu").manual_seed(args.seed),
+                true_cfg_scale=float(parameters["true_cfg_scale"]),
+                guidance_scale=float(parameters["guidance_scale"]),
+                max_sequence_length=int(parameters["max_sequence_length"]),
+            ).images[0]
+            result_seed = args.seed
             missing = sorted(set(blocks) - capture["captured"])
             if missing:
                 raise RuntimeError(f"feature hooks did not capture blocks: {missing}")

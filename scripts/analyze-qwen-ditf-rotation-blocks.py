@@ -21,7 +21,16 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--min-similarity", type=float, default=0.40)
     parser.add_argument("--ransac-threshold", type=float, default=2.0)
-    parser.add_argument("--mask-erosion", type=int, default=3)
+    parser.add_argument(
+        "--mask-mode",
+        choices=("foreground", "subject", "full"),
+        default="foreground",
+        help=(
+            "foreground keeps every non-green object, including room rails; "
+            "subject selects one connected component; full keeps every token"
+        ),
+    )
+    parser.add_argument("--mask-erosion", type=int, default=0)
     return parser.parse_args()
 
 
@@ -54,6 +63,18 @@ def _grid_points(
         ),
         axis=1,
     )
+
+
+def _foreground_mask(rgb: np.ndarray) -> np.ndarray:
+    values = rgb.astype(np.int16)
+    red, green, blue = values[..., 0], values[..., 1], values[..., 2]
+    green_screen = (
+        (green - red >= 12)
+        & (green - blue >= 12)
+        & (green * 100 >= red * 112)
+        & (green * 100 >= blue * 112)
+    )
+    return ~green_screen
 
 
 def _mutual_matches(
@@ -127,13 +148,23 @@ def main() -> int:
     subject_mask = helpers["_subject_mask"]
     estimate_pair = helpers["_estimate_pair"]
     draw_pair = helpers["_draw_pair"]
+    if args.mask_mode == "foreground":
+        full_masks = [_foreground_mask(image) for image in images]
+    elif args.mask_mode == "subject":
+        full_masks = [
+            subject_mask(image, args.mask_erosion) for image in images
+        ]
+    else:
+        full_masks = [
+            np.ones(image.shape[:2], dtype=bool) for image in images
+        ]
     masks = [
         cv2.resize(
-            subject_mask(image, args.mask_erosion).astype(np.uint8),
+            mask.astype(np.uint8),
             grid,
             interpolation=cv2.INTER_NEAREST,
         ).astype(bool)
-        for image in images
+        for mask in full_masks
     ]
     focal = (0.5 * width) / np.tan(np.radians(34.0) * 0.5)
     intrinsics = np.array(
@@ -146,8 +177,7 @@ def main() -> int:
     )
     device = torch.device(args.device)
     reports = []
-    panels = []
-    adaln_panels = []
+    visual_cache = {}
 
     for block_index in blocks:
         raw_maps = [
@@ -218,32 +248,9 @@ def main() -> int:
                 **geometry,
             }
             reports.append(report)
-            visualization = draw_pair(
-                images[0],
-                images[1],
-                points0,
-                points1,
-                inliers,
-                inliers,
-                (
-                    f"Qwen block {block_index} {variant} · elevated "
-                    f"{views[0]['azimuth_degrees']} -> "
-                    f"{views[1]['azimuth_degrees']}"
-                ),
-                (
-                    f"green=MAGSAC hypothesis, not ground truth · MNN "
-                    f"{len(ids0)} · inliers {int(inliers.sum())} · "
-                    f"same-row {report['same_row_ratio']:.1%}"
-                ),
+            visual_cache[(block_index, variant)] = (
+                points0, points1, inliers, report
             )
-            visualization.save(
-                args.output_dir / f"block-{block_index:02d}-{variant}.png"
-            )
-            panel = visualization.copy()
-            panel.thumbnail((960, 544))
-            panels.append(panel)
-            if variant == "adaln":
-                adaln_panels.append(panel.copy())
             print(
                 f"block {block_index:02d} {variant:5s}: MNN={len(ids0):4d} "
                 f"MAGSAC={int(inliers.sum()):4d} "
@@ -252,24 +259,126 @@ def main() -> int:
                 flush=True,
             )
 
-    sheet = Image.new("RGB", (1920, len(blocks) * 544), (8, 8, 8))
-    for index, panel in enumerate(panels):
-        x = (index % 2) * 960 + (960 - panel.width) // 2
-        y = (index // 2) * 544 + (544 - panel.height) // 2
-        sheet.paste(panel, (x, y))
-    sheet.save(args.output_dir / "contact-raw-vs-adaln.png")
+    def render(block_index: int, variant: str) -> Image.Image:
+        points0, points1, inliers, report = visual_cache[(block_index, variant)]
+        return draw_pair(
+            images[0],
+            images[1],
+            points0,
+            points1,
+            inliers,
+            inliers,
+            (
+                f"Qwen block {block_index} {variant} · elevated "
+                f"{views[0]['azimuth_degrees']} -> "
+                f"{views[1]['azimuth_degrees']}"
+            ),
+            (
+                f"green=MAGSAC hypothesis, not ground truth · MNN "
+                f"{report['match_count']} · inliers "
+                f"{report['magsac_inlier_count']} · same-row "
+                f"{report['same_row_ratio']:.1%}"
+            ),
+        )
 
-    adaln_sheet = Image.new("RGB", (1920, 1088), (8, 8, 8))
-    for index, panel in enumerate(adaln_panels):
-        x = (index % 2) * 960 + (960 - panel.width) // 2
-        y = (index // 2) * 544 + (544 - panel.height) // 2
+    adaln_reports = [
+        report for report in reports
+        if report["variant"] == "adaln" and report["match_count"] >= 100
+    ]
+    ranked = sorted(adaln_reports, key=lambda report: report["same_row_ratio"])
+    fixed = [value for value in (0, 15, 30, 45, 59) if value in blocks]
+    selected_blocks = sorted(set(fixed + [r["block"] for r in ranked[:5]]))
+
+    # A compact atlas keeps every block inspectable without creating a
+    # 32,000-pixel-tall contact sheet. Full-resolution panels are retained for
+    # the characteristic blocks and the five least row-locked candidates.
+    columns = 5
+    cell_width, cell_height = 384, 218
+    rows = (len(blocks) + columns - 1) // columns
+    adaln_sheet = Image.new(
+        "RGB", (columns * cell_width, rows * cell_height), (8, 8, 8)
+    )
+    for index, block_index in enumerate(blocks):
+        panel = render(block_index, "adaln")
+        panel.thumbnail((cell_width, cell_height))
+        x = (index % columns) * cell_width + (cell_width - panel.width) // 2
+        y = (index // columns) * cell_height + (cell_height - panel.height) // 2
         adaln_sheet.paste(panel, (x, y))
-    adaln_sheet.save(args.output_dir / "contact-adaln-blocks.png")
+    adaln_sheet.save(args.output_dir / "contact-adaln-all-blocks.png")
+
+    selected_sheet = Image.new(
+        "RGB", (1920, len(selected_blocks) * 544), (8, 8, 8)
+    )
+    for row, block_index in enumerate(selected_blocks):
+        for column, variant in enumerate(("raw", "adaln")):
+            visualization = render(block_index, variant)
+            visualization.save(
+                args.output_dir / f"block-{block_index:02d}-{variant}.png"
+            )
+            panel = visualization.copy()
+            panel.thumbnail((960, 544))
+            x = column * 960 + (960 - panel.width) // 2
+            y = row * 544 + (544 - panel.height) // 2
+            selected_sheet.paste(panel, (x, y))
+    selected_sheet.save(args.output_dir / "contact-selected-raw-vs-adaln.png")
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    figure, axes = plt.subplots(2, 2, figsize=(14, 9), sharex=True)
+    colors = {"raw": "#d95f02", "adaln": "#1b9e77"}
+    for variant in ("raw", "adaln"):
+        variant_reports = sorted(
+            (report for report in reports if report["variant"] == variant),
+            key=lambda report: report["block"],
+        )
+        x = [report["block"] for report in variant_reports]
+        axes[0, 0].plot(
+            x, [report["same_row_ratio"] for report in variant_reports],
+            label=variant, color=colors[variant],
+        )
+        axes[0, 1].plot(
+            x, [report["match_count"] for report in variant_reports],
+            label=variant, color=colors[variant],
+        )
+        axes[1, 0].plot(
+            x, [report["magsac_inlier_count"] for report in variant_reports],
+            label=variant, color=colors[variant],
+        )
+        axes[1, 1].plot(
+            x,
+            [
+                report.get("estimated_rotation_degrees")
+                if report.get("estimated_rotation_degrees") is not None
+                else np.nan
+                for report in variant_reports
+            ],
+            label=variant,
+            color=colors[variant],
+        )
+    axes[0, 0].set_title("Same-row ratio (lower = less position lock)")
+    axes[0, 1].set_title("Reciprocal NN matches")
+    axes[1, 0].set_title("MAGSAC inliers (hypotheses, not GT)")
+    axes[1, 1].set_title("Recovered rotation, degrees")
+    axes[1, 1].axhline(45.0, color="#7570b3", linestyle="--", label="nominal 45°")
+    for axis in axes.flat:
+        axis.grid(alpha=0.25)
+        axis.set_xlabel("Qwen transformer block")
+        axis.legend()
+    figure.tight_layout()
+    figure.savefig(args.output_dir / "block-metrics.png", dpi=160)
+    plt.close(figure)
 
     summary = {
         "capture_manifest": str(manifest_path.resolve()),
         "min_similarity": args.min_similarity,
         "ransac_threshold": args.ransac_threshold,
+        "mask_mode": args.mask_mode,
+        "mask_erosion": args.mask_erosion,
+        "selected_blocks": selected_blocks,
+        "least_row_locked_adaln_blocks": [r["block"] for r in ranked[:10]],
         "reports": reports,
     }
     (args.output_dir / "summary.json").write_text(

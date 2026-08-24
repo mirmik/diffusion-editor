@@ -1,0 +1,53 @@
+{
+  "created_at": "2026-08-23",
+  "storage_root": "/home/mirmik/mnt-nvme/character-assets/incoming",
+  "sources": [
+    {
+      "id": "quaternius-ultimate-animated-character-pack",
+      "publisher": "Quaternius",
+      "source_page": "https://quaternius.com/packs/ultimatedanimatedcharacter.html",
+      "download_folder": "https://drive.google.com/drive/folders/1X0armnO9EePmnQwP5EJHxpCiuucwG_uQ",
+      "license": "CC0",
+      "format": "Blend",
+      "asset_count": 52,
+      "local_path": "/home/mirmik/mnt-nvme/character-assets/incoming/quaternius-ultimate",
+      "content_digest": {
+        "algorithm": "sha256",
+        "value": "4fe146a502e78f93ef3062e5d58f0918df69f96e4ce9b110b7d0e9685900676d",
+        "definition": "sha256 of the sorted sha256sum lines after removing the common absolute directory prefix"
+      },
+      "preview_sheet": "data/character-assets/quaternius-ultimate/previews/contact-sheet.png",
+      "status": "downloaded and previewed; training subset not selected"
+    },
+    {
+      "id": "opengameart-character-pack1",
+      "publisher": "kuniklo / OpenGameArt",
+      "source_page": "https://opengameart.org/content/character-pack1",
+      "download_url": "https://opengameart.org/sites/default/files/modelspack1_1.zip",
+      "license": "CC0",
+      "format": "Blend in ZIP",
+      "identity_count": 20,
+      "variants_per_identity": 4,
+      "archive_sha256": "2e520acc289ab094db41bbed477b34053d83c3dce83b869f30d9bf28807affc7",
+      "local_archive": "/home/mirmik/mnt-nvme/character-assets/incoming/opengameart-character-pack1/modelspack1.zip",
+      "local_extracted": "/home/mirmik/mnt-nvme/character-assets/incoming/opengameart-character-pack1/extracted/modelspack1",
+      "preview_sheet": "data/character-assets/opengameart-character-pack1/previews/contact-sheet.png",
+      "status": "downloaded and previewed; one of four scene variants must be isolated before use"
+    },
+    {
+      "id": "opengameart-low-poly-human-pack",
+      "publisher": "8tibGames / OpenGameArt",
+      "source_page": "https://opengameart.org/content/low-poly-human-pack",
+      "download_url": "https://opengameart.org/sites/default/files/low_poly_h_pack.7z",
+      "license": "CC0",
+      "format": "Blend in 7z",
+      "rigged_identity_count": 4,
+      "unrigged_base_count": 2,
+      "archive_sha256": "42d048ccec8a78112f49f9610a4a466ba15b7d5f62b3853d0a202649d14efc23",
+      "local_archive": "/home/mirmik/mnt-nvme/character-assets/incoming/opengameart-low-poly-human/low_poly_h_pack.7z",
+      "local_extracted": "/home/mirmik/mnt-nvme/character-assets/incoming/opengameart-low-poly-human/extracted",
+      "preview_sheet": "data/character-assets/opengameart-low-poly-human/previews/all/az000.png",
+      "status": "downloaded and previewed as one scene; identities must be isolated before use"
+    }
+  ]
+}

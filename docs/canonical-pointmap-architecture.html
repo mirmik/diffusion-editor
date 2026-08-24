@@ -1,0 +1,625 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Canonical Point Map — текущая архитектура</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b1018;
+      --panel: #121a26;
+      --panel-2: #182333;
+      --line: #2b3a4f;
+      --text: #e9f0f8;
+      --muted: #9fb0c5;
+      --blue: #55a7ff;
+      --blue-soft: #173c62;
+      --violet: #bb8cff;
+      --violet-soft: #39255b;
+      --green: #65d59a;
+      --green-soft: #173f31;
+      --orange: #ffb45e;
+      --orange-soft: #52351a;
+      --red: #ff7b84;
+      --red-soft: #4b2329;
+      --cyan: #61d8e6;
+      --shadow: 0 18px 55px rgba(0, 0, 0, .28);
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 15% -10%, rgba(85,167,255,.12), transparent 34rem),
+        radial-gradient(circle at 90% 12%, rgba(187,140,255,.10), transparent 30rem),
+        var(--bg);
+      color: var(--text);
+      font: 16px/1.58 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+        "Segoe UI", sans-serif;
+    }
+
+    a { color: var(--cyan); }
+    code, .mono {
+      font-family: "JetBrains Mono", "Cascadia Code", ui-monospace, SFMono-Regular,
+        Menlo, Consolas, monospace;
+    }
+    code {
+      color: #cce5ff;
+      background: rgba(85,167,255,.09);
+      border: 1px solid rgba(85,167,255,.16);
+      border-radius: 6px;
+      padding: .08rem .34rem;
+    }
+
+    .page { max-width: 1500px; margin: 0 auto; padding: 0 28px 80px; }
+    .hero {
+      padding: 72px 0 42px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(300px, 420px);
+      gap: 42px;
+      align-items: end;
+    }
+    .eyebrow {
+      color: var(--blue);
+      text-transform: uppercase;
+      letter-spacing: .14em;
+      font-size: .78rem;
+      font-weight: 800;
+      margin-bottom: 12px;
+    }
+    h1 { margin: 0; font-size: clamp(2.35rem, 5vw, 5rem); line-height: .98; letter-spacing: -.055em; }
+    h1 span { color: var(--green); }
+    .lede { max-width: 900px; color: #c4d1e0; font-size: 1.15rem; margin: 24px 0 0; }
+    .hero-card {
+      background: linear-gradient(145deg, rgba(24,35,51,.95), rgba(15,23,34,.95));
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 24px;
+      box-shadow: var(--shadow);
+    }
+    .hero-card .label { color: var(--muted); font-size: .82rem; text-transform: uppercase; letter-spacing: .1em; }
+    .hero-card .model { font-size: 1.45rem; font-weight: 800; margin: 4px 0 15px; }
+    .path { word-break: break-all; color: #b8c7d9; font-size: .78rem; line-height: 1.5; }
+
+    .badge-row { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 22px; }
+    .badge {
+      display: inline-flex; align-items: center; gap: 7px;
+      padding: 7px 11px; border-radius: 999px; border: 1px solid var(--line);
+      background: rgba(18,26,38,.86); color: #c8d5e4; font-size: .82rem; font-weight: 700;
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 14px var(--green); }
+    .dot.warn { background: var(--orange); box-shadow: 0 0 14px var(--orange); }
+    .dot.off { background: var(--red); box-shadow: none; }
+
+    nav {
+      position: sticky; top: 0; z-index: 10;
+      margin: 0 -28px 38px; padding: 12px 28px;
+      display: flex; gap: 8px; overflow-x: auto;
+      background: rgba(11,16,24,.88); backdrop-filter: blur(16px);
+      border-top: 1px solid rgba(255,255,255,.04);
+      border-bottom: 1px solid var(--line);
+    }
+    nav a { color: #b8c6d7; text-decoration: none; white-space: nowrap; padding: 7px 11px; border-radius: 8px; font-size: .86rem; }
+    nav a:hover { background: var(--panel-2); color: white; }
+
+    section { margin: 66px 0; scroll-margin-top: 75px; }
+    .section-head { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 22px; }
+    .section-head h2 { margin: 0; font-size: clamp(1.75rem, 3vw, 2.55rem); letter-spacing: -.035em; }
+    .section-head p { margin: 0; max-width: 720px; color: var(--muted); }
+
+    .diagram-shell {
+      overflow-x: auto; border: 1px solid var(--line); border-radius: 20px;
+      background: linear-gradient(160deg, rgba(18,26,38,.96), rgba(10,16,24,.96));
+      box-shadow: var(--shadow); padding: 18px;
+    }
+    svg { min-width: 1100px; width: 100%; height: auto; display: block; }
+    svg text { font-family: Inter, ui-sans-serif, system-ui, sans-serif; fill: var(--text); }
+    svg .muted { fill: var(--muted); }
+    svg .box { stroke-width: 1.5; rx: 14; }
+    svg .input { fill: #152942; stroke: #3c78b6; }
+    svg .qwen { fill: #34234f; stroke: #8e66c5; }
+    svg .dit { fill: #173b5e; stroke: #3b86ca; }
+    svg .head { fill: #183d31; stroke: #4fac7c; }
+    svg .output { fill: #50351c; stroke: #c68a43; }
+    svg .rejected { fill: #422329; stroke: #c85d69; stroke-dasharray: 9 7; }
+    svg .arrow { stroke: #8195ad; stroke-width: 2.2; fill: none; marker-end: url(#arrow); }
+    svg .arrow-blue { stroke: var(--blue); stroke-width: 2.3; fill: none; marker-end: url(#arrowBlue); }
+    svg .arrow-green { stroke: var(--green); stroke-width: 2.3; fill: none; marker-end: url(#arrowGreen); }
+    svg .skip { stroke: #67849e; stroke-width: 1.7; stroke-dasharray: 6 6; fill: none; marker-end: url(#arrow); }
+    svg .cross { stroke: var(--red); stroke-width: 5; }
+
+    .grid { display: grid; gap: 18px; }
+    .grid.cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .card {
+      background: rgba(18,26,38,.88); border: 1px solid var(--line); border-radius: 16px;
+      padding: 20px; min-width: 0;
+    }
+    .card h3 { margin: 0 0 8px; font-size: 1.02rem; }
+    .card p { margin: 0; color: var(--muted); }
+    .metric { font-size: 1.8rem; font-weight: 850; letter-spacing: -.04em; color: var(--green); }
+    .metric.blue { color: var(--blue); }
+    .metric.violet { color: var(--violet); }
+    .metric.orange { color: var(--orange); }
+    .caption { color: var(--muted); font-size: .84rem; margin-top: 12px; }
+
+    table { width: 100%; border-collapse: collapse; background: rgba(18,26,38,.76); border: 1px solid var(--line); }
+    th, td { padding: 13px 15px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { color: #cfdaea; background: rgba(24,35,51,.9); font-size: .82rem; text-transform: uppercase; letter-spacing: .06em; }
+    td { color: #b9c8d9; }
+    tr:last-child td { border-bottom: 0; }
+    td strong { color: var(--text); }
+
+    .callout { border-left: 4px solid var(--orange); background: rgba(82,53,26,.34); padding: 18px 20px; border-radius: 0 12px 12px 0; color: #e8d2b8; }
+    .callout.good { border-color: var(--green); background: rgba(23,63,49,.38); color: #c7ead8; }
+    .callout.bad { border-color: var(--red); background: rgba(75,35,41,.40); color: #efc6ca; }
+    .callout strong { color: white; }
+    .stack { display: grid; gap: 12px; }
+    .step { display: grid; grid-template-columns: 38px 1fr; gap: 12px; align-items: start; }
+    .num { width: 32px; height: 32px; border-radius: 10px; display: grid; place-items: center; background: var(--blue-soft); color: #a9d4ff; font-weight: 850; }
+    .step h3 { margin: 2px 0 4px; font-size: 1rem; }
+    .step p { margin: 0; color: var(--muted); }
+
+    details { border: 1px solid var(--line); border-radius: 12px; background: rgba(18,26,38,.7); padding: 0 16px; }
+    summary { cursor: pointer; font-weight: 750; padding: 14px 0; }
+    details > div { padding: 0 0 16px; color: var(--muted); }
+    ul { margin: 9px 0 0; padding-left: 20px; }
+    li + li { margin-top: 7px; }
+
+    .legend { display: flex; flex-wrap: wrap; gap: 14px; margin: 0 0 14px; color: var(--muted); font-size: .82rem; }
+    .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+    footer { margin-top: 80px; padding-top: 24px; border-top: 1px solid var(--line); color: var(--muted); font-size: .84rem; }
+
+    @media (max-width: 1000px) {
+      .hero { grid-template-columns: 1fr; }
+      .grid.cols-4, .grid.cols-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .section-head { display: block; }
+      .section-head p { margin-top: 8px; }
+    }
+    @media (max-width: 650px) {
+      .page { padding-left: 16px; padding-right: 16px; }
+      nav { margin-left: -16px; margin-right: -16px; padding-left: 16px; padding-right: 16px; }
+      .grid.cols-4, .grid.cols-3, .grid.cols-2 { grid-template-columns: 1fr; }
+      .hero { padding-top: 42px; }
+      th, td { padding: 10px; }
+    }
+    @media print {
+      :root { color-scheme: light; --bg:#fff; --panel:#fff; --panel-2:#f3f6fa; --line:#cbd5e1; --text:#172033; --muted:#526174; }
+      body { background:#fff; }
+      nav { display:none; }
+      .page { max-width:none; padding:0 12mm; }
+      .hero { padding-top:18mm; }
+      .diagram-shell, .card, table, details { box-shadow:none; break-inside:avoid; }
+      svg { min-width:0; }
+    }
+  </style>
+</head>
+<body>
+<main class="page">
+  <header class="hero">
+    <div>
+      <div class="eyebrow">Diffusion Editor · 3D reconstruction research</div>
+      <h1>Canonical <span>Point Map</span></h1>
+      <p class="lede">
+        Текущая архитектура восстановления канонической 3D-геометрии персонажа
+        из ракурсов, генерируемых Qwen Image Edit. Документ отделяет выбранную
+        рабочую голову от экспериментальной VL-ветви, которая не прошла абляции.
+      </p>
+      <div class="badge-row">
+        <span class="badge"><span class="dot"></span> выбрана multiscale-v2</span>
+        <span class="badge"><span class="dot warn"></span> исследовательский прототип</span>
+        <span class="badge"><span class="dot off"></span> final-VL fusion отклонена</span>
+      </div>
+    </div>
+    <aside class="hero-card">
+      <div class="label">Текущий checkpoint</div>
+      <div class="model mono">multiscale-v2 · 12,778,159 параметров</div>
+      <div class="path mono">/home/mirmik/mnt-nvme/canonical-experiments/openassets17-2026-08-23/training/openassets17-multiscale-v2-finetune/head.pt</div>
+    </aside>
+  </header>
+
+  <nav aria-label="Оглавление">
+    <a href="#summary">Коротко</a>
+    <a href="#pipeline">Весь тракт</a>
+    <a href="#head">Голова</a>
+    <a href="#contracts">Тензоры</a>
+    <a href="#training">Обучение</a>
+    <a href="#cloud">Облако</a>
+    <a href="#vl">VL-эксперимент</a>
+    <a href="#limits">Ограничения</a>
+    <a href="#code">Код</a>
+  </nav>
+
+  <section id="summary">
+    <div class="section-head">
+      <h2>Архитектура в четырёх числах</h2>
+      <p>Голова не восстанавливает mesh напрямую. Она выдаёт каноническую 3D-точку для каждого пикселя конкретного ракурса.</p>
+    </div>
+    <div class="grid cols-4">
+      <article class="card"><div class="metric blue">4 × 64² × 3072</div><h3>Признаки DiT</h3><p>Target-токены блоков 15, 30, 45 и 59.</p></article>
+      <article class="card"><div class="metric violet">64 → 16 → 256</div><h3>Multiscale</h3><p>Сжатие для глобального контекста и декодирование с skip-связями.</p></article>
+      <article class="card"><div class="metric">5 каналов</div><h3>Выход на пиксель</h3><p>XYZ, mask logit и оценка логарифма ошибки.</p></article>
+      <article class="card"><div class="metric orange">24 вида × 4 шага</div><h3>Обучающие состояния</h3><p>На идентичность: 8 азимутов, 3 высоты камеры, 4 denoising state.</p></article>
+    </div>
+  </section>
+
+  <section id="pipeline">
+    <div class="section-head">
+      <h2>Полный тракт</h2>
+      <p>Qwen Image Edit одновременно создаёт целевой ракурс и предоставляет внутренние признаки. Голова читает только target-часть последовательности.</p>
+    </div>
+    <div class="legend">
+      <span><i style="background:#152942"></i>входы</span>
+      <span><i style="background:#34234f"></i>Qwen2.5-VL</span>
+      <span><i style="background:#173b5e"></i>diffusion transformer</span>
+      <span><i style="background:#183d31"></i>наша голова</span>
+      <span><i style="background:#50351c"></i>геометрический результат</span>
+    </div>
+    <div class="diagram-shell">
+      <svg viewBox="0 0 1440 650" role="img" aria-labelledby="pipelineTitle pipelineDesc">
+        <title id="pipelineTitle">Полный тракт Qwen Image Edit и canonical point-map головы</title>
+        <desc id="pipelineDesc">Front, back и описание угла проходят через Qwen2.5-VL и VAE, затем diffusion transformer. Из блоков 15, 30, 45 и 59 извлекаются target-токены, из которых голова получает point map и затем облако точек.</desc>
+        <defs>
+          <marker id="arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#8195ad"/></marker>
+          <marker id="arrowBlue" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#55a7ff"/></marker>
+          <marker id="arrowGreen" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#65d59a"/></marker>
+        </defs>
+
+        <text x="32" y="36" font-size="15" font-weight="800" class="muted">ВХОДНОЙ КОНТРАКТ</text>
+        <rect class="box input" x="30" y="62" width="190" height="92"/>
+        <text x="52" y="93" font-size="18" font-weight="800">Front image</text>
+        <text x="52" y="120" font-size="14" class="muted">персонаж · 0°</text>
+        <text x="52" y="141" font-size="13" class="muted">RGB, чёрный фон</text>
+
+        <rect class="box input" x="30" y="178" width="190" height="92"/>
+        <text x="52" y="209" font-size="18" font-weight="800">Back image</text>
+        <text x="52" y="236" font-size="14" class="muted">персонаж · 180°</text>
+        <text x="52" y="257" font-size="13" class="muted">RGB, чёрный фон</text>
+
+        <rect class="box input" x="30" y="294" width="190" height="112"/>
+        <text x="52" y="325" font-size="18" font-weight="800">View request</text>
+        <text x="52" y="352" font-size="14" class="muted">азимут + elevation</text>
+        <text x="52" y="375" font-size="13" class="muted">например 45°, eye-level</text>
+        <text x="52" y="396" font-size="13" class="muted">+ camera calibration</text>
+
+        <rect class="box qwen" x="286" y="70" width="238" height="190"/>
+        <text x="311" y="105" font-size="20" font-weight="850">Qwen2.5-VL</text>
+        <text x="311" y="134" font-size="14" class="muted">2 изображения + инструкция</text>
+        <rect x="310" y="156" width="190" height="72" rx="9" fill="#251b38" stroke="#65488d"/>
+        <text x="326" y="183" font-size="14" font-weight="700">prompt embeddings</text>
+        <text x="326" y="207" font-size="13" class="muted">семантика front/back/угла</text>
+
+        <rect class="box qwen" x="286" y="294" width="238" height="112"/>
+        <text x="311" y="329" font-size="19" font-weight="800">Qwen VAE</text>
+        <text x="311" y="357" font-size="14" class="muted">front/back → source latents</text>
+        <text x="311" y="382" font-size="13" class="muted">target → noisy latent stream</text>
+
+        <path class="arrow" d="M220 108 H286"/>
+        <path class="arrow" d="M220 224 C250 224 250 160 286 160"/>
+        <path class="arrow" d="M220 346 H286"/>
+        <path class="arrow" d="M220 108 C252 108 252 320 286 320"/>
+        <path class="arrow" d="M220 224 C254 224 254 366 286 366"/>
+
+        <rect class="box dit" x="586" y="52" width="456" height="430"/>
+        <text x="616" y="91" font-size="23" font-weight="850">Qwen Image diffusion transformer</text>
+        <text x="616" y="119" font-size="14" class="muted">60 joint transformer blocks · sequence order:</text>
+        <rect x="616" y="140" width="116" height="54" rx="9" fill="#24557f" stroke="#4f9adc"/>
+        <text x="641" y="171" font-size="14" font-weight="750">TARGET</text>
+        <rect x="742" y="140" width="116" height="54" rx="9" fill="#193b59" stroke="#47779e"/>
+        <text x="770" y="171" font-size="14" font-weight="750">FRONT</text>
+        <rect x="868" y="140" width="116" height="54" rx="9" fill="#193b59" stroke="#47779e"/>
+        <text x="900" y="171" font-size="14" font-weight="750">BACK</text>
+
+        <text x="616" y="229" font-size="15" font-weight="800">Denoising trajectory</text>
+        <rect x="616" y="248" width="368" height="58" rx="11" fill="#102d48" stroke="#356d9c"/>
+        <text x="641" y="273" font-size="13" class="muted">4 FlowMatch состояния</text>
+        <text x="641" y="294" font-size="14">noise → structure → final latent</text>
+
+        <text x="616" y="344" font-size="15" font-weight="800">Readout hooks: img_norm2</text>
+        <g>
+          <rect x="616" y="363" width="78" height="50" rx="9" fill="#214d75" stroke="#55a7ff"/><text x="638" y="394" font-size="14" font-weight="800">B15</text>
+          <rect x="708" y="363" width="78" height="50" rx="9" fill="#214d75" stroke="#55a7ff"/><text x="730" y="394" font-size="14" font-weight="800">B30</text>
+          <rect x="800" y="363" width="78" height="50" rx="9" fill="#214d75" stroke="#55a7ff"/><text x="822" y="394" font-size="14" font-weight="800">B45</text>
+          <rect x="892" y="363" width="78" height="50" rx="9" fill="#214d75" stroke="#55a7ff"/><text x="914" y="394" font-size="14" font-weight="800">B59</text>
+        </g>
+        <text x="616" y="448" font-size="13" class="muted">Берутся первые 4096 image-токенов: только target, сетка 64×64.</text>
+
+        <path class="arrow" d="M524 190 C552 190 552 126 586 126"/>
+        <path class="arrow" d="M524 350 H586"/>
+
+        <rect class="box head" x="1092" y="120" width="306" height="220"/>
+        <text x="1119" y="159" font-size="22" font-weight="850">multiscale-v2 head</text>
+        <text x="1119" y="188" font-size="14" class="muted">4 карты признаков</text>
+        <text x="1119" y="213" font-size="14" class="muted">+ 6D canonical rays</text>
+        <text x="1119" y="238" font-size="14" class="muted">+ 16D camera, timestep</text>
+        <rect x="1119" y="263" width="250" height="49" rx="9" fill="#102e25" stroke="#438e69"/>
+        <text x="1141" y="293" font-size="14" font-weight="750">64 → 32 → 16 → 256</text>
+        <path class="arrow-blue" d="M970 388 C1058 388 1048 230 1092 230"/>
+
+        <rect class="box output" x="1092" y="380" width="306" height="100"/>
+        <text x="1119" y="416" font-size="19" font-weight="850">Point map · 256 × 256</text>
+        <text x="1119" y="445" font-size="14">XYZ + mask logit + log error</text>
+        <text x="1119" y="468" font-size="13" class="muted">цвет берётся из target RGB</text>
+        <path class="arrow-green" d="M1245 340 V380"/>
+
+        <rect class="box output" x="1092" y="526" width="306" height="82"/>
+        <text x="1119" y="560" font-size="18" font-weight="850">Canonical point cloud</text>
+        <text x="1119" y="585" font-size="13" class="muted">fusion видов → voxelization</text>
+        <path class="arrow" d="M1245 480 V526"/>
+
+        <rect x="30" y="478" width="494" height="130" rx="14" fill="#111b28" stroke="#33455d"/>
+        <text x="52" y="512" font-size="16" font-weight="800">Каноническая система координат</text>
+        <text x="52" y="542" font-size="14" class="muted">origin: таз · X: вправо персонажа · Y: вверх · Z: вперёд</text>
+        <text x="52" y="568" font-size="14" class="muted">единица: полный рост персонажа · система: праворукая</text>
+        <text x="52" y="592" font-size="13" class="muted">Поэтому точки разных ракурсов можно складывать без triangulation.</text>
+      </svg>
+    </div>
+    <p class="caption">Важно: prompt embeddings Qwen2.5-VL уже поступают в DiT. Повторная подача тех же embeddings напрямую голове была проверена и не дала нового сигнала.</p>
+  </section>
+
+  <section id="head">
+    <div class="section-head">
+      <h2>Внутри multiscale-v2</h2>
+      <p>U-Net-подобный декодер с FiLM-условиями и глобальным self-attention в компактном bottleneck.</p>
+    </div>
+    <div class="diagram-shell">
+      <svg viewBox="0 0 1440 720" role="img" aria-labelledby="headTitle headDesc">
+        <title id="headTitle">Архитектура multiscale-v2 canonical point-map head</title>
+        <desc id="headDesc">Четыре feature map проецируются и объединяются с лучами. Encoder сжимает сетку с 64 до 16, bottleneck применяет attention, decoder восстанавливает 256 и выдаёт три независимые ветви.</desc>
+        <defs>
+          <marker id="arrow2" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#8195ad"/></marker>
+          <marker id="arrowG2" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#65d59a"/></marker>
+        </defs>
+        <text x="32" y="38" font-size="15" font-weight="800" class="muted">SPATIAL PATH</text>
+
+        <rect class="box dit" x="30" y="72" width="190" height="130"/>
+        <text x="53" y="105" font-size="17" font-weight="850">4 feature maps</text>
+        <text x="53" y="132" font-size="13" class="muted">каждая 64×64×3072</text>
+        <text x="53" y="158" font-size="13">1×1 Conv: 3072 → 64</text>
+        <text x="53" y="182" font-size="13" class="muted">4 независимых projector</text>
+
+        <rect class="box input" x="30" y="228" width="190" height="88"/>
+        <text x="53" y="260" font-size="16" font-weight="800">Ray map</text>
+        <text x="53" y="287" font-size="13" class="muted">64×64×6: origin + direction</text>
+
+        <rect class="box head" x="270" y="102" width="190" height="110"/>
+        <text x="294" y="136" font-size="17" font-weight="850">Concat + stem</text>
+        <text x="294" y="163" font-size="13" class="muted">256 + 6 = 262 канала</text>
+        <text x="294" y="188" font-size="13">3×3 Conv → 128</text>
+        <path d="M220 137 H270" stroke="#8195ad" stroke-width="2.2" fill="none" marker-end="url(#arrow2)"/>
+        <path d="M220 272 C248 272 244 184 270 184" stroke="#8195ad" stroke-width="2.2" fill="none" marker-end="url(#arrow2)"/>
+
+        <rect class="box head" x="510" y="94" width="190" height="126"/>
+        <text x="535" y="128" font-size="17" font-weight="850">Encoder 64²</text>
+        <text x="535" y="155" font-size="13">128 каналов</text>
+        <text x="535" y="179" font-size="13" class="muted">2 × conditioned residual</text>
+        <text x="535" y="202" font-size="13" class="muted">skip A</text>
+        <path d="M460 157 H510" stroke="#8195ad" stroke-width="2.2" fill="none" marker-end="url(#arrow2)"/>
+
+        <rect class="box head" x="750" y="94" width="190" height="126"/>
+        <text x="775" y="128" font-size="17" font-weight="850">Encoder 32²</text>
+        <text x="775" y="155" font-size="13">192 канала</text>
+        <text x="775" y="179" font-size="13" class="muted">stride 2 + 2 residual</text>
+        <text x="775" y="202" font-size="13" class="muted">skip B</text>
+        <path d="M700 157 H750" stroke="#8195ad" stroke-width="2.2" fill="none" marker-end="url(#arrow2)"/>
+
+        <rect x="990" y="76" width="205" height="162" rx="14" fill="#50351c" stroke="#c68a43" stroke-width="1.5"/>
+        <text x="1015" y="112" font-size="18" font-weight="850">Bottleneck 16²</text>
+        <text x="1015" y="140" font-size="13">256 каналов</text>
+        <text x="1015" y="165" font-size="13" class="muted">3 conditioned residual</text>
+        <text x="1015" y="190" font-size="13" class="muted">8-head global self-attention</text>
+        <text x="1015" y="216" font-size="12" fill="#ffca8c">здесь виден весь персонаж</text>
+        <path d="M940 157 H990" stroke="#8195ad" stroke-width="2.2" fill="none" marker-end="url(#arrow2)"/>
+
+        <rect class="box head" x="990" y="304" width="205" height="108"/>
+        <text x="1015" y="337" font-size="17" font-weight="850">Decoder 32²</text>
+        <text x="1015" y="364" font-size="13">256 → 192 + skip B</text>
+        <text x="1015" y="388" font-size="13" class="muted">1 conditioned residual</text>
+        <path d="M1093 238 V304" stroke="#8195ad" stroke-width="2.2" fill="none" marker-end="url(#arrow2)"/>
+        <path d="M845 220 V264 H1008 V304" stroke="#67849e" stroke-width="1.8" stroke-dasharray="6 6" fill="none" marker-end="url(#arrow2)"/>
+
+        <rect class="box head" x="750" y="304" width="190" height="108"/>
+        <text x="775" y="337" font-size="17" font-weight="850">Decoder 64²</text>
+        <text x="775" y="364" font-size="13">192 → 128 + skip A</text>
+        <text x="775" y="388" font-size="13" class="muted">1 conditioned residual</text>
+        <path d="M990 358 H940" stroke="#8195ad" stroke-width="2.2" fill="none" marker-end="url(#arrow2)"/>
+        <path d="M605 220 V278 H768 V304" stroke="#67849e" stroke-width="1.8" stroke-dasharray="6 6" fill="none" marker-end="url(#arrow2)"/>
+
+        <rect class="box head" x="510" y="304" width="190" height="108"/>
+        <text x="535" y="337" font-size="17" font-weight="850">Refine 128²</text>
+        <text x="535" y="364" font-size="13">ConvTranspose → 96</text>
+        <text x="535" y="388" font-size="13" class="muted">1 conditioned residual</text>
+        <path d="M750 358 H700" stroke="#8195ad" stroke-width="2.2" fill="none" marker-end="url(#arrow2)"/>
+
+        <rect class="box head" x="270" y="304" width="190" height="108"/>
+        <text x="295" y="337" font-size="17" font-weight="850">Refine 256²</text>
+        <text x="295" y="364" font-size="13">ConvTranspose → 64</text>
+        <text x="295" y="388" font-size="13" class="muted">1 conditioned residual</text>
+        <path d="M510 358 H460" stroke="#8195ad" stroke-width="2.2" fill="none" marker-end="url(#arrow2)"/>
+
+        <rect class="box output" x="30" y="340" width="190" height="158"/>
+        <text x="53" y="375" font-size="18" font-weight="850">3 output branches</text>
+        <text x="53" y="405" font-size="14" fill="#9ff0c2">XYZ · 3 канала</text>
+        <text x="53" y="431" font-size="14" fill="#9ff0c2">mask logit · 1</text>
+        <text x="53" y="457" font-size="14" fill="#9ff0c2">log error · 1</text>
+        <text x="53" y="484" font-size="12" class="muted">каждая: 3×3 + SiLU + 1×1</text>
+        <path d="M270 358 H220" stroke="#65d59a" stroke-width="2.2" fill="none" marker-end="url(#arrowG2)"/>
+
+        <rect x="30" y="552" width="1165" height="120" rx="14" fill="#211a35" stroke="#7756a4" stroke-width="1.5"/>
+        <text x="53" y="586" font-size="17" font-weight="850">Глобальное условие FiLM для всех conditioned residual blocks</text>
+        <text x="53" y="616" font-size="14" class="muted">camera vector 16 → MLP → 256</text>
+        <text x="358" y="616" font-size="14" class="muted">timestep scalar → 8 Fourier frequencies → 17 → MLP → 256</text>
+        <text x="53" y="646" font-size="13">condition = camera + timestep; каждый блок получает собственные scale и shift.</text>
+        <path d="M604 552 V492" stroke="#bb8cff" stroke-width="2" stroke-dasharray="5 6" fill="none" marker-end="url(#arrow2)"/>
+
+        <rect class="box output" x="1240" y="94" width="170" height="116"/>
+        <text x="1263" y="128" font-size="16" font-weight="850">Aux head 64²</text>
+        <text x="1263" y="157" font-size="13" class="muted">loss weight 0.125</text>
+        <text x="1263" y="182" font-size="13">XYZ + mask + error</text>
+        <path d="M700 112 C1060 20 1180 70 1240 120" stroke="#67849e" stroke-width="1.8" stroke-dasharray="6 6" fill="none" marker-end="url(#arrow2)"/>
+
+        <rect class="box output" x="1240" y="304" width="170" height="116"/>
+        <text x="1263" y="338" font-size="16" font-weight="850">Aux head 128²</text>
+        <text x="1263" y="367" font-size="13" class="muted">loss weight 0.25</text>
+        <text x="1263" y="392" font-size="13">XYZ + mask + error</text>
+        <path d="M700 332 C1080 250 1170 320 1240 350" stroke="#67849e" stroke-width="1.8" stroke-dasharray="6 6" fill="none" marker-end="url(#arrow2)"/>
+      </svg>
+    </div>
+  </section>
+
+  <section id="contracts">
+    <div class="section-head"><h2>Контракт тензоров</h2><p>Размеры соответствуют выбранному checkpoint openassets17.</p></div>
+    <div style="overflow-x:auto">
+      <table>
+        <thead><tr><th>Тензор</th><th>Форма</th><th>Смысл</th><th>Источник</th></tr></thead>
+        <tbody>
+          <tr><td><strong>DiT features</strong></td><td><code>B × 4 × 3072 × 64 × 64</code></td><td>Четыре уровня target-токенов.</td><td><code>img_norm2</code>, блоки 15/30/45/59</td></tr>
+          <tr><td><strong>Ray map</strong></td><td><code>B × 6 × 64 × 64</code></td><td>Канонические origin XYZ и unit direction XYZ для каждого луча.</td><td>Калиброванная камера</td></tr>
+          <tr><td><strong>Camera vector</strong></td><td><code>B × 16</code></td><td>Первые 3 строки camera-from-canonical + нормированные fx, fy, cx, cy.</td><td>Camera JSON</td></tr>
+          <tr><td><strong>Timestep</strong></td><td><code>B × 1</code></td><td>Нормированное FlowMatch-время текущего состояния.</td><td>Denoising schedule</td></tr>
+          <tr><td><strong>Prediction</strong></td><td><code>B × 5 × 256 × 256</code></td><td>XYZ, mask logit, predicted log error.</td><td>Главная output-ветвь</td></tr>
+          <tr><td><strong>Target XYZ</strong></td><td><code>B × 3 × 256 × 256</code></td><td>Истинная точка поверхности в pelvis-centric canonical frame.</td><td>Blender geometry pass</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="grid cols-3" style="margin-top:18px">
+      <article class="card"><h3>XYZ — не глубина</h3><p>Голова сразу предсказывает абсолютную каноническую точку, поэтому разные виды оказываются в одной системе координат.</p></article>
+      <article class="card"><h3>Mask — существование поверхности</h3><p>Mask logit отвечает, принадлежит ли выходной пиксель персонажу. В облако идут только положительные точки.</p></article>
+      <article class="card"><h3>Uncertainty — доверие</h3><p>Пятый канал приближает логарифм фактической XYZ-ошибки и используется при фильтрации и fusion состояний.</p></article>
+    </div>
+  </section>
+
+  <section id="training">
+    <div class="section-head"><h2>Обучение и реальный запуск</h2><p>Главная известная проблема находится не в форме target, а в распределении внутренних DiT-признаков.</p></div>
+    <div class="grid cols-2">
+      <article class="card">
+        <div class="eyebrow">Training · teacher-forced</div>
+        <div class="stack">
+          <div class="step"><div class="num">1</div><div><h3>Известный точный target</h3><p>Blender даёт RGB, mask и canonical XYZ для каждого пикселя.</p></div></div>
+          <div class="step"><div class="num">2</div><div><h3>Target latent + искусственный шум</h3><p>На четырёх шагах строится точная teacher-forced denoising trajectory.</p></div></div>
+          <div class="step"><div class="num">3</div><div><h3>Supervision</h3><p>17 train identities × 24 вида × 4 состояния = 1 632 samples на эпоху.</p></div></div>
+        </div>
+      </article>
+      <article class="card">
+        <div class="eyebrow" style="color:var(--orange)">Production · generated</div>
+        <div class="stack">
+          <div class="step"><div class="num" style="background:var(--orange-soft);color:#ffd09c">1</div><div><h3>Target заранее неизвестен</h3><p>Qwen начинает с шума и генерирует новый противоречивый ракурс.</p></div></div>
+          <div class="step"><div class="num" style="background:var(--orange-soft);color:#ffd09c">2</div><div><h3>Признаки другой траектории</h3><p>Ранние и средние блоки заметно отличаются от teacher-forced cache.</p></div></div>
+          <div class="step"><div class="num" style="background:var(--orange-soft);color:#ffd09c">3</div><div><h3>Fusion нескольких состояний</h3><p>Голова запускается для сохранённых denoising states; точки объединяются по confidence.</p></div></div>
+        </div>
+      </article>
+    </div>
+    <div class="callout" style="margin-top:18px">
+      <strong>Измеренный domain shift.</strong> На шагах 0–2 cosine similarity teacher-forced и production признаков для блоков 15/30/45 была примерно 0.14–0.63; блок 59 устойчивее — 0.80–0.93. К последнему шагу все четыре блока достигают примерно 0.98–0.99.
+    </div>
+    <div style="overflow-x:auto;margin-top:18px">
+      <table>
+        <thead><tr><th>Компонент loss</th><th>Формула</th><th>Вес</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Geometry</strong></td><td>Smooth L1 только по foreground XYZ</td><td><code>10.0</code></td></tr>
+          <tr><td><strong>Mask</strong></td><td>Weighted binary cross entropy</td><td><code>1.0</code></td></tr>
+          <tr><td><strong>Uncertainty</strong></td><td>Smooth L1 к log(mean absolute XYZ error)</td><td><code>0.1</code></td></tr>
+          <tr><td><strong>Aux 64 / 128</strong></td><td>Тот же состав loss на промежуточных heads</td><td><code>0.125 / 0.25</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="cloud">
+    <div class="section-head"><h2>Из point map в облако</h2><p>RGB не предсказывается головой: он переносится с итогового сгенерированного растра на соответствующую 3D-точку.</p></div>
+    <div class="grid cols-4">
+      <article class="card"><div class="metric blue">01</div><h3>Mask</h3><p>Отбрасываем фон и нечисловые XYZ.</p></article>
+      <article class="card"><div class="metric violet">02</div><h3>Confidence</h3><p>Фильтруем точки с высокой предсказанной ошибкой, объединяем состояния.</p></article>
+      <article class="card"><div class="metric orange">03</div><h3>Merge views</h3><p>Складываем все виды сразу в canonical frame.</p></article>
+      <article class="card"><div class="metric">04</div><h3>Voxelize</h3><p>Усредняем XYZ/RGB внутри voxel и считаем число согласных видов.</p></article>
+    </div>
+    <div class="callout good" style="margin-top:18px">
+      <strong>Что означает «одна точка».</strong> Это не vertex исходного mesh и не стабильный ID поверхности. Это ответ головы для одного пикселя конкретного сгенерированного изображения: «если этот пиксель принадлежит персонажу, вот его положение относительно таза на фронтальном каноническом персонаже».
+    </div>
+  </section>
+
+  <section id="vl">
+    <div class="section-head"><h2>Проверенная VL-ветвь</h2><p>Она существует в коде как <code>multiscale-vl-v3</code>, но не является выбранной архитектурой.</p></div>
+    <div class="diagram-shell">
+      <svg viewBox="0 0 1400 390" role="img" aria-labelledby="vlTitle vlDesc">
+        <title id="vlTitle">Отклонённая final Qwen2.5-VL fusion ветвь</title>
+        <desc id="vlDesc">Финальные пространственные VL embeddings front/back проецировались и подавались через cross-attention в bottleneck. Абляции показали, что содержание токенов не используется.</desc>
+        <defs><marker id="arrow3" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#8195ad"/></marker></defs>
+        <rect class="box qwen" x="35" y="75" width="285" height="210"/>
+        <text x="62" y="112" font-size="20" font-weight="850">Full Qwen2.5-VL output</text>
+        <text x="62" y="143" font-size="14" class="muted">hidden levels 7 / 14 / 21 / 28</text>
+        <text x="62" y="171" font-size="14">4 × 2 × 14 × 14 × 3584</text>
+        <text x="62" y="200" font-size="13" class="muted">front + back spatial tokens</text>
+        <text x="62" y="228" font-size="13" class="muted">+ source ID + XY position</text>
+        <text x="62" y="258" font-size="13" fill="#f0c3c7">те же prompt embeddings уже видел DiT</text>
+
+        <rect class="box rejected" x="390" y="103" width="260" height="154"/>
+        <text x="419" y="140" font-size="19" font-weight="850">VL projections</text>
+        <text x="419" y="170" font-size="14">3584 → 256 × 4</text>
+        <text x="419" y="198" font-size="14" class="muted">8-head cross-attention</text>
+        <text x="419" y="226" font-size="14" class="muted">learned residual gate</text>
+        <path d="M320 180 H390" stroke="#8195ad" stroke-width="2.2" fill="none" marker-end="url(#arrow3)"/>
+
+        <rect class="box head" x="725" y="103" width="260" height="154"/>
+        <text x="753" y="140" font-size="19" font-weight="850">Bottleneck 16²</text>
+        <text x="753" y="171" font-size="14">target queries + VL context</text>
+        <text x="753" y="199" font-size="14" class="muted">prediction-preserving at gate=0</text>
+        <text x="753" y="227" font-size="13" fill="#f0c3c7">joint gate: −0.0008186</text>
+        <path d="M650 180 H725" stroke="#8195ad" stroke-width="2.2" fill="none" marker-end="url(#arrow3)"/>
+
+        <rect class="box rejected" x="1060" y="75" width="305" height="210"/>
+        <text x="1089" y="112" font-size="20" font-weight="850">Content gate: FAILED</text>
+        <text x="1089" y="146" font-size="14">control XYZ median: 6.33525%</text>
+        <text x="1089" y="174" font-size="14">real VL: 6.33460%</text>
+        <text x="1089" y="202" font-size="14">zero VL: 6.33459%</text>
+        <text x="1089" y="230" font-size="14">rolled VL: 6.33444%</text>
+        <text x="1089" y="260" font-size="13" fill="#f0c3c7">различия = численный шум</text>
+        <path d="M985 180 H1060" stroke="#c85d69" stroke-width="2.2" fill="none" marker-end="url(#arrow3)"/>
+        <line class="cross" x1="382" y1="66" x2="1000" y2="296" opacity=".42"/>
+        <line class="cross" x1="1000" y1="66" x2="382" y2="296" opacity=".42"/>
+      </svg>
+    </div>
+    <div class="grid cols-2" style="margin-top:18px">
+      <div class="callout bad"><strong>Решение.</strong> Не увеличивать final-VL fusion: frozen и joint training не заставили голову читать содержимое embeddings.</div>
+      <div class="callout"><strong>Отдельная гипотеза.</strong> Visual tower blocks 10–15 показали прямой target↔front/back correspondence. Их проверка требует post-generation прохода target/front/back в одном feature space.</div>
+    </div>
+  </section>
+
+  <section id="limits">
+    <div class="section-head"><h2>Что сейчас работает и что нет</h2><p>Это исследовательская архитектура с узнаваемым силуэтом и некоторыми деталями, но ещё не готовый реконструктор mesh.</p></div>
+    <div class="grid cols-2">
+      <div class="stack">
+        <div class="callout good"><strong>Работает:</strong> каноническая ориентация, pelvis-centric центр, цветные облака, распознаваемый персонаж, перенос на unseen identities.</div>
+        <div class="callout good"><strong>Работает:</strong> multiscale-v2 и рост identity diversity дали измеримое улучшение exact и generated-domain геометрии.</div>
+      </div>
+      <div class="stack">
+        <div class="callout bad"><strong>Не решено:</strong> облака остаются диффузными и слишком плоскими по глубине; доля voxel, подтверждённых несколькими видами, невысока.</div>
+        <div class="callout bad"><strong>Не решено:</strong> teacher-forced признаки ранних/средних DiT-блоков расходятся с реальной генерацией; текущие readout sites выбраны эвристически.</div>
+      </div>
+    </div>
+    <div class="grid cols-3" style="margin-top:18px">
+      <article class="card"><h3>Не mesh</h3><p>Нет topology, faces, UV и постоянного соответствия vertex↔pixel. Облако — промежуточное представление.</p></article>
+      <article class="card"><h3>Не triangulation</h3><p>Глубина не выводится пересечением лучей. Каждая точка регрессируется напрямую в canonical XYZ.</p></article>
+      <article class="card"><h3>Не точная камера Qwen</h3><p>Угол задаётся текстом и camera condition головы; генератор может нарушить requested projection.</p></article>
+    </div>
+  </section>
+
+  <section id="code">
+    <div class="section-head"><h2>Карта реализации</h2><p>Основные точки входа для продолжения экспериментов.</p></div>
+    <details open><summary>Архитектура головы</summary><div><code>diffusion_editor/training/canonical_pointmap_head.py</code><br>Классы <code>MultiscaleCanonicalPointmapHead</code>, <code>SpatialAttentionBlock</code>, output branches и экспериментальный <code>VLContextAttentionBlock</code>.</div></details>
+    <details><summary>Обучение и evaluation</summary><div><code>scripts/train-canonical-pointmap-head.py</code><br>Dataset loader, losses, checkpoint compatibility, partial unfreezing, exact held-out metrics и VL ablations.</div></details>
+    <details><summary>Извлечение DiT-признаков</summary><div><code>scripts/extract-qwen-canonical-features.py</code><br>Qwen Image Edit prompt, VAE latents, teacher-forced denoising schedule и hooks блоков 15/30/45/59.</div></details>
+    <details><summary>Point cloud и просмотр</summary><div><code>scripts/export-canonical-head-pointcloud.py</code> и <code>scripts/view-canonical-pointcloud.py</code><br>Fusion состояний/видов, RGB, voxelization, PLY и нативная рисовалка Termin.</div></details>
+    <details><summary>Отчёты экспериментов</summary><div><a href="canonical-head-openassets17-2026-08-23.md">Open-assets 17 identities</a> · <a href="qwen-vl-canonical-fusion-2026-08-23.md">Qwen2.5-VL fusion</a> · <a href="canonical-pointmap-dataset.md">Dataset contract</a></div></details>
+  </section>
+
+  <footer>
+    Состояние на 23 августа 2026 · diffusion-editor · canonical point-map research.<br>
+    Выбранная архитектура: <span class="mono">multiscale-v2</span>. Экспериментальная <span class="mono">multiscale-vl-v3</span> сохранена для воспроизводимости, но не прошла content-ablation.
+  </footer>
+</main>
+</body>
+</html>

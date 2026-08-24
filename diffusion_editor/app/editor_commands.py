@@ -27,6 +27,12 @@ _DEPTH_COMMAND_PROFILES = {
     "ai.depth_map.v2_small": "v2-small",
 }
 
+_POSE_COMMAND_PROFILES = {
+    "ai.pose.dwpose": "dwpose",
+    "ai.pose.mediapipe": "mediapipe-full",
+    "ai.pose.silhouette": "silhouette-skeleton",
+}
+
 
 class EditorCommandCoordinator:
     """Execute standard edit commands and project their enabled state."""
@@ -68,6 +74,13 @@ class EditorCommandCoordinator:
             },
             "ai.depth_map.subject": self.create_subject_depth,
             "ai.depth_point_cloud": self.view_depth_point_cloud,
+            **{
+                command_id: (
+                    lambda profile_id=profile_id:
+                    self.create_pose_overlay(profile_id)
+                )
+                for command_id, profile_id in _POSE_COMMAND_PROFILES.items()
+            },
             "view.fit": self.fit,
         }
         self.refresh()
@@ -129,6 +142,13 @@ class EditorCommandCoordinator:
             "ai.depth_point_cloud": (
                 self._application.has_depth_point_cloud_context(active)
             ),
+            **{
+                command_id: (
+                    active_raster
+                    and not self._application.pose_controller.is_busy
+                )
+                for command_id in _POSE_COMMAND_PROFILES
+            },
             "view.fit": canvas_ready and self._fit_in_view is not None,
         }
         for command_id, enabled in states.items():
@@ -245,6 +265,17 @@ class EditorCommandCoordinator:
         self._application.set_status(
             "Depth point-cloud preview requires the native Termin viewport"
         )
+
+    def create_pose_overlay(self, profile_id: str) -> None:
+        self._before_mutation()
+        layer = self._stack.active_layer
+        if layer is None or not layer.accepts_pixel_edits:
+            self.refresh()
+            return
+        event = self._application.pose_controller.start(layer, profile_id)
+        if event.status is not None:
+            self._application.set_status(event.status)
+        self.refresh()
 
     def fit(self) -> None:
         if self._fit_in_view is not None:

@@ -51,6 +51,25 @@ At runtime all three clients default to `.venv-workers/bin/python` (or
 `.venv-workers/Scripts/python.exe`). Their feature-specific
 `DIFFUSION_EDITOR_*_PYTHON` overrides remain available for diagnostics.
 
+## Pose-estimation worker
+
+DWPose, MediaPipe and the silhouette diagnostic use a fourth isolated regular
+CPython 3.11 environment. It is deliberately not merged into `.venv-workers`:
+MediaPipe and RTMLib own an OpenCV distribution, while the shared Qwen/DA3
+environment requires its reviewed headless OpenCV graph.
+
+Install the pose worker on Linux with:
+
+```sh
+./setup-pose-worker.sh
+```
+
+It defaults to `.venv-pose`. Override the interpreter or destination with
+`POSE_BOOTSTRAP_PYTHON`, `POSE_VENV`, or point the editor at an existing
+environment with `DIFFUSION_EDITOR_POSE_PYTHON`. Model weights are downloaded
+on first use into `~/.cache/diffusion-editor/pose-models`; set
+`DIFFUSION_EDITOR_POSE_MODEL_DIR` to relocate that cache.
+
 ## Accelerator selection
 
 `./setup-workers.sh` defaults to `ML_ACCELERATOR=auto`: it installs the

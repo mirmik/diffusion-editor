@@ -25,7 +25,7 @@ from .types import Rect
 
 
 GenerationKind = Literal[
-    "diffusion", "instruct", "lama", "segmentation", "depth"
+    "diffusion", "instruct", "lama", "segmentation", "depth", "pose"
 ]
 
 

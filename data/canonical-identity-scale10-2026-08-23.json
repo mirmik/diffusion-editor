@@ -1,0 +1,156 @@
+{
+  "schema": "diffusion-editor.canonical-identity-experiment",
+  "schema_version": 1,
+  "name": "canonical-identity-scale10-2026-08-23",
+  "views": {
+    "azimuths": [0, 45, 90, 135, 180, 225, 270, 315],
+    "elevations": [-30, 0, 30],
+    "resolution": 256,
+    "samples": 16,
+    "blend_subdivision_render_level": 0,
+    "blend_render_engine": "workbench"
+  },
+  "feature_extraction": {
+    "blocks": [15, 30, 45, 59],
+    "denoising_steps": 4,
+    "noise_replicas": 1,
+    "output_resolution": 1024,
+    "seed": 20260822
+  },
+  "training": {
+    "steps": 12000,
+    "batch_size": 1,
+    "target_resolution": 128,
+    "projection_channels": 48,
+    "hidden_channels": 128,
+    "learning_rate": 0.001,
+    "weight_decay": 0.0001,
+    "timestep_conditioning": true,
+    "host_cache_samples": 4,
+    "seed": 20260822
+  },
+  "identities": [
+    {
+      "id": "rain",
+      "split": "train",
+      "dataset": "/tmp/rain-canonical-production-3rings-1855",
+      "features": "/tmp/rain-qwen-multitimestep-production-24-1855"
+    },
+    {
+      "id": "april",
+      "split": "train",
+      "dataset": "/tmp/april-canonical-production-3rings-1855",
+      "features": "/tmp/april-qwen-multitimestep-production-24-1855"
+    },
+    {
+      "id": "arthur",
+      "split": "train",
+      "dataset": "/tmp/arthur-canonical-production-3rings-1855",
+      "features": "/tmp/arthur-qwen-multitimestep-production-24-1855"
+    },
+    {
+      "id": "atom",
+      "name": "Atom",
+      "split": "train",
+      "pose_id": "authored-a-pose",
+      "kind": "fbx",
+      "source": "/home/mirmik/makehuman_folder/exports/Atom.fbx"
+    },
+    {
+      "id": "barret",
+      "name": "Barret",
+      "split": "train",
+      "pose_id": "authored-a-pose",
+      "kind": "fbx",
+      "source": "/home/mirmik/makehuman_folder/exports/Barret.fbx"
+    },
+    {
+      "id": "kate",
+      "name": "Kate",
+      "split": "train",
+      "pose_id": "authored-a-pose",
+      "kind": "fbx",
+      "source": "/home/mirmik/makehuman_folder/exports/Kate.fbx"
+    },
+    {
+      "id": "snow",
+      "name": "Snow",
+      "split": "train",
+      "pose_id": "authored-rest",
+      "kind": "blend",
+      "source": "data/character-assets/blender-studio/snow.blend",
+      "creator": "Blender Studio",
+      "source_page": "https://studio.blender.org/characters/snow/v2/",
+      "license": "CC-BY"
+    },
+    {
+      "id": "ellie",
+      "name": "Ellie",
+      "split": "train",
+      "pose_id": "authored-rest",
+      "kind": "blend",
+      "source": "data/character-assets/blender-studio/ellie.blend",
+      "include_meshes": ["GEO-ellie_hair"],
+      "creator": "Blender Studio",
+      "source_page": "https://studio.blender.org/characters/ellie/v1/",
+      "license": "CC-BY"
+    },
+    {
+      "id": "phil",
+      "name": "Phil",
+      "split": "train",
+      "pose_id": "authored-rest",
+      "kind": "blend",
+      "source": "data/character-assets/blender-studio/phil.blend",
+      "include_meshes": ["GEO-phil_hair.mesh"],
+      "creator": "Blender Studio",
+      "source_page": "https://studio.blender.org/characters/phil/v1/",
+      "license": "CC-BY"
+    },
+    {
+      "id": "rex",
+      "name": "Rex",
+      "split": "train",
+      "pose_id": "authored-rest",
+      "kind": "blend",
+      "source": "data/character-assets/blender-studio/rex.blend",
+      "include_meshes": ["GEO-rex_hair"],
+      "creator": "Blender Studio",
+      "source_page": "https://studio.blender.org/characters/rex/v1/",
+      "license": "CC-BY"
+    },
+    {
+      "id": "jay",
+      "name": "Jay",
+      "split": "validation",
+      "pose_id": "authored-rest",
+      "kind": "blend",
+      "source": "data/character-assets/blender-studio/jay.blend",
+      "include_meshes": ["GEO-jay_hair"],
+      "creator": "Blender Studio",
+      "source_page": "https://studio.blender.org/characters/jay/v1/",
+      "license": "CC-BY"
+    },
+    {
+      "id": "victoria",
+      "name": "Victoria",
+      "split": "validation",
+      "pose_id": "authored-rest",
+      "kind": "blend",
+      "source": "data/character-assets/blender-studio/victoria.blend",
+      "include_meshes": [
+        "GEO-victoria_hair_bangs",
+        "GEO-victoria_hair_main"
+      ],
+      "creator": "Blender Studio",
+      "source_page": "https://studio.blender.org/characters/victoria/v1/",
+      "license": "CC-BY"
+    },
+    {
+      "id": "termin",
+      "split": "test",
+      "dataset": "/tmp/termin-canonical-production-3rings-1855",
+      "features": "/tmp/termin-qwen-multitimestep-production-24-1855"
+    }
+  ]
+}

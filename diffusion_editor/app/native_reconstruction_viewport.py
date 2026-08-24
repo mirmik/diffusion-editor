@@ -452,9 +452,14 @@ def _draw_constants(
 
 
 class _ViewportSurface:
-    def __init__(self, camera: _OrbitCamera, on_changed: Callable[[], None]) -> None:
+    def __init__(
+        self,
+        camera: _OrbitCamera,
+        on_changed: Callable[[], None],
+    ) -> None:
         self._camera = camera
         self._on_changed = on_changed
+        self._key_handler: Callable[[int, int, int, int], bool] | None = None
         self._valid = True
         self._width = 1
         self._height = 1
@@ -472,6 +477,13 @@ class _ViewportSurface:
     def close(self) -> None:
         self._valid = False
         self._texture = None
+        self._key_handler = None
+
+    def set_key_handler(
+        self,
+        handler: Callable[[int, int, int, int], bool] | None,
+    ) -> None:
+        self._key_handler = handler
 
     def is_valid(self) -> bool:
         return self._valid
@@ -550,8 +562,9 @@ class _ViewportSurface:
         return True
 
     def dispatch_key(self, key: int, scancode: int, action: int, modifiers: int) -> bool:
-        del key, scancode, action, modifiers
-        return False
+        if not self._valid or self._key_handler is None:
+            return False
+        return bool(self._key_handler(key, scancode, action, modifiers))
 
     def dispatch_text(self, codepoint: int) -> bool:
         del codepoint
@@ -696,6 +709,29 @@ class NativeReconstructionViewport:
     @property
     def point_cloud_has_confidence(self) -> bool:
         return self._point_cloud_confidence_colors is not None
+
+    @property
+    def point_cloud_size(self) -> float:
+        return float(self._point_cloud_style.size_px)
+
+    def set_point_cloud_size(self, size_px: float) -> None:
+        self._require_open()
+        value = float(size_px)
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError("point-cloud size must be finite and positive")
+        if value == self._point_cloud_style.size_px:
+            return
+        self._point_cloud_style.size_px = value
+        self.invalidate()
+
+    def set_key_handler(
+        self,
+        handler: Callable[[int, int, int, int], bool] | None,
+    ) -> None:
+        """Handle keys routed directly to this viewport after it gains focus."""
+
+        self._require_open()
+        self.surface.set_key_handler(handler)
 
     def set_shading_mode(self, mode: str) -> None:
         normalized = str(mode).strip().lower()

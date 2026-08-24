@@ -13,7 +13,6 @@ from typing import Any, Iterable
 
 LEGACY_INSTRUCT_PROFILE_ID = "instruct-pix2pix"
 QWEN_IMAGE_EDIT_PROFILE_ID = "qwen-image-edit-2511"
-QWEN_MULTIPLE_ANGLES_PROFILE_ID = "qwen-image-edit-2511-multiple-angles"
 FLUX2_KLEIN_PROFILE_ID = "flux2-klein-4b"
 SENSENOVA_U15_PROFILE_ID = "sensenova-u1.5-8b-mot-preview"
 DEFAULT_IMAGE_EDIT_PROFILE_ID = QWEN_IMAGE_EDIT_PROFILE_ID
@@ -313,19 +312,30 @@ _QWEN_TEXT_ENCODER = os.environ.get(
 _QWEN_LOCAL_FP8 = bool(_QWEN_TRANSFORMER and _QWEN_TEXT_ENCODER)
 
 
+def qwen_multiple_angles_lora_adapter(
+    *,
+    weight: float = 1.0,
+    enabled: bool = True,
+) -> ImageEditLoraAdapter:
+    """Build the optional Multiple Angles adapter for the primary Qwen profile."""
+
+    return ImageEditLoraAdapter(
+        "multiple-angles",
+        "Multiple Angles",
+        _QWEN_MULTIPLE_ANGLES_LORA,
+        weight,
+        enabled and bool(_QWEN_MULTIPLE_ANGLES_LORA),
+    )
+
+
 def _qwen_parameters(
     *,
     prompt_placeholder: str = "Describe the requested edit",
-    include_multiple_angles: bool = False,
 ) -> tuple[ImageEditParameter, ...]:
     parameters = (
         ImageEditParameter(
             "prompt", "Prompt", ParameterKind.TEXT, "", "Conditioning",
             placeholder=prompt_placeholder,
-            description=(
-                "Multiple Angles format: <sks> azimuth elevation distance."
-                if include_multiple_angles else ""
-            ),
         ),
         ImageEditParameter(
             "negative_prompt", "Negative prompt", ParameterKind.TEXT,
@@ -400,39 +410,6 @@ _PROFILES = (
                 _QWEN_LORA,
                 1.0,
                 bool(_QWEN_LORA),
-            ),
-        ),
-    ),
-    ImageEditProfile(
-        stable_id=QWEN_MULTIPLE_ANGLES_PROFILE_ID,
-        title="Qwen Image Edit 2511 — Multiple Angles",
-        provider="diffusers.qwen_image_edit_plus",
-        model_id=_QWEN_MODEL,
-        description=(
-            "Camera-angle control with the <sks> azimuth elevation distance "
-            "prompt format."
-        ),
-        max_input_images=2,
-        parameters=_qwen_parameters(
-            prompt_placeholder=(
-                "<sks> front-left quarter view elevated shot medium shot"
-            ),
-            include_multiple_angles=True,
-        ),
-        default_lora_adapters=(
-            ImageEditLoraAdapter(
-                "lightning",
-                "Lightning 4-step",
-                _QWEN_LORA,
-                1.0,
-                bool(_QWEN_LORA),
-            ),
-            ImageEditLoraAdapter(
-                "multiple-angles",
-                "Multiple Angles",
-                _QWEN_MULTIPLE_ANGLES_LORA,
-                0.9,
-                bool(_QWEN_MULTIPLE_ANGLES_LORA),
             ),
         ),
     ),
@@ -732,7 +709,7 @@ def normalize_profile_lora_store(
                         "label": "Multiple Angles",
                         "source": path,
                         "weight": old_parameters.get(
-                            "angle_lora_scale", 0.9),
+                            "angle_lora_scale", 1.0),
                         "enabled": bool(path.strip()),
                     })
             adapters = profile.normalize_lora_adapters(migrated)

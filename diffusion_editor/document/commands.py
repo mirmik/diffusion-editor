@@ -217,6 +217,57 @@ class AddDepthVisualizationCommand:
 
 
 @dataclass(frozen=True)
+class AddPoseOverlayCommand:
+    """Add a canvas-sized pose layer while keeping the anchor selected."""
+
+    source_layer: Layer
+    name: str
+    overlay_image: np.ndarray
+    label: str = "Create Pose Overlay"
+
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
+        if layer_stack.find_layer_by_id(self.source_layer.id) is not self.source_layer:
+            return None
+        image = np.asarray(self.overlay_image)
+        if (
+                image.dtype != np.uint8
+                or image.ndim != 3
+                or image.shape != (
+                    layer_stack.height, layer_stack.width, 4)):
+            raise ValueError("pose overlay must match the canvas RGBA size")
+        old_active_id = (
+            layer_stack.active_layer.id
+            if layer_stack.active_layer is not None else None)
+        overlay = Layer(
+            self.name,
+            layer_stack.width,
+            layer_stack.height,
+            np.array(image, dtype=np.uint8, order="C", copy=True),
+            x=0,
+            y=0,
+        )
+        layer_stack.insert_layer(overlay)
+        parent, index = _location(layer_stack, overlay)
+        layer_stack.active_layer = self.source_layer
+
+        def undo() -> None:
+            layer_stack.remove_layer(overlay)
+            _restore_active(layer_stack, old_active_id)
+
+        def redo() -> None:
+            layer_stack.insert_layer(overlay)
+            layer_stack.move_layer(overlay, parent, index)
+            if layer_stack.find_layer_by_id(self.source_layer.id) is self.source_layer:
+                layer_stack.active_layer = self.source_layer
+
+        return CommandDelta(
+            undo,
+            redo,
+            int(image.nbytes),
+        )
+
+
+@dataclass(frozen=True)
 class AddReconstructionLayerCommand:
     name: str
     label: str = "New 3D Reconstruction"

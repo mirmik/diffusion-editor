@@ -9,6 +9,12 @@ from diffusion_editor.generation.types import (
     EnginePollEvent,
     SegmentationResult,
 )
+from diffusion_editor.generation.pose_estimation import (
+    PoseConnection,
+    PoseEstimationResult,
+    PoseInstance,
+    PoseKeypoint,
+)
 
 
 class _Settings:
@@ -308,6 +314,123 @@ def test_depth_map_commands_select_explicit_profile(command_id, profile_id):
     commands.handlers[command_id]()
 
     assert requests[0].profile_id == profile_id
+    application.close()
+
+
+@pytest.mark.parametrize(("command_id", "profile_id"), (
+    ("ai.pose.dwpose", "dwpose"),
+    ("ai.pose.mediapipe", "mediapipe-full"),
+    ("ai.pose.silhouette", "silhouette-skeleton"),
+))
+def test_pose_commands_create_comparable_overlay_layers(
+        command_id, profile_id):
+    application = _application()
+    image = np.full((4, 5, 4), (12, 34, 56, 255), dtype=np.uint8)
+    application.layer_stack.init_from_image(image)
+    source = application.layer_stack.active_layer
+    requests = []
+    application.pose_engine.submit_request = (
+        lambda request, **_kwargs: requests.append(request) or True
+    )
+    commands = EditorCommandCoordinator(application)
+
+    commands.handlers[command_id]()
+
+    assert len(requests) == 1
+    assert requests[0].profile_id == profile_id
+    np.testing.assert_array_equal(requests[0].image, image)
+    context = application.pose_controller.pending_context
+    assert context is not None
+    result = PoseEstimationResult(
+        profile_id=profile_id,
+        width=5,
+        height=4,
+        keypoint_schema="test",
+        poses=(PoseInstance((
+            PoseKeypoint("left_shoulder", 1.0, 1.0, 0.9),
+            PoseKeypoint("left_elbow", 3.0, 2.0, 0.8),
+        )),),
+        connections=(PoseConnection(
+            "left_shoulder", "left_elbow", "body"),),
+    )
+    events = [EnginePollEvent(
+        task_type="pose-estimation",
+        result=result,
+        job_id=context.job_id,
+    )]
+    application.pose_engine.poll_event = (
+        lambda: events.pop(0) if events else None
+    )
+
+    application.poll()
+
+    layers = application.layer_stack.all_layers()
+    assert len(layers) == 2
+    assert application.layer_stack.active_layer is source
+    overlay = next(layer for layer in layers if layer is not source)
+    assert overlay.name.startswith("Pose")
+    assert np.any(overlay.image[:, :, 3] > 0)
+    assert application.latest_pose_result is result
+    assert "visible keypoints" in application.status_text
+    application.document.undo()
+    assert application.layer_stack.all_layers() == [source]
+    application.document.redo()
+    assert len(application.layer_stack.all_layers()) == 2
+    assert application.layer_stack.active_layer is source
+    application.close()
+
+
+def test_pose_command_analyzes_visible_canvas_composite_not_active_layer():
+    application = _application()
+    background = np.full((6, 8, 4), (12, 34, 56, 255), dtype=np.uint8)
+    application.layer_stack.init_from_image(background)
+    partial = np.full((2, 3, 4), (210, 80, 30, 255), dtype=np.uint8)
+    application.layer_stack.insert_image_layer("Partial", partial, x=2, y=3)
+    source = application.layer_stack.active_layer
+    expected_composite = application.layer_stack.composite()
+    requests = []
+    application.pose_engine.submit_request = (
+        lambda request, **_kwargs: requests.append(request) or True
+    )
+    commands = EditorCommandCoordinator(application)
+
+    commands.handlers["ai.pose.dwpose"]()
+
+    assert len(requests) == 1
+    assert requests[0].image.shape == (6, 8, 4)
+    np.testing.assert_array_equal(requests[0].image, expected_composite)
+    assert not np.array_equal(requests[0].image[:2, :3], partial)
+    context = application.pose_controller.pending_context
+    result = PoseEstimationResult(
+        profile_id="dwpose",
+        width=8,
+        height=6,
+        keypoint_schema="test",
+        poses=(PoseInstance((
+            PoseKeypoint("left_shoulder", 2.0, 2.0, 0.9),
+            PoseKeypoint("left_elbow", 5.0, 4.0, 0.8),
+        )),),
+        connections=(PoseConnection(
+            "left_shoulder", "left_elbow", "body"),),
+    )
+    events = [EnginePollEvent(
+        task_type="pose-estimation",
+        result=result,
+        job_id=context.job_id,
+    )]
+    application.pose_engine.poll_event = (
+        lambda: events.pop(0) if events else None
+    )
+
+    application.poll()
+
+    pose_layer = next(
+        layer for layer in application.layer_stack.all_layers()
+        if layer is not source and layer.name.startswith("Pose")
+    )
+    assert pose_layer.image.shape == (6, 8, 4)
+    assert (pose_layer.x, pose_layer.y) == (0, 0)
+    assert application.layer_stack.active_layer is source
     application.close()
 
 

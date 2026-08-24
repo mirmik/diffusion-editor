@@ -16,13 +16,13 @@ from diffusion_editor.generation.image_edit_profiles import (
     FLUX2_KLEIN_PROFILE_ID,
     LEGACY_INSTRUCT_PROFILE_ID,
     QWEN_IMAGE_EDIT_PROFILE_ID,
-    QWEN_MULTIPLE_ANGLES_PROFILE_ID,
     SENSENOVA_U15_PROFILE_ID,
     all_image_edit_parameters,
     image_edit_profile,
     image_edit_profiles,
     normalize_lora_adapters,
     normalize_profile_store,
+    qwen_multiple_angles_lora_adapter,
 )
 from diffusion_editor.generation.provenance import capture_tool_state
 
@@ -42,7 +42,6 @@ def test_builtin_profiles_are_stable_and_declarative():
     profiles = image_edit_profiles()
     assert [profile.stable_id for profile in profiles] == [
         QWEN_IMAGE_EDIT_PROFILE_ID,
-        QWEN_MULTIPLE_ANGLES_PROFILE_ID,
         FLUX2_KLEIN_PROFILE_ID,
         SENSENOVA_U15_PROFILE_ID,
         LEGACY_INSTRUCT_PROFILE_ID,
@@ -55,7 +54,7 @@ def test_builtin_profiles_are_stable_and_declarative():
         assert {"prompt", "steps", "seed", "model", "dtype", "device"} <= set(ids)
         assert set(profile.normalize({})) == set(ids)
     assert [profile.max_input_images for profile in profiles] == [
-        2, 2, 2, 2, 1,
+        2, 2, 2, 1,
     ]
 
 
@@ -76,19 +75,17 @@ def test_qwen_prefers_installed_scaled_fp8_components():
         FLUX2_KLEIN_PROFILE_ID).defaults()["cpu_offload"] is False
 
 
-def test_qwen_multiple_angles_profile_uses_installed_adapter_defaults():
-    profile = image_edit_profile(QWEN_MULTIPLE_ANGLES_PROFILE_ID)
-    adapters = profile.default_lora_adapters
+def test_qwen_multiple_angles_is_an_explicit_optional_adapter():
+    profile = image_edit_profile(QWEN_IMAGE_EDIT_PROFILE_ID)
+    adapter = qwen_multiple_angles_lora_adapter()
 
-    assert profile.provider == "diffusers.qwen_image_edit_plus"
-    assert profile.max_input_images == 2
-    assert [adapter.stable_id for adapter in adapters] == [
-        "lightning", "multiple-angles",
+    assert [item.stable_id for item in profile.default_lora_adapters] == [
+        "lightning",
     ]
-    assert adapters[1].source.endswith(
+    assert adapter.stable_id == "multiple-angles"
+    assert adapter.source.endswith(
         "qwen-image-edit-2511-multiple-angles-lora.safetensors")
-    assert adapters[1].weight == 0.9
-    assert profile.parameter("prompt").placeholder.startswith("<sks>")
+    assert adapter.weight == 1.0
     assert not {
         "lora_path", "lora_scale", "angle_lora_path", "angle_lora_scale",
     } & {parameter.stable_id for parameter in profile.parameters}
@@ -192,8 +189,7 @@ def test_image_edit_profiles_roundtrip_with_legacy_fields():
 
 
 def test_flat_qwen_lora_fields_migrate_to_persistent_adapter_stack():
-    old_parameters = image_edit_profile(
-        QWEN_MULTIPLE_ANGLES_PROFILE_ID).defaults()
+    old_parameters = image_edit_profile(QWEN_IMAGE_EDIT_PROFILE_ID).defaults()
     old_parameters.update({
         "lora_path": "/models/old-lightning.safetensors",
         "lora_scale": 0.75,
@@ -206,9 +202,9 @@ def test_flat_qwen_lora_fields_migrate_to_persistent_adapter_stack():
         patch_y=0,
         patch_w=8,
         patch_h=8,
-        model_profile_id=QWEN_MULTIPLE_ANGLES_PROFILE_ID,
+        model_profile_id=QWEN_IMAGE_EDIT_PROFILE_ID,
         profile_parameters={
-            QWEN_MULTIPLE_ANGLES_PROFILE_ID: old_parameters,
+            QWEN_IMAGE_EDIT_PROFILE_ID: old_parameters,
         },
     )
 

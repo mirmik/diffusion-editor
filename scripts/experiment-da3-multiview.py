@@ -57,6 +57,16 @@ def _arguments() -> argparse.Namespace:
         default=0.0,
         help="Provide an evenly spaced OpenCV camera orbit when greater than zero.",
     )
+    parser.add_argument(
+        "--input-extrinsics",
+        type=Path,
+        help="External OpenCV world-to-camera matrices as a .npy array (N,3,4 or N,4,4).",
+    )
+    parser.add_argument(
+        "--input-intrinsics",
+        type=Path,
+        help="External pixel intrinsics as a .npy array (N,3,3).",
+    )
     parser.add_argument("--horizontal-fov-degrees", type=float, default=34.0)
     parser.add_argument(
         "--da3-source",
@@ -112,6 +122,43 @@ def _nominal_orbit_cameras(
             )
         )
     return np.stack(extrinsics), np.stack(intrinsics)
+
+
+def _external_cameras(
+    extrinsics_path: Path,
+    intrinsics_path: Path,
+    view_count: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    if not extrinsics_path.is_file():
+        raise ValueError(f"external extrinsics are missing: {extrinsics_path}")
+    if not intrinsics_path.is_file():
+        raise ValueError(f"external intrinsics are missing: {intrinsics_path}")
+
+    extrinsics = np.asarray(np.load(extrinsics_path), dtype=np.float32)
+    intrinsics = np.asarray(np.load(intrinsics_path), dtype=np.float32)
+    if extrinsics.shape == (view_count, 3, 4):
+        homogeneous = np.broadcast_to(
+            np.eye(4, dtype=np.float32), (view_count, 4, 4)
+        ).copy()
+        homogeneous[:, :3, :] = extrinsics
+        extrinsics = homogeneous
+    elif extrinsics.shape != (view_count, 4, 4):
+        raise ValueError(
+            "external extrinsics must have shape "
+            f"({view_count},3,4) or ({view_count},4,4), got {extrinsics.shape}"
+        )
+    if intrinsics.shape != (view_count, 3, 3):
+        raise ValueError(
+            "external intrinsics must have shape "
+            f"({view_count},3,3), got {intrinsics.shape}"
+        )
+    if not np.isfinite(extrinsics).all() or not np.isfinite(intrinsics).all():
+        raise ValueError("external camera arrays contain non-finite values")
+    if not np.allclose(extrinsics[:, 3, :], (0.0, 0.0, 0.0, 1.0)):
+        raise ValueError("external extrinsics have invalid homogeneous rows")
+    if np.any(intrinsics[:, 0, 0] <= 0.0) or np.any(intrinsics[:, 1, 1] <= 0.0):
+        raise ValueError("external intrinsics have non-positive focal lengths")
+    return np.ascontiguousarray(extrinsics), np.ascontiguousarray(intrinsics)
 
 
 def _camera_to_world_points(
@@ -212,7 +259,47 @@ def _save_cloud(
         colors=np.ascontiguousarray(rgb, dtype=np.float32),
         confidence=np.ascontiguousarray(conf, dtype=np.float32),
     )
+    _write_binary_ply(path.with_suffix(".ply"), xyz, rgb, conf)
     return len(xyz)
+
+
+def _write_binary_ply(
+    path: Path,
+    positions: np.ndarray,
+    colors: np.ndarray,
+    confidence: np.ndarray,
+) -> None:
+    colors_u8 = np.clip(np.rint(colors * 255.0), 0, 255).astype(np.uint8)
+    vertex = np.empty(
+        len(positions),
+        dtype=np.dtype(
+            [
+                ("x", "<f4"),
+                ("y", "<f4"),
+                ("z", "<f4"),
+                ("red", "u1"),
+                ("green", "u1"),
+                ("blue", "u1"),
+                ("confidence", "<f4"),
+            ]
+        ),
+    )
+    vertex["x"], vertex["y"], vertex["z"] = positions.T
+    vertex["red"], vertex["green"], vertex["blue"] = colors_u8.T
+    vertex["confidence"] = confidence
+    header = (
+        "ply\n"
+        "format binary_little_endian 1.0\n"
+        "comment raw DA3 world coordinates; no point-coordinate normalization\n"
+        f"element vertex {len(vertex)}\n"
+        "property float x\nproperty float y\nproperty float z\n"
+        "property uchar red\nproperty uchar green\nproperty uchar blue\n"
+        "property float confidence\n"
+        "end_header\n"
+    ).encode("ascii")
+    with path.open("wb") as stream:
+        stream.write(header)
+        stream.write(vertex.tobytes())
 
 
 def main() -> int:
@@ -224,6 +311,15 @@ def main() -> int:
         raise SystemExit(f"missing input images: {missing}")
     if not (args.da3_source / "depth_anything_3/api.py").is_file():
         raise SystemExit(f"DA3 source is missing: {args.da3_source}")
+    external_camera_paths = (args.input_extrinsics, args.input_intrinsics)
+    if (external_camera_paths[0] is None) != (external_camera_paths[1] is None):
+        raise SystemExit(
+            "--input-extrinsics and --input-intrinsics must be provided together"
+        )
+    if external_camera_paths[0] is not None and args.nominal_orbit_radius > 0.0:
+        raise SystemExit(
+            "external cameras and --nominal-orbit-radius are mutually exclusive"
+        )
 
     sys.path.insert(0, str(args.da3_source))
     os.environ.setdefault("MPLCONFIGDIR", "/tmp/diffusion-editor-matplotlib")
@@ -239,7 +335,21 @@ def main() -> int:
     )
     input_extrinsics = None
     input_intrinsics = None
-    if args.nominal_orbit_radius > 0.0:
+    if args.input_extrinsics is not None:
+        try:
+            input_extrinsics, input_intrinsics = _external_cameras(
+                args.input_extrinsics,
+                args.input_intrinsics,
+                len(args.inputs),
+            )
+        except ValueError as error:
+            raise SystemExit(str(error)) from error
+        print(
+            "Pose conditioning: external calibrated cameras "
+            f"from {args.input_extrinsics} and {args.input_intrinsics}",
+            flush=True,
+        )
+    elif args.nominal_orbit_radius > 0.0:
         input_extrinsics, input_intrinsics = _nominal_orbit_cameras(
             args.inputs,
             args.nominal_orbit_radius,
@@ -347,9 +457,23 @@ def main() -> int:
         "use_ray_pose": args.use_ray_pose,
         "ref_view_strategy": args.ref_view_strategy,
         "camera_mode": (
-            "nominal_orbit"
-            if args.nominal_orbit_radius > 0.0
-            else "predicted"
+            "external"
+            if args.input_extrinsics is not None
+            else (
+                "nominal_orbit"
+                if args.nominal_orbit_radius > 0.0
+                else "predicted"
+            )
+        ),
+        "input_extrinsics": (
+            str(args.input_extrinsics.resolve())
+            if args.input_extrinsics is not None
+            else None
+        ),
+        "input_intrinsics": (
+            str(args.input_intrinsics.resolve())
+            if args.input_intrinsics is not None
+            else None
         ),
         "nominal_orbit_radius": (
             args.nominal_orbit_radius

@@ -213,6 +213,30 @@ COMMAND_SPECS = (
         ),
     ),
     NativeCommandSpec(
+        "ai.pose.dwpose",
+        "Pose — DWPose WholeBody",
+        tooltip=(
+            "Detect COCO-WholeBody joints with the ONNX DWPose pipeline and "
+            "create a transparent comparison layer"
+        ),
+    ),
+    NativeCommandSpec(
+        "ai.pose.mediapipe",
+        "Pose — MediaPipe Full",
+        tooltip=(
+            "Detect 33 MediaPipe body landmarks and create a transparent "
+            "comparison layer"
+        ),
+    ),
+    NativeCommandSpec(
+        "ai.pose.silhouette",
+        "Pose — Silhouette Skeleton (Diagnostic)",
+        tooltip=(
+            "Skeletonize the foreground silhouette without anatomical "
+            "understanding; useful as a classical baseline"
+        ),
+    ),
+    NativeCommandSpec(
         "generation.3d",
         "Generate to Selected Stage",
         tooltip="Generate a Pixal3D model from the current composite",
@@ -309,6 +333,10 @@ MENU_COMMANDS = (
             "ai.depth_map.v2_small",
             None,
             "ai.depth_point_cloud",
+            None,
+            "ai.pose.dwpose",
+            "ai.pose.mediapipe",
+            "ai.pose.silhouette",
         ),
     ),
     (

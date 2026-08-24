@@ -41,6 +41,12 @@ from diffusion_editor.generation.types import (
     DiffusionInferenceResult,
     EnginePollEvent,
 )
+from diffusion_editor.generation.pose_estimation import (
+    PoseEstimationResult,
+    PoseInstance,
+    PoseKeypoint,
+    PoseConnection,
+)
 
 
 class _MemorySettings:
@@ -115,6 +121,41 @@ class _FakeDiffusionEngine(_IdleEngine):
         return event
 
 
+class _FakePoseEngine(_IdleEngine):
+    """Deterministic pose result for the real native texture-upload path."""
+
+    supports_job_ids = True
+
+    def __init__(self):
+        self.is_busy = False
+        self._event = None
+
+    def submit_request(self, request, *, job_id=None):
+        self.is_busy = True
+        height, width = request.image.shape[:2]
+        result = PoseEstimationResult(
+            profile_id=request.profile_id,
+            width=width,
+            height=height,
+            keypoint_schema="smoke",
+            poses=(PoseInstance((
+                PoseKeypoint("left_shoulder", width * 0.3, height * 0.3, 1.0),
+                PoseKeypoint("left_elbow", width * 0.5, height * 0.7, 1.0),
+            )),),
+            connections=(PoseConnection(
+                "left_shoulder", "left_elbow", "body"),),
+        )
+        self._event = EnginePollEvent(
+            "pose-estimation", result=result, job_id=job_id)
+        return True
+
+    def poll_event(self):
+        event, self._event = self._event, None
+        if event is not None:
+            self.is_busy = False
+        return event
+
+
 def _application() -> EditorApplication:
     engine = _IdleEngine()
     return EditorApplication(
@@ -125,6 +166,7 @@ def _application() -> EditorApplication:
             engine,
             engine,
             engine,
+            pose=_FakePoseEngine(),
         ),
     )
 
@@ -293,6 +335,30 @@ def main() -> int:
                 raise RuntimeError(
                     "imported source did not reach Canvas composite: "
                     f"{contribution_error}{suffix}")
+
+            # Exercise pose result mapping through a real native GPU upload.
+            source_layer = application.layer_stack.active_layer
+            root.command_coordinator.handlers["ai.pose.dwpose"]()
+            pose_deadline = time.monotonic() + 2.0
+            while (
+                    len(application.layer_stack.all_layers()) == 1
+                    and time.monotonic() < pose_deadline):
+                rendered += int(root.tick().rendered)
+                time.sleep(0.01)
+            pose_layers = application.layer_stack.all_layers()
+            if len(pose_layers) != 2:
+                raise RuntimeError("native pose command created no overlay layer")
+            if application.layer_stack.active_layer is not source_layer:
+                raise RuntimeError("native pose command changed the source layer")
+            pose_layer = next(
+                layer for layer in pose_layers if layer is not source_layer)
+            if not np.any(pose_layer.image[:, :, 3] > 0):
+                raise RuntimeError("native pose overlay contains no pixels")
+            rendered += int(root.tick().rendered)
+            application.document.undo()
+            rendered += int(root.tick().rendered)
+            if application.layer_stack.all_layers() != [source_layer]:
+                raise RuntimeError("native pose overlay undo failed")
 
             root.canvas_controls.brush.size.value = 9.0
             root.canvas_controls.brush.hardness.value = 1.0

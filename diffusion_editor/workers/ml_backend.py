@@ -531,6 +531,8 @@ class RealMlBackend:
             adapter for adapter in lora_adapters
             if adapter.enabled and adapter.source
         )
+        runtime_adapter_names: list[str] = []
+        runtime_adapter_weights: list[float] = []
         if active_adapters:
             if profile_id == SENSENOVA_U15_PROFILE_ID:
                 raise ValueError(
@@ -561,6 +563,8 @@ class RealMlBackend:
                 adapter_names,
                 adapter_weights=adapter_weights,
             )
+            runtime_adapter_names = list(adapter_names)
+            runtime_adapter_weights = list(adapter_weights)
         if profile_id != SENSENOVA_U15_PROFILE_ID:
             if bool(parameters["vae_tiling"]):
                 pipe.vae.enable_tiling()
@@ -578,6 +582,10 @@ class RealMlBackend:
         self._image_edit_profile_id = profile_id
         self._image_edit_lora_adapters = tuple(
             adapter.to_dict() for adapter in lora_adapters)
+        reported_active_adapters = list(runtime_adapter_names)
+        get_active_adapters = getattr(pipe, "get_active_adapters", None)
+        if callable(get_active_adapters):
+            reported_active_adapters = list(get_active_adapters())
         return {
             "loaded": True,
             "profile_id": profile_id,
@@ -586,6 +594,8 @@ class RealMlBackend:
             "dtype": self._instruct_dtype,
             "pipeline": type(pipe).__name__,
             "component_mode": component_mode,
+            "active_lora_adapters": reported_active_adapters,
+            "active_lora_weights": runtime_adapter_weights,
             "model_identity": identity.to_dict(),
             "warnings": list(identity_warnings),
         }

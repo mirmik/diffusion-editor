@@ -44,11 +44,6 @@ repo ID и нестандартных путей.
 
 - `qwen-image-edit-2511` — `QwenImageEditPlusPipeline`, основной профиль.
   По умолчанию используются 4 шага при найденной Lightning LoRA, иначе 40.
-- `qwen-image-edit-2511-multiple-angles` — тот же Qwen pipeline с отдельным
-  адаптером
-  [`fal/Qwen-Image-Edit-2511-Multiple-Angles-LoRA`](https://huggingface.co/fal/Qwen-Image-Edit-2511-Multiple-Angles-LoRA).
-  Начальный стек содержит Lightning и Multiple Angles с независимыми весами
-  `1.0` и `0.9`; пользователь может изменить или дополнить его.
 - `flux2-klein-4b` — `Flux2KleinPipeline`, быстрый distilled профиль с четырьмя
   шагами.
 - `sensenova-u1.5-8b-mot-preview` — standalone `sensenova_u1` image-to-image
@@ -80,8 +75,9 @@ Multiple Angles автоматически ищется в
 Другой default задаётся через
 `DIFFUSION_EDITOR_QWEN_MULTIPLE_ANGLES_LORA`. Prompt начинается с `<sks>` и
 затем задаёт азимут, высоту камеры и дистанцию именно в таком порядке, например
-`<sks> front-left quarter view elevated shot medium shot`. Обычный Qwen-профиль
-этот адаптер не загружает.
+`<sks> front-left quarter view elevated shot medium shot`. Multiple Angles не
+является отдельным профилем: адаптер явно добавляется в стек основного
+`qwen-image-edit-2511`, обычно с весом `1.0`.
 
 Старые документы с плоскими `lora_path`, `lora_scale`, `angle_lora_path` и
 `angle_lora_scale` мигрируют в две строки стека при чтении. После следующего

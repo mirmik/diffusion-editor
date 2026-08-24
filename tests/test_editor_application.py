@@ -135,6 +135,7 @@ def test_shutdown_orders_view_workers_engines_and_gpu_resources():
         "segmentation-engine",
         "grounding-engine",
         "depth-engine",
+        "pose-engine",
         "canvas",
     ]
 

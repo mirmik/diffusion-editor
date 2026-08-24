@@ -1,0 +1,244 @@
+{
+  "schema": "diffusion-editor.canonical-identity-experiment",
+  "schema_version": 1,
+  "name": "canonical-openassets17-2026-08-23",
+  "views": {
+    "azimuths": [0, 45, 90, 135, 180, 225, 270, 315],
+    "elevations": [-30, 0, 30],
+    "resolution": 256,
+    "samples": 16,
+    "distance": 2.2,
+    "distance_unit": "character-height",
+    "blend_subdivision_render_level": 0,
+    "blend_render_engine": "workbench"
+  },
+  "feature_extraction": {
+    "blocks": [15, 30, 45, 59],
+    "denoising_steps": 4,
+    "noise_replicas": 1,
+    "output_resolution": 1024,
+    "seed": 20260822
+  },
+  "training": {
+    "run_id": "openassets17-multiscale-v2-finetune",
+    "architecture": "multiscale-v2",
+    "steps": 3264,
+    "batch_size": 1,
+    "target_resolution": 256,
+    "projection_channels": 64,
+    "hidden_channels": 128,
+    "learning_rate": 0.0001,
+    "weight_decay": 0.0001,
+    "timestep_conditioning": true,
+    "host_cache_samples": 4,
+    "seed": 20260822,
+    "checkpoint_every_epochs": 1,
+    "checkpoint": "data/canonical-experiments/scale10-2026-08-23/training/scale10-multiscale-v2-finetune-gate/checkpoints/epoch-002-step-001920.pt"
+  },
+  "identities": [
+    {
+      "id": "rain",
+      "split": "train",
+      "dataset": "/home/mirmik/mnt-nvme/canonical-experiments/scale10-2026-08-23/datasets/rain",
+      "features": "/home/mirmik/mnt-nvme/canonical-experiments/scale10-2026-08-23/features/rain"
+    },
+    {
+      "id": "april",
+      "split": "train",
+      "dataset": "/home/mirmik/mnt-nvme/canonical-experiments/scale10-2026-08-23/datasets/april",
+      "features": "/home/mirmik/mnt-nvme/canonical-experiments/scale10-2026-08-23/features/april"
+    },
+    {
+      "id": "arthur",
+      "split": "train",
+      "dataset": "/home/mirmik/mnt-nvme/canonical-experiments/scale10-2026-08-23/datasets/arthur",
+      "features": "/home/mirmik/mnt-nvme/canonical-experiments/scale10-2026-08-23/features/arthur"
+    },
+    {
+      "id": "atom",
+      "split": "train",
+      "dataset": "/home/mirmik/mnt-nvme/canonical-experiments/scale10-2026-08-23/datasets/atom",
+      "features": "/home/mirmik/mnt-nvme/canonical-experiments/scale10-2026-08-23/features/atom"
+    },
+    {
+      "id": "barret",
+      "split": "train",
+      "dataset": "/home/mirmik/mnt-nvme/canonical-experiments/scale10-2026-08-23/datasets/barret",
+      "features": "/home/mirmik/mnt-nvme/canonical-experiments/scale10-2026-08-23/features/barret"
+    },
+    {
+      "id": "kate",
+      "split": "train",
+      "dataset": "/home/mirmik/mnt-nvme/canonical-experiments/scale10-2026-08-23/datasets/kate",
+      "features": "/home/mirmik/mnt-nvme/canonical-experiments/scale10-2026-08-23/features/kate"
+    },
+    {
+      "id": "snow",
+      "split": "train",
+      "dataset": "/home/mirmik/mnt-nvme/canonical-experiments/scale10-2026-08-23/datasets/snow",
+      "features": "/home/mirmik/mnt-nvme/canonical-experiments/scale10-2026-08-23/features/snow"
+    },
+    {
+      "id": "ellie",
+      "split": "train",
+      "dataset": "/home/mirmik/mnt-nvme/canonical-experiments/scale10-2026-08-23/datasets/ellie",
+      "features": "/home/mirmik/mnt-nvme/canonical-experiments/scale10-2026-08-23/features/ellie"
+    },
+    {
+      "id": "phil",
+      "split": "train",
+      "dataset": "/home/mirmik/mnt-nvme/canonical-experiments/scale10-2026-08-23/datasets/phil",
+      "features": "/home/mirmik/mnt-nvme/canonical-experiments/scale10-2026-08-23/features/phil"
+    },
+    {
+      "id": "rex",
+      "split": "train",
+      "dataset": "/home/mirmik/mnt-nvme/canonical-experiments/scale10-2026-08-23/datasets/rex",
+      "features": "/home/mirmik/mnt-nvme/canonical-experiments/scale10-2026-08-23/features/rex"
+    },
+    {
+      "id": "quat-casual-female",
+      "name": "Quaternius Casual Female",
+      "split": "train",
+      "pose_id": "authored-rest",
+      "kind": "blend",
+      "source": "/home/mirmik/mnt-nvme/character-assets/incoming/quaternius-ultimate/Casual_Female.blend",
+      "only_meshes": ["Body"],
+      "rig_name": "CharacterArmature",
+      "pelvis_bone": "Hips",
+      "creator": "Quaternius",
+      "source_page": "https://quaternius.com/packs/ultimatedanimatedcharacter.html",
+      "license": "CC0"
+    },
+    {
+      "id": "quat-knight-golden-male",
+      "name": "Quaternius Golden Knight Male",
+      "split": "train",
+      "pose_id": "authored-rest",
+      "kind": "blend",
+      "source": "/home/mirmik/mnt-nvme/character-assets/incoming/quaternius-ultimate/Knight_Golden_Male.blend",
+      "only_meshes": ["Body"],
+      "rig_name": "CharacterArmature",
+      "pelvis_bone": "Hips",
+      "creator": "Quaternius",
+      "source_page": "https://quaternius.com/packs/ultimatedanimatedcharacter.html",
+      "license": "CC0"
+    },
+    {
+      "id": "quat-goblin-female",
+      "name": "Quaternius Goblin Female",
+      "split": "train",
+      "pose_id": "authored-rest",
+      "kind": "blend",
+      "source": "/home/mirmik/mnt-nvme/character-assets/incoming/quaternius-ultimate/Goblin_Female.blend",
+      "only_meshes": ["Body"],
+      "rig_name": "CharacterArmature",
+      "pelvis_bone": "Hips",
+      "creator": "Quaternius",
+      "source_page": "https://quaternius.com/packs/ultimatedanimatedcharacter.html",
+      "license": "CC0"
+    },
+    {
+      "id": "oga-pack1-01",
+      "name": "OpenGameArt Character 01",
+      "split": "train",
+      "pose_id": "authored-rest",
+      "kind": "blend",
+      "source": "/home/mirmik/mnt-nvme/character-assets/incoming/opengameart-character-pack1/extracted/modelspack1/1.blend",
+      "only_meshes": ["1.003"],
+      "rig_name": "1rig.003",
+      "pelvis_bone": "quadril",
+      "creator": "kuniklo",
+      "source_page": "https://opengameart.org/content/character-pack1",
+      "license": "CC0"
+    },
+    {
+      "id": "oga-pack1-18",
+      "name": "OpenGameArt Character 18",
+      "split": "train",
+      "pose_id": "authored-rest",
+      "kind": "blend",
+      "source": "/home/mirmik/mnt-nvme/character-assets/incoming/opengameart-character-pack1/extracted/modelspack1/18.blend",
+      "only_meshes": ["18.003"],
+      "rig_name": "18rig.003",
+      "pelvis_bone": "quadril",
+      "creator": "kuniklo",
+      "source_page": "https://opengameart.org/content/character-pack1",
+      "license": "CC0"
+    },
+    {
+      "id": "oga-pack1-14",
+      "name": "OpenGameArt Character 14",
+      "split": "train",
+      "pose_id": "authored-rest",
+      "kind": "blend",
+      "source": "/home/mirmik/mnt-nvme/character-assets/incoming/opengameart-character-pack1/extracted/modelspack1/14.blend",
+      "only_meshes": ["14.003"],
+      "rig_name": "14rig.003",
+      "pelvis_bone": "quadril",
+      "creator": "kuniklo",
+      "source_page": "https://opengameart.org/content/character-pack1",
+      "license": "CC0"
+    },
+    {
+      "id": "oga-pack1-16",
+      "name": "OpenGameArt Character 16",
+      "split": "train",
+      "pose_id": "authored-rest",
+      "kind": "blend",
+      "source": "/home/mirmik/mnt-nvme/character-assets/incoming/opengameart-character-pack1/extracted/modelspack1/16.blend",
+      "only_meshes": ["16.003"],
+      "rig_name": "16RIG.003",
+      "pelvis_bone": "quadril",
+      "creator": "kuniklo",
+      "source_page": "https://opengameart.org/content/character-pack1",
+      "license": "CC0"
+    },
+    {
+      "id": "jay",
+      "split": "validation",
+      "dataset": "/home/mirmik/mnt-nvme/canonical-experiments/scale10-2026-08-23/datasets/jay",
+      "features": "/home/mirmik/mnt-nvme/canonical-experiments/scale10-2026-08-23/features/jay"
+    },
+    {
+      "id": "victoria",
+      "split": "validation",
+      "dataset": "/home/mirmik/mnt-nvme/canonical-experiments/scale10-2026-08-23/datasets/victoria",
+      "features": "/home/mirmik/mnt-nvme/canonical-experiments/scale10-2026-08-23/features/victoria"
+    },
+    {
+      "id": "quat-wizard",
+      "name": "Quaternius Wizard",
+      "split": "validation",
+      "pose_id": "authored-rest",
+      "kind": "blend",
+      "source": "/home/mirmik/mnt-nvme/character-assets/incoming/quaternius-ultimate/Wizard.blend",
+      "only_meshes": ["Body"],
+      "rig_name": "CharacterArmature",
+      "pelvis_bone": "Hips",
+      "creator": "Quaternius",
+      "source_page": "https://quaternius.com/packs/ultimatedanimatedcharacter.html",
+      "license": "CC0"
+    },
+    {
+      "id": "oga-pack1-09",
+      "name": "OpenGameArt Character 09",
+      "split": "validation",
+      "pose_id": "authored-rest",
+      "kind": "blend",
+      "source": "/home/mirmik/mnt-nvme/character-assets/incoming/opengameart-character-pack1/extracted/modelspack1/9.blend",
+      "only_meshes": ["9.003"],
+      "rig_name": "9rig.003",
+      "pelvis_bone": "quadril",
+      "creator": "kuniklo",
+      "source_page": "https://opengameart.org/content/character-pack1",
+      "license": "CC0"
+    },
+    {
+      "id": "termin",
+      "split": "test",
+      "dataset": "/home/mirmik/mnt-nvme/canonical-experiments/scale10-2026-08-23/datasets/termin",
+      "features": "/home/mirmik/mnt-nvme/canonical-experiments/scale10-2026-08-23/features/termin"
+    }
+  ]
+}

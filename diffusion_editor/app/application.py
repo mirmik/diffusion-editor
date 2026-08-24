@@ -17,6 +17,7 @@ from ..document.document_service import DocumentService
 from ..document.commands import (
     AddDepthVisualizationCommand,
     AddLayerCommand,
+    AddPoseOverlayCommand,
     SetLayerSelectionCommand,
 )
 from ..document.history import HistoryManager
@@ -29,6 +30,7 @@ from ..engines.depth_engine import DepthEstimationEngine
 from ..engines.grounding_engine import GroundingEngine
 from ..engines.instruct_engine import InstructEngine
 from ..engines.lama_engine import LamaEngine
+from ..engines.pose_engine import PoseEstimationEngine
 from ..engines.segmentation_engine import SegmentationEngine
 from ..generation.diffusion_controller import DiffusionGenerationController
 from ..generation.depth_controller import DepthGenerationController
@@ -46,6 +48,12 @@ from ..generation.job_context import (
     ResultApplicationPolicy,
 )
 from ..generation.lama_controller import LamaGenerationController
+from ..generation.pose_controller import PoseEstimationController
+from ..generation.pose_estimation import (
+    PoseEstimationResult,
+    pose_estimator_profile,
+    render_pose_overlay,
+)
 from ..generation.provenance import capture_tool_state
 from ..generation.result_mapper import (
     map_grounding_result,
@@ -87,6 +95,7 @@ class EngineSet:
     instruct: Any
     grounding: Any
     depth: Any | None = None
+    pose: Any | None = None
 
     @classmethod
     def create_default(cls) -> "EngineSet":
@@ -97,6 +106,7 @@ class EngineSet:
             instruct=InstructEngine(),
             grounding=GroundingEngine(),
             depth=DepthEstimationEngine(),
+            pose=PoseEstimationEngine(),
         )
 
 
@@ -135,6 +145,7 @@ class EditorApplication:
         self.settings = settings if settings is not None else Settings()
         self.engines = engines if engines is not None else EngineSet.create_default()
         self.depth_engine = self.engines.depth or DepthEstimationEngine()
+        self.pose_engine = self.engines.pose or PoseEstimationEngine()
         self.running = True
         self.closed = False
         self.status_text = "Ready"
@@ -150,6 +161,7 @@ class EditorApplication:
         self.latest_depth_point_cloud: DepthPointCloudData | None = None
         self.latest_depth_point_cloud_error: str | None = None
         self.latest_depth_result: DepthEstimationResult | None = None
+        self.latest_pose_result: PoseEstimationResult | None = None
         self._latest_depth_point_cloud_layer_ids: frozenset[str] = frozenset()
 
         self.layer_stack = LayerStack()
@@ -233,6 +245,13 @@ class EditorApplication:
             ),
             document_state=document_state,
         )
+        self.pose_controller = PoseEstimationController(
+            self.pose_engine,
+            composite=lambda: np.ascontiguousarray(
+                self.layer_stack.composite()
+            ),
+            document_state=document_state,
+        )
 
         self._view = ViewPorts()
         self._snapshot_listeners: list[Callable[[], None]] = []
@@ -245,7 +264,8 @@ class EditorApplication:
                 ("lama-engine", self.engines.lama),
                 ("segmentation-engine", self.engines.segmentation),
                 ("grounding-engine", self.engines.grounding),
-                ("depth-engine", self.depth_engine)):
+                ("depth-engine", self.depth_engine),
+                ("pose-engine", self.pose_engine)):
             self.register_shutdown_resource(
                 ShutdownPhase.ENGINE_WORKERS,
                 name,
@@ -457,6 +477,7 @@ class EditorApplication:
         self._poll_diffusion()
         self._poll_grounding()
         self._poll_depth()
+        self._poll_pose()
 
     def request_stop(self) -> None:
         self.running = False
@@ -589,6 +610,7 @@ class EditorApplication:
             self.lama_controller,
             self.segmentation_controller,
             self.depth_controller,
+            self.pose_controller,
         )
 
     def _invalidate_stale_generation_jobs(self) -> None:
@@ -1063,5 +1085,41 @@ class EditorApplication:
                 f"remain unquantized"
                 f"{mask_status}{cloud_status})"
             )
+        elif event.status:
+            self.set_status(event.status)
+
+    def _poll_pose(self) -> None:
+        event = self.pose_controller.poll()
+        if event is None:
+            return
+        if event.pose_result is not None:
+            context, result = event.pose_result
+            layer, rejection = self._resolve_generation_target(context)
+            if rejection is not None or layer is None:
+                self.set_status(
+                    rejection or "Pose result rejected: target layer is missing")
+                return
+            if (result.width, result.height) != (
+                    self.layer_stack.width, self.layer_stack.height):
+                self.set_status(
+                    "Pose result rejected: result size does not match canvas")
+                return
+            profile = pose_estimator_profile(result.profile_id)
+            overlay = render_pose_overlay(result)
+            self.document.execute(AddPoseOverlayCommand(
+                source_layer=layer,
+                name=self.layer_stack.next_name(profile.layer_name),
+                overlay_image=overlay,
+                label=f"Create {profile.title} Overlay",
+            ))
+            self.latest_pose_result = result
+            visible = sum(
+                point.score >= 0.25
+                for pose in result.poses
+                for point in pose.keypoints
+            )
+            self.set_status(
+                f"{profile.title}: {len(result.poses)} pose(s), "
+                f"{visible} visible keypoints")
         elif event.status:
             self.set_status(event.status)

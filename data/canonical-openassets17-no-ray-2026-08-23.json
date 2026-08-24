@@ -1,0 +1,22 @@
+{
+  "schema": "diffusion-editor.canonical-training-recipe",
+  "schema_version": 1,
+  "name": "canonical-openassets17-no-ray-2026-08-23",
+  "training": {
+    "run_id": "openassets17-multiscale-v2-no-ray-finetune",
+    "architecture": "multiscale-v2",
+    "checkpoint": "/home/mirmik/mnt-nvme/canonical-experiments/openassets17-2026-08-23/initializers/scale10-multiscale-v2-finetune-gate-epoch2-no-ray.pt",
+    "checkpoint_every_epochs": 1,
+    "steps": 3264,
+    "batch_size": 1,
+    "target_resolution": 256,
+    "projection_channels": 64,
+    "hidden_channels": 128,
+    "learning_rate": 0.0001,
+    "weight_decay": 0.0001,
+    "timestep_conditioning": true,
+    "host_cache_samples": 4,
+    "seed": 20260822,
+    "no_ray_features": true
+  }
+}

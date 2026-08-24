@@ -14,8 +14,9 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from diffusion_editor.generation.image_edit_profiles import (
-    QWEN_MULTIPLE_ANGLES_PROFILE_ID,
+    QWEN_IMAGE_EDIT_PROFILE_ID,
     image_edit_profile,
+    qwen_multiple_angles_lora_adapter,
 )
 from diffusion_editor.workers.ml_backend import RealMlBackend
 
@@ -52,13 +53,19 @@ def main() -> int:
 
     import torch
 
-    profile = image_edit_profile(QWEN_MULTIPLE_ANGLES_PROFILE_ID)
+    profile = image_edit_profile(QWEN_IMAGE_EDIT_PROFILE_ID)
     parameters = profile.defaults()
     # A full-resolution Qwen VAE encode can peak above the VRAM left beside
     # the FP8 transformer.  Tiling changes only how the latent is computed;
     # the feature grid and the exact raster translation stay unchanged.
     parameters["vae_tiling"] = True
-    adapters = [adapter.to_dict() for adapter in profile.default_lora_adapters]
+    adapters = [
+        adapter.to_dict()
+        for adapter in (
+            *profile.default_lora_adapters,
+            qwen_multiple_angles_lora_adapter(),
+        )
+    ]
     backend = RealMlBackend()
     print("Loading Qwen Multiple Angles...", flush=True)
     loaded = backend.load_image_edit({

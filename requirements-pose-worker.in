@@ -1,0 +1,9 @@
+# Isolated regular-CPython 3.11 runtime for pose-estimation tools.
+# Kept separate because MediaPipe/RTMLib own an OpenCV distribution that must
+# not replace the shared Qwen/DA3 worker's headless OpenCV files.
+
+mediapipe==1.0.1
+rtmlib==0.0.16
+onnxruntime==1.27.0
+Pillow==12.3.0
+scikit-image==0.26.0
