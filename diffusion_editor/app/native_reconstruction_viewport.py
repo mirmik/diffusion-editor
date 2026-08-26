@@ -12,7 +12,7 @@ import numpy as np
 from PIL import Image
 from tcbase import Action, MouseButton
 from tcbase._geom_native import LinearColor
-from termin.geombase import OrbitCamera, Vec3
+from termin.geombase import OrbitCamera, Rect2, Vec2, Vec3
 from termin.gui_native import Size, TcDocument
 from tgfx import (
     CULL_NONE,
@@ -393,8 +393,22 @@ class _OrbitCamera:
     def orbit(self, dx: float, dy: float) -> None:
         self._camera.orbit(-float(dx) * 0.01, float(dy) * 0.01)
 
-    def pan(self, dx: float, dy: float) -> None:
-        self._camera.pan(float(dx), float(dy))
+    def begin_pan(
+        self,
+        position: tuple[float, float],
+        width: int,
+        height: int,
+    ):
+        return self._camera.begin_pan(
+            Vec2(*map(float, position)),
+            Rect2(0.0, 0.0, max(float(width), 1.0), max(float(height), 1.0)),
+        )
+
+    def pan(self, gesture, position: tuple[float, float]) -> bool:
+        return bool(self._camera.pan(
+            gesture,
+            Vec2(*map(float, position)),
+        ))
 
     def zoom(self, delta: float) -> None:
         self._camera.zoom(max(0.15, 1.0 - float(delta) * 0.1))
@@ -424,7 +438,16 @@ class _OrbitCamera:
 
     def mvp(self, width: int, height: int) -> np.ndarray:
         aspect = max(float(width) / max(float(height), 1.0), 0.001)
-        flat = np.asarray(self._camera.mvp(aspect), dtype=np.float32)
+        native_mvp = self._camera.mvp(aspect)
+        # Current Termin returns a native Mat44.  Older SDKs exposed the
+        # same column-major values as a flat tuple, so retain that fallback
+        # while using the matrix's explicit storage adapter when available.
+        values = (
+            native_mvp.to_column_major()
+            if hasattr(native_mvp, "to_column_major")
+            else native_mvp
+        )
+        flat = np.asarray(values, dtype=np.float32)
         return flat.reshape((4, 4), order="F")
 
     def _reset_orientation(self) -> None:
@@ -466,6 +489,7 @@ class _ViewportSurface:
         self._texture = None
         self._pointer = (0.0, 0.0)
         self._drag_mode = ""
+        self._pan_gesture = None
 
     @property
     def size(self) -> tuple[int, int]:
@@ -516,7 +540,10 @@ class _ViewportSurface:
         if self._drag_mode == "orbit":
             self._camera.orbit(dx, dy)
         else:
-            self._camera.pan(-dx, dy)
+            if self._pan_gesture is None:
+                return False
+            if not self._camera.pan(self._pan_gesture, self._pointer):
+                return False
         self._on_changed()
         return True
 
@@ -535,12 +562,18 @@ class _ViewportSurface:
         self._pointer = (float(x), float(y))
         if int(action) == int(Action.RELEASE):
             self._drag_mode = ""
+            self._pan_gesture = None
             return True
         if int(action) != int(Action.PRESS):
             return False
         if int(button) == int(MouseButton.LEFT):
             self._drag_mode = "orbit"
         elif int(button) in {int(MouseButton.MIDDLE), int(MouseButton.RIGHT)}:
+            self._pan_gesture = self._camera.begin_pan(
+                self._pointer, self._width, self._height
+            )
+            if self._pan_gesture is None:
+                return False
             self._drag_mode = "pan"
         else:
             return False

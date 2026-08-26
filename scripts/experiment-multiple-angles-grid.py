@@ -90,10 +90,19 @@ def _write_contact_sheets(output_dir: Path, jobs: list[dict]) -> None:
 def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--front", required=True, type=Path)
-    parser.add_argument(
+    references = parser.add_mutually_exclusive_group()
+    references.add_argument(
         "--back",
         type=Path,
         help="Optional second reference image; omit for a front-only source.",
+    )
+    references.add_argument(
+        "--reference-dir",
+        type=Path,
+        help=(
+            "Directory containing one second reference per requested view, "
+            "named like mv-eye-045.png."
+        ),
     )
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument(
@@ -121,6 +130,15 @@ def _arguments() -> argparse.Namespace:
     )
     parser.add_argument("--steps", type=int, default=4)
     parser.add_argument("--worker-python", type=Path)
+    parser.add_argument(
+        "--without-multiple-angles",
+        action="store_true",
+        help="Keep the default Lightning adapter but omit Multiple Angles.",
+    )
+    parser.add_argument(
+        "--fixed-prompt",
+        help="Use this exact prompt for every view instead of angle tokens.",
+    )
     parser.add_argument("--force", action="store_true")
     parser.add_argument(
         "--skip-orientation-verification",
@@ -146,10 +164,18 @@ def candidate_seeds(initial_seed: int, attempts: int) -> list[int]:
     return [initial_seed + offset for offset in range(attempts)]
 
 
+def per_view_reference_path(reference_dir: Path, output: Path) -> Path:
+    return reference_dir / output.name
+
+
 def _manifest_jobs(jobs: list[dict]) -> list[dict]:
     return [
         {
-            **{key: value for key, value in job.items() if key != "output"},
+            **{
+                key: str(value.resolve()) if isinstance(value, Path) else value
+                for key, value in job.items()
+                if key != "output"
+            },
             "output": str(job["output"].resolve()),
         }
         for job in jobs
@@ -251,6 +277,8 @@ def main() -> int:
             continue
         if not path.is_file():
             raise SystemExit(f"missing input image: {path}")
+    if args.reference_dir is not None and not args.reference_dir.is_dir():
+        raise SystemExit(f"missing reference directory: {args.reference_dir}")
     elevations = args.elevations or ["low", "eye", "elevated"]
     azimuths_by_value = dict(AZIMUTHS)
     selected_azimuths = args.azimuths or [value for value, _ in AZIMUTHS]
@@ -268,12 +296,20 @@ def main() -> int:
                 "elevation": elevation_name,
                 "elevation_degrees": degrees,
                 "azimuth_degrees": azimuth_degrees,
-                "prompt": (
+                "prompt": args.fixed_prompt or (
                     f"<sks> {azimuth_descriptor} {descriptor} "
                     f"{args.distance}"
                 ),
                 "output": output,
             })
+    if args.reference_dir is not None:
+        for job in jobs:
+            reference = per_view_reference_path(
+                args.reference_dir, job["output"]
+            )
+            if not reference.is_file():
+                raise SystemExit(f"missing per-view reference image: {reference}")
+            job["reference_image"] = reference.resolve()
 
     manifest_path = args.output_dir / "manifest.json"
     existing_outputs = [job for job in jobs if job["output"].is_file()]
@@ -329,13 +365,10 @@ def main() -> int:
     profile = image_edit_profile(QWEN_IMAGE_EDIT_PROFILE_ID)
     parameters = profile.defaults()
     parameters.update(seed=initial_seed, steps=args.steps)
-    adapters = [
-        adapter.to_dict()
-        for adapter in (
-            *profile.default_lora_adapters,
-            qwen_multiple_angles_lora_adapter(),
-        )
-    ]
+    selected_adapters = list(profile.default_lora_adapters)
+    if not args.without_multiple_angles:
+        selected_adapters.append(qwen_multiple_angles_lora_adapter())
+    adapters = [adapter.to_dict() for adapter in selected_adapters]
     cancel = threading.Event()
     client = MlProcessClient(python=args.worker_python)
     started = time.monotonic()
@@ -380,6 +413,16 @@ def main() -> int:
                     images = {"image": front}
                     if back is not None:
                         images["reference_image"] = back
+                    elif job.get("reference_image") is not None:
+                        with Image.open(job["reference_image"]) as reference_source:
+                            reference = reference_source.convert("RGB")
+                        if reference.size != front.size:
+                            raise RuntimeError(
+                                "per-view reference size does not match the front: "
+                                f"{job['reference_image']} is {reference.size}, "
+                                f"front is {front.size}"
+                            )
+                        images["reference_image"] = reference
                     result = client.request(
                         "image_edit",
                         {
@@ -409,12 +452,21 @@ def main() -> int:
                         str(args.back.resolve())
                         if args.back is not None else None
                     ),
+                    "reference_dir": (
+                        str(args.reference_dir.resolve())
+                        if args.reference_dir is not None else None
+                    ),
                     "seed": seed,
                     "initial_seed": initial_seed,
                     "seed_attempt": attempt_index,
                     "max_seed_attempts": args.max_seed_attempts,
                     "steps": args.steps,
                     "distance": args.distance,
+                    "multiple_angles_enabled": (
+                        not args.without_multiple_angles
+                    ),
+                    "fixed_prompt": args.fixed_prompt,
+                    "lora_adapters": adapters,
                     "attempt_elapsed_seconds": (
                         time.monotonic() - attempt_started
                     ),

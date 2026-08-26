@@ -4,7 +4,7 @@ import math
 
 import numpy as np
 import pytest
-from tcbase import Action
+from tcbase import Action, MouseButton
 
 from diffusion_editor.app.native_reconstruction_viewport import (
     _allocate_resource_namespace,
@@ -38,6 +38,27 @@ def test_viewport_surface_routes_keys_to_focused_handler() -> None:
     assert not surface.dispatch_key(262, 17, int(Action.PRESS), 0)
     surface.close()
     assert not surface.dispatch_key(262, 17, int(Action.PRESS), 0)
+
+
+def test_viewport_surface_pans_with_native_screen_space_gesture() -> None:
+    camera = _OrbitCamera()
+    surface = _ViewportSurface(camera, lambda: None)
+    surface.resize(800, 600)
+    target_before = tuple(camera._camera.target)
+
+    assert surface.dispatch_pointer_button(
+        400.0, 300.0,
+        int(MouseButton.RIGHT), int(Action.PRESS),
+        0, 1,
+    )
+    assert surface.dispatch_pointer_move(450.0, 330.0)
+    assert tuple(camera._camera.target) != pytest.approx(target_before)
+    assert surface.dispatch_pointer_button(
+        450.0, 330.0,
+        int(MouseButton.RIGHT), int(Action.RELEASE),
+        0, 1,
+    )
+    surface.close()
 
 
 def test_reconstruction_viewports_get_distinct_mesh_resource_namespaces() -> None:
@@ -80,6 +101,16 @@ def test_fit_keeps_native_zoom_clipping_matched_to_cloud_bounds() -> None:
     camera.zoom(1.0)
     assert camera._camera.near <= camera._camera.distance - expected_radius
     assert camera._camera.far >= camera._camera.distance + expected_radius
+
+
+def test_camera_mvp_converts_native_mat44_to_numpy() -> None:
+    camera = _OrbitCamera()
+
+    mvp = camera.mvp(1280, 800)
+
+    assert mvp.shape == (4, 4)
+    assert mvp.dtype == np.float32
+    assert np.isfinite(mvp).all()
 
 
 def test_comparison_loads_fit_only_the_first_model_by_default() -> None:

@@ -35,6 +35,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--steps", type=int, default=4)
     parser.add_argument("--worker-python", type=Path)
     parser.add_argument(
+        "--prompt",
+        help="Exact edit instruction; overrides the legacy <sks> front prompt.",
+    )
+    lora_mode = parser.add_mutually_exclusive_group()
+    lora_mode.add_argument(
+        "--without-multiple-angles",
+        action="store_true",
+        help=(
+            "Load only the profile's default adapters (Lightning), without "
+            "angle LoRA."
+        ),
+    )
+    lora_mode.add_argument(
+        "--without-loras",
+        action="store_true",
+        help="Load the base Qwen model without Lightning or Multiple Angles.",
+    )
+    parser.add_argument("--true-cfg-scale", type=float)
+    parser.add_argument("--guidance-scale", type=float)
+    parser.add_argument(
         "--scene-prompt",
         default=(
             "plain neutral gray background, no floor, no props, no text, "
@@ -77,7 +97,7 @@ def main() -> int:
             raise SystemExit(f"missing conditioning image: {path}")
     image_dir = args.output_dir / "images"
     image_dir.mkdir(parents=True, exist_ok=True)
-    prompt = (
+    prompt = args.prompt or (
         "<sks> front view eye-level shot medium shot " + args.scene_prompt
     ).strip()
     seeds = replica_seeds(args.seed, args.count)
@@ -91,13 +111,16 @@ def main() -> int:
     profile = image_edit_profile(QWEN_IMAGE_EDIT_PROFILE_ID)
     base_parameters = profile.defaults()
     base_parameters.update(steps=args.steps, prompt=prompt)
-    adapters = [
-        adapter.to_dict()
-        for adapter in (
-            *profile.default_lora_adapters,
-            qwen_multiple_angles_lora_adapter(),
-        )
-    ]
+    if args.true_cfg_scale is not None:
+        base_parameters["true_cfg_scale"] = args.true_cfg_scale
+    if args.guidance_scale is not None:
+        base_parameters["guidance_scale"] = args.guidance_scale
+    selected_adapters = (
+        [] if args.without_loras else list(profile.default_lora_adapters)
+    )
+    if not args.without_multiple_angles and not args.without_loras:
+        selected_adapters.append(qwen_multiple_angles_lora_adapter())
+    adapters = [adapter.to_dict() for adapter in selected_adapters]
     client = MlProcessClient(python=args.worker_python)
     cancel = threading.Event()
     started = time.monotonic()
@@ -148,6 +171,13 @@ def main() -> int:
         "front": str(args.front.resolve()),
         "back": str(args.back.resolve()),
         "prompt": prompt,
+        "multiple_angles_enabled": (
+            not args.without_multiple_angles and not args.without_loras
+        ),
+        "all_loras_disabled": args.without_loras,
+        "lora_adapters": adapters,
+        "true_cfg_scale": base_parameters["true_cfg_scale"],
+        "guidance_scale": base_parameters["guidance_scale"],
         "steps": args.steps,
         "base_seed": args.seed,
         "elapsed_seconds": time.monotonic() - started,

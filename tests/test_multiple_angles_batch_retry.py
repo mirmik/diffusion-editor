@@ -23,6 +23,17 @@ def test_candidate_seeds_replace_the_whole_batch_deterministically() -> None:
     ]
 
 
+def test_per_view_reference_uses_the_generated_view_filename(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "generated" / "mv-elevated-315.png"
+    reference_dir = tmp_path / "renders"
+
+    assert MODULE["per_view_reference_path"](reference_dir, output) == (
+        reference_dir / "mv-elevated-315.png"
+    )
+
+
 def test_rejected_batch_is_archived_without_leaving_mixable_views(
     tmp_path: Path,
 ) -> None:

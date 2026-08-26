@@ -72,6 +72,42 @@ class StageReporter:
             os.fsync(stream.fileno())
 
 
+class _AlphaOnlyBackgroundRemover:
+    """Stand-in used when an RGBA input already contains a foreground mask."""
+
+    def __init__(self, **_kwargs) -> None:
+        pass
+
+    def to(self, _device):
+        return self
+
+    def cpu(self):
+        return self
+
+    def __call__(self, _image):
+        raise RuntimeError(
+            "Pixal3D background-removal loading was disabled, but the input "
+            "does not contain a non-opaque alpha mask"
+        )
+
+
+def _init_upstream_pipeline(upstream, model_path: str, *, low_vram: bool):
+    if os.environ.get("DIFFUSION_EDITOR_PIXAL3D_SKIP_REMBG_MODEL") != "1":
+        return upstream.init_pipeline(model_path, low_vram=low_vram)
+
+    # Pixal3D constructs its remover even when preprocess_image() will use an
+    # existing alpha channel. Replace only that constructor while loading the
+    # pipeline so an already-masked input does not require gated RMBG weights.
+    from pixal3d.pipelines import rembg
+
+    original = rembg.BiRefNet
+    rembg.BiRefNet = _AlphaOnlyBackgroundRemover
+    try:
+        return upstream.init_pipeline(model_path, low_vram=low_vram)
+    finally:
+        rembg.BiRefNet = original
+
+
 def _reached(target: str, stage: str) -> bool:
     return STAGES.index(target) <= STAGES.index(stage)
 
@@ -1808,7 +1844,9 @@ class Pixal3DRuntime:
         self.upstream = upstream
         self.o_voxel = o_voxel
         self.np = np
-        self.pipeline = upstream.init_pipeline(model_path, low_vram=low_vram)
+        self.pipeline = _init_upstream_pipeline(
+            upstream, model_path, low_vram=low_vram
+        )
         self._source_sha256 = None
         self._prepared_image = None
         self._auto_camera = None

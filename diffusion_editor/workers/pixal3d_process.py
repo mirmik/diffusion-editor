@@ -59,6 +59,7 @@ class Pixal3DProcessClient:
         runner_path: str | Path | None = None,
         staged: bool | None = None,
         persistent: bool | None = None,
+        skip_rembg_model: bool = False,
     ) -> None:
         self._python = Path(python or os.environ.get(
             "DIFFUSION_EDITOR_PIXAL3D_PYTHON", DEFAULT_PIXAL3D_PYTHON))
@@ -94,6 +95,10 @@ class Pixal3DProcessClient:
         self._refine_generated_path: Path | None = None
         self._backend_label = "Pixal3D"
         self._environment_overrides: dict[str, str] = {}
+        if skip_rembg_model:
+            self._environment_overrides[
+                "DIFFUSION_EDITOR_PIXAL3D_SKIP_REMBG_MODEL"
+            ] = "1"
 
     @property
     def artifacts(self) -> tuple[ReconstructionStageArtifact, ...]:
