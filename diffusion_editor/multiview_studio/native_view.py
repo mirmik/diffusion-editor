@@ -530,7 +530,15 @@ class NativeMultiviewStudioView:
         with Image.open(source_path) as source:
             preview = source.convert("RGBA")
             preview.thumbnail((256, 192))
-            pixels = np.ascontiguousarray(preview, dtype=np.uint8)
+            # PIL commonly exposes a C-contiguous but read-only array.  In
+            # that case ascontiguousarray returns the same read-only storage,
+            # while the native upload binding requires writable CPU memory.
+            pixels = np.array(
+                preview,
+                dtype=np.uint8,
+                order="C",
+                copy=True,
+            )
         if lease is None:
             lease = self._texture_lease_factory()
             self._leases[preview_id] = lease
