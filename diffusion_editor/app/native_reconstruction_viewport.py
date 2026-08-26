@@ -149,7 +149,6 @@ layout(location=0) in vec3 v_normal;
 layout(location=0) out vec4 frag_color;
 void main() {
     vec3 normal = normalize(v_normal);
-    normal = gl_FrontFacing ? normal : -normal;
     int display_mode = int(U_DISPLAY_MODE + 0.5);
     if (display_mode == 2) {
         frag_color = U_COLOR;
@@ -160,7 +159,7 @@ void main() {
         return;
     }
     vec3 light_direction = normalize(U_LIGHT_DIRECTION);
-    float diffuse = max(dot(normal, light_direction), 0.0);
+    float diffuse = abs(dot(normal, light_direction));
     vec3 color = U_COLOR.rgb * (0.28 + 0.72 * diffuse);
     frag_color = vec4(color, 1.0);
 }
@@ -275,7 +274,6 @@ layout(location=1) in vec2 v_uv;
 layout(location=0) out vec4 frag_color;
 void main() {
     vec3 normal = normalize(v_normal);
-    normal = gl_FrontFacing ? normal : -normal;
     vec4 base_color = texture(u_base_color_texture, v_uv) * U_COLOR;
     int display_mode = int(U_DISPLAY_MODE + 0.5);
     if (display_mode == 2) {
@@ -287,7 +285,7 @@ void main() {
         return;
     }
     vec3 light_direction = normalize(U_LIGHT_DIRECTION);
-    float diffuse = max(dot(normal, light_direction), 0.0);
+    float diffuse = abs(dot(normal, light_direction));
     frag_color = vec4(base_color.rgb * (0.28 + 0.72 * diffuse), base_color.a);
 }
 """
@@ -323,8 +321,11 @@ class _MeshRenderItem:
     texture: object | None = None
     color: tuple[float, float, float, float] = (0.34, 0.72, 0.95, 1.0)
     has_normals: bool = False
+    smooth_mesh: object | None = None
     wire_mesh: object | None = None
     editable: bool = True
+    positions: np.ndarray | None = None
+    triangles: np.ndarray | None = None
 
 
 def _wireframe_indices(triangles: np.ndarray) -> np.ndarray:
@@ -339,6 +340,187 @@ def _wireframe_indices(triangles: np.ndarray) -> np.ndarray:
     result[:, 2:4] = faces[:, (1, 2)]
     result[:, 4:6] = faces[:, (2, 0)]
     return np.ascontiguousarray(result.reshape(-1))
+
+
+def _nearest_ray_triangle_hit(
+    origin: np.ndarray,
+    direction: np.ndarray,
+    positions: np.ndarray,
+    triangles: np.ndarray,
+) -> np.ndarray | None:
+    """Return the nearest forward Moller-Trumbore hit, if any."""
+    vertices = np.asarray(positions, dtype=np.float64)
+    faces = np.asarray(triangles, dtype=np.int64)
+    if not len(vertices) or not len(faces):
+        return None
+    ray_origin = np.asarray(origin, dtype=np.float64)
+    ray_direction = np.asarray(direction, dtype=np.float64)
+    v0 = vertices[faces[:, 0]]
+    edge1 = vertices[faces[:, 1]] - v0
+    edge2 = vertices[faces[:, 2]] - v0
+    cross = np.cross(np.broadcast_to(ray_direction, edge2.shape), edge2)
+    determinant = np.einsum("ij,ij->i", edge1, cross)
+    usable = np.abs(determinant) > 1e-10
+    inverse = np.zeros_like(determinant)
+    inverse[usable] = 1.0 / determinant[usable]
+    offset = ray_origin - v0
+    u = np.einsum("ij,ij->i", offset, cross) * inverse
+    cross_offset = np.cross(offset, edge1)
+    v = np.einsum("j,ij->i", ray_direction, cross_offset) * inverse
+    distance = np.einsum("ij,ij->i", edge2, cross_offset) * inverse
+    hits = usable & (u >= 0.0) & (v >= 0.0) & (u + v <= 1.0) & (distance > 1e-8)
+    if not np.any(hits):
+        return None
+    nearest = float(np.min(distance[hits]))
+    return np.asarray(ray_origin + ray_direction * nearest, dtype=np.float32)
+
+
+def _build_unit_cube_meshes(namespace: str):
+    from tmesh import TcAttribType, TcDrawMode, TcMesh, TcVertexLayout
+
+    positions = np.ascontiguousarray([
+        (-0.5, -0.5, -0.5), (0.5, -0.5, -0.5),
+        (0.5, 0.5, -0.5), (-0.5, 0.5, -0.5),
+        (-0.5, -0.5, 0.5), (0.5, -0.5, 0.5),
+        (0.5, 0.5, 0.5), (-0.5, 0.5, 0.5),
+    ], dtype=np.float32)
+    triangles = np.ascontiguousarray([
+        0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7,
+        0, 1, 5, 0, 5, 4, 3, 7, 6, 3, 6, 2,
+        0, 4, 7, 0, 7, 3, 1, 2, 6, 1, 6, 5,
+    ], dtype=np.uint32)
+    lines = np.ascontiguousarray([
+        0, 1, 1, 2, 2, 3, 3, 0,
+        4, 5, 5, 6, 6, 7, 7, 4,
+        0, 4, 1, 5, 2, 6, 3, 7,
+    ], dtype=np.uint32)
+    layout = TcVertexLayout()
+    if not layout.add("position", 3, TcAttribType.FLOAT32, 0):
+        raise RuntimeError("failed to create refine cube layout")
+    fill = TcMesh.from_interleaved(
+        positions, len(positions), triangles, layout,
+        name="Refine cube fill", uuid=f"{namespace}-refine-cube-fill",
+    )
+    wire = TcMesh.from_interleaved(
+        positions, len(positions), lines, layout,
+        name="Refine cube wire", uuid=f"{namespace}-refine-cube-wire",
+        draw_mode=TcDrawMode.LINES,
+    )
+    return fill, wire
+
+
+def _build_unit_arrow_mesh(namespace: str):
+    from tmesh import TcAttribType, TcMesh, TcVertexLayout
+
+    positions = np.ascontiguousarray([
+        (0.00, -0.018, -0.018), (0.00, 0.018, -0.018),
+        (0.00, 0.018, 0.018), (0.00, -0.018, 0.018),
+        (0.76, -0.018, -0.018), (0.76, 0.018, -0.018),
+        (0.76, 0.018, 0.018), (0.76, -0.018, 0.018),
+        (0.74, -0.065, -0.065), (0.74, 0.065, -0.065),
+        (0.74, 0.065, 0.065), (0.74, -0.065, 0.065),
+        (1.00, 0.00, 0.00),
+    ], dtype=np.float32)
+    triangles = np.ascontiguousarray([
+        0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6,
+        0, 4, 5, 0, 5, 1, 1, 5, 6, 1, 6, 2,
+        2, 6, 7, 2, 7, 3, 3, 7, 4, 3, 4, 0,
+        8, 9, 12, 9, 10, 12, 10, 11, 12, 11, 8, 12,
+        8, 11, 10, 8, 10, 9,
+    ], dtype=np.uint32)
+    layout = TcVertexLayout()
+    if not layout.add("position", 3, TcAttribType.FLOAT32, 0):
+        raise RuntimeError("failed to create refine gizmo arrow layout")
+    return TcMesh.from_interleaved(
+        positions,
+        len(positions),
+        triangles,
+        layout,
+        name="Refine gizmo arrow",
+        uuid=f"{namespace}-refine-gizmo-arrow",
+    )
+
+
+def _point_segment_distance(
+    point: np.ndarray, start: np.ndarray, end: np.ndarray
+) -> tuple[float, float]:
+    segment = np.asarray(end, dtype=np.float64) - np.asarray(
+        start, dtype=np.float64
+    )
+    length_squared = float(np.dot(segment, segment))
+    if length_squared <= 1e-12:
+        return float(np.linalg.norm(np.asarray(point) - start)), 0.0
+    parameter = float(np.dot(np.asarray(point) - start, segment) / length_squared)
+    parameter = min(max(parameter, 0.0), 1.0)
+    closest = np.asarray(start) + segment * parameter
+    return float(np.linalg.norm(np.asarray(point) - closest)), parameter
+
+
+def _ray_plane_intersection(
+    origin: np.ndarray,
+    direction: np.ndarray,
+    plane_point: np.ndarray,
+    plane_normal: np.ndarray,
+) -> np.ndarray | None:
+    denominator = float(np.dot(direction, plane_normal))
+    if abs(denominator) <= 1e-8:
+        return None
+    distance = float(np.dot(plane_point - origin, plane_normal) / denominator)
+    if not math.isfinite(distance):
+        return None
+    return np.asarray(origin + direction * distance, dtype=np.float64)
+
+
+def _oriented_transform(
+    origin: np.ndarray, direction: np.ndarray, length: float
+) -> np.ndarray:
+    axis = np.asarray(direction, dtype=np.float64)
+    axis /= np.linalg.norm(axis)
+    helper = (
+        np.asarray((0.0, 0.0, 1.0), dtype=np.float64)
+        if abs(float(axis[2])) < 0.9
+        else np.asarray((0.0, 1.0, 0.0), dtype=np.float64)
+    )
+    local_y = np.cross(helper, axis)
+    local_y /= np.linalg.norm(local_y)
+    local_z = np.cross(axis, local_y)
+    transform = np.eye(4, dtype=np.float32)
+    transform[:3, 0] = axis * float(length)
+    transform[:3, 1] = local_y * float(length)
+    transform[:3, 2] = local_z * float(length)
+    transform[:3, 3] = np.asarray(origin, dtype=np.float32)
+    return transform
+
+
+_REFINE_GIZMO_AXES = {
+    # Labels and colors follow the persistent glTF Y-up coordinates. Termin's
+    # preview converts them to Z-up: (x, y, z) -> (x, -z, y).
+    "x": (
+        np.asarray((1.0, 0.0, 0.0), dtype=np.float64),
+        (0.95, 0.16, 0.12, 1.0),
+    ),
+    "y": (
+        np.asarray((0.0, 0.0, 1.0), dtype=np.float64),
+        (0.24, 0.88, 0.28, 1.0),
+    ),
+    "z": (
+        np.asarray((0.0, -1.0, 0.0), dtype=np.float64),
+        (0.18, 0.42, 1.0, 1.0),
+    ),
+}
+_REFINE_SIZE_DIRECTION = np.asarray(
+    (1.0, -1.0, 1.0), dtype=np.float64
+) / math.sqrt(3.0)
+
+
+@dataclass
+class _RefineGizmoDrag:
+    kind: str
+    original_center: np.ndarray
+    original_side: float
+    constraint_direction: np.ndarray
+    plane_normal: np.ndarray
+    start_parameter: float
 
 
 def _build_wireframe_mesh(source_mesh):
@@ -363,6 +545,56 @@ def _build_wireframe_mesh(source_mesh):
     )
 
 
+def _compute_vertex_normals(
+    positions: np.ndarray, triangles: np.ndarray
+) -> np.ndarray:
+    """Return area-weighted smooth normals for an indexed triangle mesh."""
+    vertices = np.asarray(positions, dtype=np.float32)
+    faces = np.asarray(triangles, dtype=np.uint32)
+    normals = np.zeros_like(vertices, dtype=np.float32)
+    if not len(vertices) or not len(faces):
+        return normals
+    face_normals = np.cross(
+        vertices[faces[:, 1]] - vertices[faces[:, 0]],
+        vertices[faces[:, 2]] - vertices[faces[:, 0]],
+    )
+    for corner in range(3):
+        np.add.at(normals, faces[:, corner], face_normals)
+    lengths = np.linalg.norm(normals, axis=1)
+    usable = lengths > 1e-12
+    normals[usable] /= lengths[usable, None]
+    normals[~usable] = (0.0, 0.0, 1.0)
+    return np.ascontiguousarray(normals, dtype=np.float32)
+
+
+def _build_smooth_mesh(source_mesh):
+    """Add generated normals to a position-only mesh for legacy GLBs."""
+    from tmesh import TcAttribType, TcMesh, TcVertexLayout
+
+    positions = np.ascontiguousarray(source_mesh.vertices, dtype=np.float32)
+    triangles = source_mesh.triangles
+    if triangles is None or not len(triangles):
+        return None
+    faces = np.ascontiguousarray(triangles, dtype=np.uint32)
+    normals = _compute_vertex_normals(positions, faces)
+    vertices = np.ascontiguousarray(
+        np.concatenate((positions, normals), axis=1), dtype=np.float32
+    )
+    layout = TcVertexLayout()
+    if not layout.add("position", 3, TcAttribType.FLOAT32, 0):
+        raise RuntimeError("failed to create smooth reconstruction position")
+    if not layout.add("normal", 3, TcAttribType.FLOAT32, 12):
+        raise RuntimeError("failed to create smooth reconstruction normal")
+    return TcMesh.from_interleaved(
+        vertices,
+        len(vertices),
+        np.ascontiguousarray(faces.reshape(-1), dtype=np.uint32),
+        layout,
+        name=f"{source_mesh.name} Smooth",
+        uuid=f"{source_mesh.uuid}-smooth",
+    )
+
+
 def _decode_texture(payload: bytes) -> tuple[int, int, np.ndarray]:
     with Image.open(BytesIO(payload)) as image:
         # nanobind's writable uint8 ndarray boundary rejects Pillow's
@@ -381,8 +613,9 @@ class _OrbitCamera:
     FRONT_AZIMUTH = math.pi
     FRONT_ELEVATION = math.radians(12.0)
 
-    def __init__(self) -> None:
+    def __init__(self, front_azimuth: float = FRONT_AZIMUTH) -> None:
         self._camera = OrbitCamera()
+        self._front_azimuth = float(front_azimuth)
         self._camera.target = Vec3(0.0, 0.0, 0.0)
         self._camera.distance = 3.0
         self._reset_orientation()
@@ -450,10 +683,27 @@ class _OrbitCamera:
         flat = np.asarray(values, dtype=np.float32)
         return flat.reshape((4, 4), order="F")
 
+    def screen_ray(self, position: tuple[float, float], width: int, height: int):
+        return self._camera.try_screen_ray(
+            Vec2(*map(float, position)),
+            Rect2(0.0, 0.0, max(float(width), 1.0), max(float(height), 1.0)),
+        )
+
+    def project_world_to_screen(
+        self, point: np.ndarray, width: int, height: int
+    ) -> np.ndarray | None:
+        projected = self._camera.try_project_world_point(
+            Vec3(*map(float, point)),
+            Rect2(0.0, 0.0, max(float(width), 1.0), max(float(height), 1.0)),
+        )
+        if projected is None:
+            return None
+        return np.asarray(tuple(projected.screen), dtype=np.float64)
+
     def _reset_orientation(self) -> None:
         # Verified against generated Pixal3D subjects: after the Z-up export
         # conversion their visible front is viewed from +Y.
-        self._camera.azimuth = self.FRONT_AZIMUTH
+        self._camera.azimuth = self._front_azimuth
         self._camera.elevation = self.FRONT_ELEVATION
 
 
@@ -483,6 +733,9 @@ class _ViewportSurface:
         self._camera = camera
         self._on_changed = on_changed
         self._key_handler: Callable[[int, int, int, int], bool] | None = None
+        self._pointer_press_handler: Callable[[float, float, int], bool] | None = None
+        self._pointer_move_handler: Callable[[float, float], bool] | None = None
+        self._pointer_release_handler: Callable[[float, float, int], bool] | None = None
         self._valid = True
         self._width = 1
         self._height = 1
@@ -502,12 +755,30 @@ class _ViewportSurface:
         self._valid = False
         self._texture = None
         self._key_handler = None
+        self._pointer_press_handler = None
+        self._pointer_move_handler = None
+        self._pointer_release_handler = None
 
     def set_key_handler(
         self,
         handler: Callable[[int, int, int, int], bool] | None,
     ) -> None:
         self._key_handler = handler
+
+    def set_pointer_press_handler(
+        self, handler: Callable[[float, float, int], bool] | None
+    ) -> None:
+        self._pointer_press_handler = handler
+
+    def set_pointer_move_handler(
+        self, handler: Callable[[float, float], bool] | None
+    ) -> None:
+        self._pointer_move_handler = handler
+
+    def set_pointer_release_handler(
+        self, handler: Callable[[float, float, int], bool] | None
+    ) -> None:
+        self._pointer_release_handler = handler
 
     def is_valid(self) -> bool:
         return self._valid
@@ -533,8 +804,15 @@ class _ViewportSurface:
             return False
         previous = self._pointer
         self._pointer = (float(x), float(y))
+        if (
+            self._pointer_move_handler is not None
+            and self._pointer_move_handler(self._pointer[0], self._pointer[1])
+        ):
+            return True
         if not self._drag_mode:
             return False
+        if self._drag_mode == "handled":
+            return True
         dx = self._pointer[0] - previous[0]
         dy = self._pointer[1] - previous[1]
         if self._drag_mode == "orbit":
@@ -561,12 +839,24 @@ class _ViewportSurface:
             return False
         self._pointer = (float(x), float(y))
         if int(action) == int(Action.RELEASE):
+            if self._pointer_release_handler is not None:
+                self._pointer_release_handler(
+                    self._pointer[0], self._pointer[1], int(button)
+                )
             self._drag_mode = ""
             self._pan_gesture = None
             return True
         if int(action) != int(Action.PRESS):
             return False
         if int(button) == int(MouseButton.LEFT):
+            if (
+                self._pointer_press_handler is not None
+                and self._pointer_press_handler(
+                    self._pointer[0], self._pointer[1], int(button)
+                )
+            ):
+                self._drag_mode = "handled"
+                return True
             self._drag_mode = "orbit"
         elif int(button) in {int(MouseButton.MIDDLE), int(MouseButton.RIGHT)}:
             self._pan_gesture = self._camera.begin_pan(
@@ -614,6 +904,7 @@ class NativeReconstructionViewport:
         graphics_owner,
         request_repaint: Callable[[], None],
         resource_namespace: str = "viewport",
+        front_azimuth: float = _OrbitCamera.FRONT_AZIMUTH,
         point_color_state_changed: (
             Callable[[bool, str, str], None] | None
         ) = None,
@@ -624,12 +915,25 @@ class NativeReconstructionViewport:
         self._graphics = Tgfx2Context.from_runtime(graphics_owner)
         self._request_repaint = request_repaint
         self._point_color_state_changed = point_color_state_changed
-        self._camera = _OrbitCamera()
+        self._camera = _OrbitCamera(front_azimuth)
         self._light_direction = self._camera.direction_from_target()
         self._shading_mode = "flat"
         self._dirty = True
         self._closed = False
         self._mesh_items: list[_MeshRenderItem] = []
+        self._model_bounds_min: np.ndarray | None = None
+        self._model_bounds_max: np.ndarray | None = None
+        self._refine_cube_center: tuple[float, float, float] | None = None
+        self._refine_cube_side = 0.0
+        self._refine_cube_confirmed = False
+        self._refine_cube_pick_handler: (
+            Callable[[tuple[float, float, float], float], None] | None
+        ) = None
+        self._refine_cube_edit_handler: (
+            Callable[[tuple[float, float, float], float], None] | None
+        ) = None
+        self._refine_cube_edit_enabled = True
+        self._refine_gizmo_drag: _RefineGizmoDrag | None = None
         self._model_transform = np.eye(4, dtype=np.float32)
         self._refine_placement = ReconstructionRefinePlacement()
         self._refine_placement_pivot = (0.0, 0.0, 0.0)
@@ -712,7 +1016,18 @@ class NativeReconstructionViewport:
             raise RuntimeError(
                 "Reconstruction smooth texture shader compile failed"
             )
+        self._refine_cube_fill_mesh, self._refine_cube_wire_mesh = (
+            _build_unit_cube_meshes(self._resource_namespace)
+        )
+        self._refine_gizmo_arrow_mesh = _build_unit_arrow_mesh(
+            self._resource_namespace
+        )
         self.surface = _ViewportSurface(self._camera, self.invalidate)
+        self.surface.set_pointer_press_handler(self._handle_pointer_press)
+        self.surface.set_pointer_move_handler(self._handle_gizmo_pointer_move)
+        self.surface.set_pointer_release_handler(
+            self._handle_gizmo_pointer_release
+        )
         self.viewport = document.create_viewport3d()
         self.viewport.widget.stable_id = "diffusion-editor.reconstruction.viewport"
         self.viewport.widget.preferred_size = Size(480.0, 600.0)
@@ -765,6 +1080,240 @@ class NativeReconstructionViewport:
 
         self._require_open()
         self.surface.set_key_handler(handler)
+
+    def set_refine_cube(
+        self,
+        center: tuple[float, float, float],
+        side: float,
+        confirmed: bool,
+    ) -> None:
+        values = tuple(float(value) for value in center)
+        if len(values) != 3 or not all(math.isfinite(value) for value in values):
+            raise ValueError("refine cube center must be finite")
+        if not math.isfinite(side) or side <= 0.0:
+            raise ValueError("refine cube side must be finite and positive")
+        self._refine_cube_center = values
+        self._refine_cube_side = float(side)
+        self._refine_cube_confirmed = bool(confirmed)
+        self.invalidate()
+
+    def bind_refine_cube_edit(
+        self,
+        handler: Callable[[tuple[float, float, float], float], None] | None,
+    ) -> None:
+        """Publish direct gizmo edits in viewport Z-up coordinates."""
+        self._require_open()
+        self._refine_cube_edit_handler = handler
+
+    def set_refine_cube_edit_enabled(self, enabled: bool) -> None:
+        self._refine_cube_edit_enabled = bool(enabled)
+        if not self._refine_cube_edit_enabled:
+            self._refine_gizmo_drag = None
+
+    def clear_refine_cube(self) -> None:
+        self._refine_cube_center = None
+        self._refine_cube_side = 0.0
+        self._refine_cube_confirmed = False
+        self._refine_gizmo_drag = None
+        self.invalidate()
+
+    def begin_refine_cube_pick(
+        self,
+        handler: Callable[[tuple[float, float, float], float], None],
+    ) -> None:
+        self._require_open()
+        if not self._mesh_items:
+            raise ValueError("a mesh must be loaded before selecting a refine cube")
+        self._refine_cube_pick_handler = handler
+        self._refine_gizmo_drag = None
+
+    def cancel_refine_cube_pick(self) -> None:
+        self._refine_cube_pick_handler = None
+
+    def _handle_pointer_press(self, x: float, y: float, button: int) -> bool:
+        del button
+        handler = self._refine_cube_pick_handler
+        if handler is None:
+            return self._begin_refine_gizmo_drag(x, y)
+        width, height = self.surface.size
+        ray = self._camera.screen_ray((x, y), width, height)
+        if ray is None:
+            return True
+        origin = np.asarray(tuple(ray.origin), dtype=np.float32)
+        direction = np.asarray(tuple(ray.direction), dtype=np.float32)
+        nearest = None
+        nearest_distance = math.inf
+        for item in self._mesh_items:
+            if item.positions is None or item.triangles is None:
+                continue
+            hit = _nearest_ray_triangle_hit(
+                origin, direction, item.positions, item.triangles
+            )
+            if hit is None:
+                continue
+            distance = float(np.linalg.norm(hit - origin))
+            if distance < nearest_distance:
+                nearest = hit
+                nearest_distance = distance
+        if nearest is None:
+            return True
+        if self._model_bounds_min is None or self._model_bounds_max is None:
+            side = 1.0
+        else:
+            extent = self._model_bounds_max - self._model_bounds_min
+            side = max(float(np.max(extent)) * 0.2, 1e-4)
+        center = nearest + direction * (side * 0.5)
+        self._refine_cube_pick_handler = None
+        handler(tuple(map(float, center)), side)
+        return True
+
+    def _gizmo_length(self) -> float:
+        if self._model_bounds_min is None or self._model_bounds_max is None:
+            model_length = self._refine_cube_side
+        else:
+            model_length = float(np.max(
+                self._model_bounds_max - self._model_bounds_min
+            ))
+        return max(self._refine_cube_side * 0.50, model_length * 0.055, 1e-4)
+
+    def _size_handle_position(self) -> np.ndarray:
+        center = np.asarray(self._refine_cube_center, dtype=np.float64)
+        return center + np.asarray((1.0, -1.0, 1.0)) * (
+            self._refine_cube_side * 0.5
+        )
+
+    def _pick_refine_gizmo_handle(self, x: float, y: float) -> str | None:
+        if self._refine_cube_center is None:
+            return None
+        width, height = self.surface.size
+        center = np.asarray(self._refine_cube_center, dtype=np.float64)
+        center_screen = self._camera.project_world_to_screen(
+            center, width, height
+        )
+        if center_screen is None:
+            return None
+        pointer = np.asarray((x, y), dtype=np.float64)
+        size_screen = self._camera.project_world_to_screen(
+            self._size_handle_position(), width, height
+        )
+        if size_screen is not None:
+            distance, parameter = _point_segment_distance(
+                pointer, center_screen, size_screen
+            )
+            if (
+                float(np.linalg.norm(pointer - size_screen)) <= 14.0
+                or (distance <= 8.0 and parameter >= 0.45)
+            ):
+                return "size"
+        length = self._gizmo_length()
+        candidates = []
+        for name, (direction, _color) in _REFINE_GIZMO_AXES.items():
+            end_screen = self._camera.project_world_to_screen(
+                center + direction * length, width, height
+            )
+            if end_screen is None:
+                continue
+            distance, parameter = _point_segment_distance(
+                pointer, center_screen, end_screen
+            )
+            if distance <= 10.0 and parameter >= 0.12:
+                candidates.append((distance, -parameter, name))
+        return min(candidates)[2] if candidates else None
+
+    def _begin_refine_gizmo_drag(self, x: float, y: float) -> bool:
+        if (
+            not self._refine_cube_edit_enabled
+            or self._refine_cube_edit_handler is None
+        ):
+            return False
+        kind = self._pick_refine_gizmo_handle(x, y)
+        if kind is None:
+            return False
+        center = np.asarray(self._refine_cube_center, dtype=np.float64)
+        direction = (
+            _REFINE_SIZE_DIRECTION.copy()
+            if kind == "size"
+            else _REFINE_GIZMO_AXES[kind][0].copy()
+        )
+        direction /= np.linalg.norm(direction)
+        view = np.asarray(self._camera.direction_from_target(), dtype=np.float64)
+        plane_normal = view - direction * float(np.dot(view, direction))
+        normal_length = float(np.linalg.norm(plane_normal))
+        if normal_length <= 1e-6:
+            helper = min(
+                np.eye(3, dtype=np.float64),
+                key=lambda candidate: abs(float(np.dot(candidate, direction))),
+            )
+            plane_normal = helper - direction * float(
+                np.dot(helper, direction)
+            )
+            normal_length = float(np.linalg.norm(plane_normal))
+        plane_normal /= normal_length
+        width, height = self.surface.size
+        ray = self._camera.screen_ray((x, y), width, height)
+        if ray is None:
+            return False
+        hit = _ray_plane_intersection(
+            np.asarray(tuple(ray.origin), dtype=np.float64),
+            np.asarray(tuple(ray.direction), dtype=np.float64),
+            center,
+            plane_normal,
+        )
+        if hit is None:
+            return False
+        self._refine_gizmo_drag = _RefineGizmoDrag(
+            kind=kind,
+            original_center=center,
+            original_side=self._refine_cube_side,
+            constraint_direction=direction,
+            plane_normal=plane_normal,
+            start_parameter=float(np.dot(hit - center, direction)),
+        )
+        return True
+
+    def _handle_gizmo_pointer_move(self, x: float, y: float) -> bool:
+        drag = self._refine_gizmo_drag
+        if drag is None:
+            return False
+        width, height = self.surface.size
+        ray = self._camera.screen_ray((x, y), width, height)
+        if ray is None:
+            return True
+        hit = _ray_plane_intersection(
+            np.asarray(tuple(ray.origin), dtype=np.float64),
+            np.asarray(tuple(ray.direction), dtype=np.float64),
+            drag.original_center,
+            drag.plane_normal,
+        )
+        if hit is None:
+            return True
+        parameter = float(np.dot(
+            hit - drag.original_center, drag.constraint_direction
+        ))
+        delta = parameter - drag.start_parameter
+        center = drag.original_center.copy()
+        side = drag.original_side
+        if drag.kind == "size":
+            side = max(
+                drag.original_side + delta * (2.0 / math.sqrt(3.0)),
+                1e-4,
+            )
+        else:
+            center += drag.constraint_direction * delta
+        self.set_refine_cube(tuple(map(float, center)), side, False)
+        handler = self._refine_cube_edit_handler
+        if handler is not None:
+            handler(tuple(map(float, center)), float(side))
+        return True
+
+    def _handle_gizmo_pointer_release(
+        self, x: float, y: float, button: int
+    ) -> bool:
+        del x, y, button
+        if self._refine_gizmo_drag is None:
+            return False
+        self._refine_gizmo_drag = None
+        return True
 
     def set_shading_mode(self, mode: str) -> None:
         normalized = str(mode).strip().lower()
@@ -850,6 +1399,10 @@ class NativeReconstructionViewport:
         self._require_open()
         self._destroy_model_textures()
         self._mesh_items.clear()
+        self._model_bounds_min = None
+        self._model_bounds_max = None
+        self.cancel_refine_cube_pick()
+        self._refine_gizmo_drag = None
         self._point_cloud.release(self._graphics.context)
         self._clear_point_color_data()
         self._glb_documents.clear()
@@ -871,6 +1424,8 @@ class NativeReconstructionViewport:
         self._clear_point_color_data()
         self._glb_documents = [source]
         self._mesh_items = mesh_items
+        self._model_bounds_min = bounds_min
+        self._model_bounds_max = bounds_max
         if (
             bounds_min is not None
             and bounds_max is not None
@@ -929,6 +1484,8 @@ class NativeReconstructionViewport:
         self._mesh_items = [*editable_items, *reference_items]
         bounds_min = np.minimum(reference_min, editable_min)
         bounds_max = np.maximum(reference_max, editable_max)
+        self._model_bounds_min = bounds_min
+        self._model_bounds_max = bounds_max
         if _should_fit_camera(had_model, fit_camera):
             self._camera.fit(bounds_min, bounds_max)
             self._light_direction = self._camera.direction_from_target()
@@ -1010,6 +1567,9 @@ class NativeReconstructionViewport:
         self._point_cloud_color_mode = normalized_mode
         self._destroy_model_textures()
         self._mesh_items.clear()
+        self._model_bounds_min = None
+        self._model_bounds_max = None
+        self.cancel_refine_cube_pick()
         self._glb_documents.clear()
         if _should_fit_camera(had_model, fit_camera):
             self._camera.fit(positions.min(axis=0), positions.max(axis=0))
@@ -1114,7 +1674,12 @@ class NativeReconstructionViewport:
                 self._light_direction,
                 display_mode,
             )
-            draw_tc_mesh(ctx, item.mesh)
+            draw_tc_mesh(
+                ctx,
+                item.smooth_mesh
+                if use_smooth_normals and item.smooth_mesh is not None
+                else item.mesh,
+            )
         if not self._point_cloud.empty:
             self._point_cloud_draw_params.view_projection = tuple(
                 np.ascontiguousarray(mvp.T, dtype=np.float32).reshape(-1)
@@ -1125,6 +1690,71 @@ class NativeReconstructionViewport:
                 self._point_cloud_style,
                 self._point_cloud_draw_params,
             )
+        if self._refine_cube_center is not None:
+            cube_transform = np.eye(4, dtype=np.float32)
+            cube_transform[:3, :3] *= self._refine_cube_side
+            cube_transform[:3, 3] = self._refine_cube_center
+            cube_mvp = mvp @ cube_transform
+            color = (
+                (0.20, 0.95, 0.42, 0.16)
+                if self._refine_cube_confirmed
+                else (1.00, 0.55, 0.10, 0.18)
+            )
+            wire_color = (
+                (0.30, 1.00, 0.50, 1.0)
+                if self._refine_cube_confirmed
+                else (1.00, 0.62, 0.16, 1.0)
+            )
+            ctx.bind_shader(self._vertex_shader, self._fragment_shader)
+            ctx.set_depth_test(False)
+            ctx.set_depth_write(False)
+            ctx.set_blend(True)
+            self._set_draw_state(
+                cube_mvp, color, self._light_direction,
+                _SHADING_MODE_IDS["unlit"],
+            )
+            draw_tc_mesh(ctx, self._refine_cube_fill_mesh)
+            ctx.set_blend(False)
+            self._set_draw_state(
+                cube_mvp, wire_color, self._light_direction,
+                _SHADING_MODE_IDS["unlit"],
+            )
+            draw_tc_mesh(ctx, self._refine_cube_wire_mesh)
+            center = np.asarray(self._refine_cube_center, dtype=np.float64)
+            gizmo_length = self._gizmo_length()
+            for _name, (direction, axis_color) in _REFINE_GIZMO_AXES.items():
+                arrow_transform = _oriented_transform(
+                    center, direction, gizmo_length
+                )
+                self._set_draw_state(
+                    mvp @ arrow_transform,
+                    axis_color,
+                    self._light_direction,
+                    _SHADING_MODE_IDS["unlit"],
+                )
+                draw_tc_mesh(ctx, self._refine_gizmo_arrow_mesh)
+            size_length = self._refine_cube_side * math.sqrt(3.0) * 0.5
+            size_transform = _oriented_transform(
+                center, _REFINE_SIZE_DIRECTION, size_length
+            )
+            self._set_draw_state(
+                mvp @ size_transform,
+                (0.95, 0.25, 0.92, 1.0),
+                self._light_direction,
+                _SHADING_MODE_IDS["unlit"],
+            )
+            draw_tc_mesh(ctx, self._refine_gizmo_arrow_mesh)
+            handle_transform = np.eye(4, dtype=np.float32)
+            handle_size = gizmo_length * 0.10
+            handle_transform[:3, :3] *= handle_size
+            handle_transform[:3, 3] = self._size_handle_position()
+            self._set_draw_state(
+                mvp @ handle_transform,
+                (1.0, 0.72, 1.0, 1.0),
+                self._light_direction,
+                _SHADING_MODE_IDS["unlit"],
+            )
+            draw_tc_mesh(ctx, self._refine_cube_fill_mesh)
         ctx.end_pass()
         if opened_frame:
             ctx.end_frame()
@@ -1152,6 +1782,8 @@ class NativeReconstructionViewport:
         self._depth_texture = None
         self._destroy_model_textures()
         self._mesh_items.clear()
+        self._model_bounds_min = None
+        self._model_bounds_max = None
         self._glb_documents.clear()
 
     def _read_glb_items(
@@ -1194,12 +1826,23 @@ class NativeReconstructionViewport:
                     width, height, pixels, TextureEncoding.SRGB
                 )
                 color = base_color.factor
+            authored_normals = mesh.vertex_normals is not None
+            smooth_mesh = None
+            if not authored_normals and texture is None:
+                smooth_mesh = _build_smooth_mesh(mesh)
             mesh_items.append(_MeshRenderItem(
                 mesh,
                 texture,
                 color,
-                has_normals=mesh.vertex_normals is not None,
+                has_normals=authored_normals or smooth_mesh is not None,
+                smooth_mesh=smooth_mesh,
                 editable=editable,
+                positions=np.ascontiguousarray(mesh.vertices, dtype=np.float32),
+                triangles=(
+                    np.ascontiguousarray(mesh.triangles, dtype=np.uint32)
+                    if mesh.triangles is not None
+                    else None
+                ),
             ))
             vertices += int(mesh.vertex_count)
             indices += int(mesh.index_count)

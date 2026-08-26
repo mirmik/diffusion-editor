@@ -10,8 +10,11 @@ from diffusion_editor.multiview_studio.controller import (
     MultiviewStudioController,
 )
 from diffusion_editor.multiview_studio.model import (
+    MeshPostprocessSettings,
     MultiviewProject,
+    RefineCube,
     TrellisShapeSettings,
+    TrellisTextureSettings,
     ViewKey,
     view_schedule,
 )
@@ -32,20 +35,19 @@ def test_project_has_canonical_24_view_grid_and_maps_sources():
     assert project.validate_shape_request() == ()
 
 
-def test_slot_exclusion_is_independent_from_image_and_schedule_cycles():
+def test_every_populated_slot_participates_in_schedule():
     project = MultiviewProject().with_source("front", "/tmp/front.png")
     project = project.with_slot(ViewKey("eye", 90), image_path="/tmp/right.png")
-    project = project.with_slot(ViewKey("eye", 0), include_in_trellis=False)
 
     assert project.slot(ViewKey("eye", 0)).populated
-    assert not project.slot(ViewKey("eye", 0)).include_in_trellis
-    assert [slot.key for slot in project.included_slots()] == [
-        ViewKey("eye", 90)
+    assert [slot.key for slot in project.populated_slots()] == [
+        ViewKey("eye", 0),
+        ViewKey("eye", 90),
     ]
     assert view_schedule(project.slots, 4, 2) == (
         ViewKey("eye", 0),
         ViewKey("eye", 0),
-        ViewKey("eye", 90),
+        ViewKey("eye", 0),
         ViewKey("eye", 90),
     )
 
@@ -58,9 +60,6 @@ def test_project_roundtrip_uses_relative_paths_inside_project(tmp_path: Path):
     manifest = tmp_path / "vaan.mvstudio.json"
     project = MultiviewProject().with_source("front", str(front))
     project = project.with_source("back", str(back))
-    project = project.with_slot(
-        ViewKey("elevated", 315), include_in_trellis=False
-    )
     project = MultiviewProject(
         front_path=project.front_path,
         back_path=project.back_path,
@@ -72,6 +71,15 @@ def test_project_roundtrip_uses_relative_paths_inside_project(tmp_path: Path):
             warmup_steps=10,
             resolution=1536,
             decimation_target=250_000,
+            postprocess=MeshPostprocessSettings(
+                fill_holes=False,
+                fill_hole_perimeter=0.0125,
+                remesh=True,
+                simplify=False,
+                cleanup=True,
+                final_repair=False,
+                remove_isolated_double_faces=True,
+            ),
         ),
     )
 
@@ -80,7 +88,60 @@ def test_project_roundtrip_uses_relative_paths_inside_project(tmp_path: Path):
     restored = MultiviewProject.load(manifest)
 
     assert payload["sources"] == {"front": "front.png", "back": "back.png"}
+    assert payload["trellis"]["postprocess"]["fill_hole_perimeter"] == 0.0125
     assert restored == project
+
+
+def test_legacy_exclusion_flag_is_ignored(tmp_path: Path):
+    front = tmp_path / "front.png"
+    front.touch()
+    manifest = tmp_path / "legacy.mvstudio.json"
+    MultiviewProject().with_source("front", str(front)).save(manifest)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    front_view = next(
+        view
+        for view in payload["views"]
+        if view["elevation"] == "eye" and view["azimuth"] == 0
+    )
+    front_view["include_in_trellis"] = False
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    restored = MultiviewProject.load(manifest)
+
+    assert restored.populated_slots() == (restored.slot(ViewKey("eye", 0)),)
+
+
+def test_legacy_shape_path_becomes_texture_geometry_source(tmp_path: Path):
+    shape = tmp_path / "legacy.glb"
+    shape.touch()
+    manifest = tmp_path / "legacy-shape.mvstudio.json"
+    project = replace(MultiviewProject(), shape_path=str(shape))
+    project.save(manifest)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload.pop("geometry")
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    restored = MultiviewProject.load(manifest)
+
+    assert restored.geometry_path == str(shape)
+    assert restored.shape_path == str(shape)
+
+
+def test_legacy_meshlib_repair_is_disabled_when_zero_face_stage_is_absent(
+    tmp_path: Path,
+):
+    manifest = tmp_path / "legacy-postprocess.mvstudio.json"
+    MultiviewProject().save(manifest)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    postprocess = payload["trellis"]["postprocess"]
+    postprocess["final_repair"] = True
+    postprocess.pop("remove_degenerate_faces")
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    restored = MultiviewProject.load(manifest)
+
+    assert not restored.trellis.postprocess.final_repair
+    assert restored.trellis.postprocess.remove_degenerate_faces
 
 
 def test_controller_tracks_dirty_state_and_persists(tmp_path: Path):
@@ -88,13 +149,152 @@ def test_controller_tracks_dirty_state_and_persists(tmp_path: Path):
     controller = MultiviewStudioController()
     controller.connect(lambda project, path, dirty: events.append((path, dirty)))
 
-    controller.set_slot_included(ViewKey("low", 45), False)
+    controller.set_slot_image(ViewKey("low", 45), tmp_path / "low-45.png")
     assert controller.dirty
 
     path = controller.save(tmp_path / "project.mvstudio.json")
     assert path.is_file()
     assert not controller.dirty
     assert events[-1] == (path, False)
+
+
+def test_controller_updates_fixed_mesh_postprocess_settings():
+    controller = MultiviewStudioController()
+
+    controller.set_mesh_postprocess("remesh", False)
+    controller.set_mesh_postprocess("fill_hole_perimeter", 0.0075)
+
+    assert not controller.project.trellis.postprocess.remesh
+    assert controller.project.trellis.postprocess.fill_hole_perimeter == 0.0075
+    assert controller.dirty
+
+
+def test_texture_settings_and_geometry_source_roundtrip(tmp_path: Path):
+    front = tmp_path / "front.png"
+    geometry = tmp_path / "geometry.glb"
+    textured = tmp_path / "textured.glb"
+    front.touch()
+    geometry.touch()
+    textured.touch()
+    manifest = tmp_path / "texture.mvstudio.json"
+    project = MultiviewProject().with_source("front", str(front))
+    project = replace(
+        project,
+        texture=TrellisTextureSettings(
+            seed=99,
+            total_steps=7,
+            warmup_steps=6,
+            resolution=512,
+            texture_size=1536,
+        ),
+        geometry_path=str(geometry),
+        shape_path=str(textured),
+    )
+
+    project.save(manifest)
+    restored = MultiviewProject.load(manifest)
+
+    assert restored == project
+    assert restored.geometry_path == str(geometry)
+    assert restored.shape_path == str(textured)
+
+
+def test_texture_atlas_size_supports_1536():
+    settings = TrellisTextureSettings(texture_size=1536)
+
+    assert settings.texture_size == 1536
+
+
+def test_refine_cube_roundtrip_is_bound_to_geometry(tmp_path: Path):
+    geometry = tmp_path / "geometry.glb"
+    geometry.write_bytes(b"mesh-v1")
+    manifest = tmp_path / "refine.mvstudio.json"
+    controller = MultiviewStudioController()
+    controller.set_geometry_path(geometry)
+    controller.set_refine_cube((1.0, 2.0, 3.0), 0.75)
+    controller.confirm_refine_cube()
+
+    controller.save(manifest)
+    restored = MultiviewProject.load(manifest)
+
+    assert restored.refine_cube is not None
+    assert restored.refine_cube.center == (1.0, 2.0, 3.0)
+    assert restored.refine_cube.side == 0.75
+    assert restored.refine_cube.confirmed
+
+
+def test_loading_drops_refine_cube_when_geometry_content_changed(tmp_path: Path):
+    geometry = tmp_path / "geometry.glb"
+    geometry.write_bytes(b"mesh-v1")
+    manifest = tmp_path / "refine.mvstudio.json"
+    controller = MultiviewStudioController()
+    controller.set_geometry_path(geometry)
+    controller.set_refine_cube((0.0, 0.0, 0.0), 1.0, confirmed=True)
+    controller.save(manifest)
+
+    geometry.write_bytes(b"mesh-v2")
+    restored = MultiviewProject.load(manifest)
+
+    assert restored.refine_cube is None
+
+
+def test_interactive_refine_cube_update_keeps_geometry_binding(tmp_path: Path):
+    geometry = tmp_path / "geometry.glb"
+    geometry.write_bytes(b"mesh")
+    controller = MultiviewStudioController()
+    controller.set_geometry_path(geometry)
+    controller.set_refine_cube((0.0, 0.0, 0.0), 1.0, confirmed=True)
+    fingerprint = controller.project.refine_cube.geometry_fingerprint
+
+    controller.update_refine_cube((1.0, 2.0, 3.0), 2.5)
+
+    assert controller.project.refine_cube == RefineCube(
+        center=(1.0, 2.0, 3.0),
+        side=2.5,
+        geometry_fingerprint=fingerprint,
+        confirmed=False,
+    )
+
+
+def test_numeric_refine_cube_edit_returns_confirmed_cube_to_draft(tmp_path: Path):
+    geometry = tmp_path / "geometry.glb"
+    geometry.write_bytes(b"mesh")
+    controller = MultiviewStudioController()
+    controller.set_geometry_path(geometry)
+    controller.set_refine_cube((0.0, 0.0, 0.0), 1.0, confirmed=True)
+
+    controller.set_refine_cube_value("y", 2.5)
+
+    assert controller.project.refine_cube.center == (0.0, 2.5, 0.0)
+    assert not controller.project.refine_cube.confirmed
+
+
+def test_textured_result_does_not_replace_geometry_source(tmp_path: Path):
+    controller = MultiviewStudioController()
+    geometry = tmp_path / "geometry.glb"
+    textured = tmp_path / "textured.glb"
+
+    controller.set_geometry_path(geometry)
+    controller.set_textured_shape_path(textured)
+
+    assert controller.project.geometry_path == str(geometry.resolve())
+    assert controller.project.shape_path == str(textured.resolve())
+
+
+def test_texture_validation_covers_every_populated_view():
+    project = MultiviewProject().with_source("front", "/tmp/front.png")
+    project = project.with_slot(
+        ViewKey("eye", 90), image_path="/tmp/right.png"
+    )
+    project = replace(
+        project,
+        geometry_path="/tmp/model.glb",
+        texture=TrellisTextureSettings(total_steps=2, warmup_steps=1),
+    )
+
+    assert project.validate_texture_request() == (
+        "Texture post-warmup steps must cover every populated view once",
+    )
 
 
 def test_trellis_settings_reject_warmup_longer_than_schedule():
@@ -113,5 +313,5 @@ def test_shape_validation_requires_one_post_warmup_step_per_view():
     )
 
     assert project.validate_shape_request() == (
-        "Post-warmup steps must cover every included view at least once",
+        "Post-warmup steps must cover every populated view at least once",
     )

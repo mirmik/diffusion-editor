@@ -7,17 +7,27 @@ import pytest
 from tcbase import Action, MouseButton
 
 from diffusion_editor.app.native_reconstruction_viewport import (
+    NativeReconstructionViewport,
     _allocate_resource_namespace,
+    _build_smooth_mesh,
     RECONSTRUCTION_SHADING_MODES,
     _FRAGMENT_SHADER,
     _OrbitCamera,
     _ViewportSurface,
     _SMOOTH_TEXTURED_VERTEX_SHADER,
+    _SMOOTH_TEXTURED_FRAGMENT_SHADER,
+    _SMOOTH_FRAGMENT_SHADER,
     _SMOOTH_VERTEX_SHADER,
     _TEXTURED_FRAGMENT_SHADER,
     _decode_texture,
+    _compute_vertex_normals,
     _draw_constants,
     _mesh_resource_id,
+    _nearest_ray_triangle_hit,
+    _point_segment_distance,
+    _ray_plane_intersection,
+    _REFINE_GIZMO_AXES,
+    _REFINE_SIZE_DIRECTION,
     _should_fit_camera,
     _wireframe_indices,
 )
@@ -61,6 +71,153 @@ def test_viewport_surface_pans_with_native_screen_space_gesture() -> None:
     surface.close()
 
 
+def test_viewport_surface_gives_pick_handler_first_left_click() -> None:
+    camera = _OrbitCamera()
+    surface = _ViewportSurface(camera, lambda: None)
+    calls = []
+    surface.set_pointer_press_handler(
+        lambda x, y, button: calls.append((x, y, button)) or True
+    )
+
+    assert surface.dispatch_pointer_button(
+        25.0, 40.0, int(MouseButton.LEFT), int(Action.PRESS), 0, 1
+    )
+    assert surface.dispatch_pointer_move(40.0, 50.0)
+    assert calls == [(25.0, 40.0, int(MouseButton.LEFT))]
+    surface.close()
+
+
+def test_viewport_surface_routes_active_gizmo_drag_before_orbit() -> None:
+    camera = _OrbitCamera()
+    surface = _ViewportSurface(camera, lambda: None)
+    moves = []
+    surface.set_pointer_move_handler(
+        lambda x, y: moves.append((x, y)) or True
+    )
+
+    assert surface.dispatch_pointer_move(30.0, 45.0)
+    assert moves == [(30.0, 45.0)]
+    surface.close()
+
+
+def test_refine_gizmo_axes_represent_gltf_coordinates_in_z_up_viewport() -> None:
+    assert _REFINE_GIZMO_AXES["x"][0] == pytest.approx((1.0, 0.0, 0.0))
+    assert _REFINE_GIZMO_AXES["y"][0] == pytest.approx((0.0, 0.0, 1.0))
+    assert _REFINE_GIZMO_AXES["z"][0] == pytest.approx((0.0, -1.0, 0.0))
+    assert _REFINE_SIZE_DIRECTION == pytest.approx(
+        np.asarray((1.0, -1.0, 1.0)) / math.sqrt(3.0)
+    )
+
+
+def test_gizmo_screen_projection_and_segment_pick_distance() -> None:
+    camera = _OrbitCamera(front_azimuth=0.0)
+    camera.fit(
+        np.asarray((-1.0, -1.0, -1.0)),
+        np.asarray((1.0, 1.0, 1.0)),
+    )
+    center = camera.project_world_to_screen(
+        np.asarray((0.0, 0.0, 0.0)), 800, 600
+    )
+    end = camera.project_world_to_screen(
+        np.asarray((1.0, 0.0, 0.0)), 800, 600
+    )
+    elevated = camera.project_world_to_screen(
+        np.asarray((0.0, 0.0, 1.0)), 800, 600
+    )
+
+    assert center == pytest.approx((400.0, 300.0))
+    assert end[0] > center[0]
+    # Regression: the Vulkan projection already owns screen-Y orientation.
+    # A second manual flip made visible handles unpickable.
+    assert elevated[1] < center[1]
+    midpoint = (center + end) * 0.5
+    distance, parameter = _point_segment_distance(
+        midpoint + np.asarray((0.0, 6.0)), center, end
+    )
+    assert distance == pytest.approx(6.0)
+    assert parameter == pytest.approx(0.5)
+
+
+def test_ray_plane_intersection_supports_gizmo_constraint() -> None:
+    hit = _ray_plane_intersection(
+        np.asarray((0.0, 0.0, 5.0)),
+        np.asarray((0.0, 0.0, -1.0)),
+        np.asarray((0.0, 0.0, 0.0)),
+        np.asarray((0.0, 0.0, 1.0)),
+    )
+
+    assert hit == pytest.approx((0.0, 0.0, 0.0))
+
+
+def test_refine_gizmo_x_arrow_drag_publishes_viewport_center() -> None:
+    class Ray:
+        def __init__(self, origin, direction):
+            self.origin = origin
+            self.direction = direction
+
+    class Camera:
+        def mvp(self, width, height):
+            del width, height
+            return np.eye(4, dtype=np.float32)
+
+        def direction_from_target(self):
+            return np.asarray((0.0, 0.0, 1.0), dtype=np.float32)
+
+        def project_world_to_screen(self, point, width, height):
+            return np.asarray((
+                (float(point[0]) * 0.5 + 0.5) * width,
+                (0.5 - float(point[1]) * 0.5) * height,
+            ))
+
+        def screen_ray(self, position, width, height):
+            x = position[0] / width * 2.0 - 1.0
+            y = 1.0 - position[1] / height * 2.0
+            return Ray((x, y, 5.0), (0.0, 0.0, -1.0))
+
+    viewport = object.__new__(NativeReconstructionViewport)
+    viewport._camera = Camera()
+    viewport.surface = type("Surface", (), {"size": (800, 600)})()
+    viewport._refine_cube_center = (0.0, 0.0, 0.0)
+    viewport._refine_cube_side = 1.0
+    viewport._refine_cube_confirmed = True
+    viewport._model_bounds_min = np.asarray((-1.0, -1.0, -1.0))
+    viewport._model_bounds_max = np.asarray((1.0, 1.0, 1.0))
+    viewport._refine_cube_edit_enabled = True
+    viewport._refine_gizmo_drag = None
+    viewport._closed = False
+    viewport._dirty = False
+    viewport._request_repaint = lambda: None
+    changes = []
+    viewport._refine_cube_edit_handler = (
+        lambda center, side: changes.append((center, side))
+    )
+
+    assert viewport._begin_refine_gizmo_drag(600.0, 300.0)
+    assert viewport._refine_gizmo_drag.kind == "x"
+    assert viewport._handle_gizmo_pointer_move(640.0, 300.0)
+
+    assert changes[-1][0] == pytest.approx((0.1, 0.0, 0.0))
+    assert changes[-1][1] == pytest.approx(1.0)
+    assert not viewport._refine_cube_confirmed
+
+
+def test_nearest_ray_triangle_hit_selects_frontmost_triangle() -> None:
+    positions = np.asarray([
+        (-1.0, -1.0, 1.0), (1.0, -1.0, 1.0), (0.0, 1.0, 1.0),
+        (-1.0, -1.0, 2.0), (1.0, -1.0, 2.0), (0.0, 1.0, 2.0),
+    ], dtype=np.float32)
+    triangles = np.asarray(((0, 1, 2), (3, 4, 5)), dtype=np.uint32)
+
+    hit = _nearest_ray_triangle_hit(
+        np.asarray((0.0, 0.0, 0.0)),
+        np.asarray((0.0, 0.0, 1.0)),
+        positions,
+        triangles,
+    )
+
+    np.testing.assert_allclose(hit, (0.0, 0.0, 1.0))
+
+
 def test_reconstruction_viewports_get_distinct_mesh_resource_namespaces() -> None:
     first = _allocate_resource_namespace("primary")
     second = _allocate_resource_namespace("refine")
@@ -83,6 +240,23 @@ def test_fit_resets_camera_to_pixal3d_front() -> None:
     assert camera.direction_from_target() == pytest.approx((
         0.0,
         math.cos(math.radians(12.0)),
+        math.sin(math.radians(12.0)),
+    ), abs=1e-6)
+
+
+def test_fit_can_reset_camera_to_opposite_trellis_front() -> None:
+    camera = _OrbitCamera(front_azimuth=0.0)
+    camera.orbit(30.0, -20.0)
+
+    camera.fit(
+        np.asarray((-1.0, -0.5, 0.0), dtype=np.float32),
+        np.asarray((1.0, 0.5, 2.0), dtype=np.float32),
+    )
+
+    assert camera._camera.azimuth == pytest.approx(0.0)
+    assert camera.direction_from_target() == pytest.approx((
+        0.0,
+        -math.cos(math.radians(12.0)),
         math.sin(math.radians(12.0)),
     ), abs=1e-6)
 
@@ -151,6 +325,10 @@ def test_shading_shaders_cover_flat_smooth_unlit_and_normals() -> None:
     assert "layout(location=1) in vec3 a_normal" in (
         _SMOOTH_TEXTURED_VERTEX_SHADER
     )
+    assert "abs(dot(normal, light_direction))" in _SMOOTH_FRAGMENT_SHADER
+    assert "abs(dot(normal, light_direction))" in (
+        _SMOOTH_TEXTURED_FRAGMENT_SHADER
+    )
     assert "display_mode == 2" in _FRAGMENT_SHADER
     assert "display_mode == 3" in _FRAGMENT_SHADER
     assert "display_mode == 2" in _TEXTURED_FRAGMENT_SHADER
@@ -169,6 +347,52 @@ def test_wireframe_indices_expand_every_triangle_edge() -> None:
         0, 1, 1, 2, 2, 0,
         2, 1, 1, 3, 3, 2,
     ]
+
+
+def test_generated_vertex_normals_smooth_shared_vertices() -> None:
+    positions = np.asarray([
+        (0.0, 0.0, 0.0),
+        (1.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0),
+        (0.0, 0.0, 1.0),
+    ], dtype=np.float32)
+    faces = np.asarray([(0, 1, 2), (0, 3, 1)], dtype=np.uint32)
+
+    normals = _compute_vertex_normals(positions, faces)
+
+    np.testing.assert_allclose(normals, np.asarray((
+        (0.0, 2**-0.5, 2**-0.5),
+        (0.0, 2**-0.5, 2**-0.5),
+        (0.0, 0.0, 1.0),
+        (0.0, 1.0, 0.0),
+    ), dtype=np.float32), atol=1e-6)
+
+
+def test_position_only_mesh_gets_smooth_render_variant() -> None:
+    from tmesh import TcAttribType, TcMesh, TcVertexLayout
+
+    positions = np.ascontiguousarray([
+        (0.0, 0.0, 0.0),
+        (1.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0),
+    ], dtype=np.float32)
+    indices = np.ascontiguousarray((0, 1, 2), dtype=np.uint32)
+    layout = TcVertexLayout()
+    assert layout.add("position", 3, TcAttribType.FLOAT32, 0)
+    source = TcMesh.from_interleaved(
+        positions, 3, indices, layout, uuid="smooth-fallback-source"
+    )
+
+    smooth = _build_smooth_mesh(source)
+
+    assert smooth is not None
+    assert source.vertex_normals is None
+    assert smooth.vertex_normals is not None
+    np.testing.assert_allclose(
+        smooth.vertex_normals,
+        np.tile((0.0, 0.0, 1.0), (3, 1)),
+        atol=1e-6,
+    )
 
 
 def test_decode_texture_preserves_top_to_bottom_pixel_order() -> None:

@@ -138,36 +138,50 @@ def _sample_shape(pipeline, conditions, schedule, model, coords, stage: str):
     return latent * std + mean
 
 
-def _export_shape(meshes, path: Path, face_target: int) -> dict[str, int]:
+def _cache_decoded_meshes(meshes, path: Path) -> dict[str, int]:
     import numpy as np
-    import trimesh
-    from trellis2.representations import Mesh
 
-    geometries = []
-    source_faces = 0
+    vertices = []
+    faces = []
+    vertex_offset = 0
     for mesh in meshes:
-        shape = Mesh(mesh.vertices.clone(), mesh.faces.clone())
-        source_faces += int(len(shape.faces))
-        shape.fill_holes()
-        if len(shape.faces) > face_target:
-            shape.simplify(face_target)
-        geometry = trimesh.Trimesh(
-            vertices=shape.vertices.detach().cpu().numpy(),
-            faces=shape.faces.detach().cpu().numpy(),
-            process=False,
-        )
-        # TRELLIS uses Z-up internally.  Match the conversion used by
-        # o_voxel.postprocess.to_glb: (x, y, z) -> (x, z, -y).
-        geometry.apply_transform(_gltf_y_up_transform())
-        geometries.append(geometry)
-    result = trimesh.util.concatenate(geometries)
-    result.remove_unreferenced_vertices()
-    result.export(path)
+        mesh_vertices = mesh.vertices.detach().float().cpu().numpy()
+        mesh_faces = mesh.faces.detach().int().cpu().numpy()
+        vertices.append(mesh_vertices)
+        faces.append(mesh_faces + vertex_offset)
+        vertex_offset += len(mesh_vertices)
+    combined_vertices = np.ascontiguousarray(
+        np.concatenate(vertices, axis=0), dtype=np.float32
+    )
+    combined_faces = np.ascontiguousarray(
+        np.concatenate(faces, axis=0), dtype=np.int32
+    )
+    np.savez(
+        path,
+        vertices=combined_vertices,
+        faces=combined_faces,
+    )
     return {
-        "source_faces": source_faces,
-        "output_vertices": int(len(result.vertices)),
-        "output_faces": int(len(result.faces)),
+        "source_vertices": int(len(combined_vertices)),
+        "source_faces": int(len(combined_faces)),
     }
+
+
+def _postprocess_shape(
+    cache_path: Path,
+    output: Path,
+    settings: dict,
+    actual_resolution: int,
+):
+    from trellis_mesh_postprocess import run_mesh_postprocess
+
+    return run_mesh_postprocess(
+        cache_path,
+        output,
+        settings,
+        actual_resolution,
+        progress=_emit,
+    )
 
 
 def _gltf_y_up_transform():
@@ -291,18 +305,25 @@ def main() -> int:
     _save_sparse(slat_path, shape)
     _emit(f"[decode] resolution {actual_resolution}")
     meshes, _shape_subs = pipeline.decode_shape_slat(shape, actual_resolution)
-    shape_path = output / "shape-gltf-y-up.glb"
-    counts = _export_shape(
-        meshes, shape_path, int(request["decimation_target"])
+    cache_path = output / "decoded-mesh-z-up.npz"
+    counts = _cache_decoded_meshes(meshes, cache_path)
+    shape_path, postprocess_report = _postprocess_shape(
+        cache_path,
+        output,
+        dict(request["postprocess"]),
+        actual_resolution,
     )
     result = {
         "protocol": 1,
         "status": "complete",
         "shape": str(shape_path.resolve()),
+        "shape_cache": str(cache_path.resolve()),
         "shape_slat": str(slat_path.resolve()),
+        "generation_key": str(request["generation_key"]),
         "requested_resolution": requested_resolution,
         "actual_resolution": actual_resolution,
         "occupancy_tokens": int(unique_coords.shape[0]),
+        "postprocess": postprocess_report,
         **counts,
     }
     (output / "result.json").write_text(
