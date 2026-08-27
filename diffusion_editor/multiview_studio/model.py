@@ -16,6 +16,7 @@ ELEVATIONS = ("low", "eye", "elevated")
 ELEVATION_DEGREES = {"low": -30, "eye": 0, "elevated": 30}
 AZIMUTHS = tuple(range(0, 360, 45))
 REFINE_COORDINATE_SPACE = "geometry-local-gltf-y-up-v1"
+MAX_REFINE_REGIONS = 8
 
 
 @dataclass(frozen=True, order=True)
@@ -170,6 +171,249 @@ class RefineCube:
 
 
 @dataclass(frozen=True)
+class RefineFaceMask:
+    """Sparse vertex weights with legacy binary face-mask compatibility."""
+
+    geometry_fingerprint: str
+    mesh_faces: tuple[tuple[int, ...], ...] = ()
+    mesh_vertex_weights: tuple[tuple[tuple[int, float], ...], ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.geometry_fingerprint:
+            raise ValueError("refine mask must identify its source geometry")
+        normalized = []
+        for faces in self.mesh_faces:
+            values = tuple(sorted({int(face) for face in faces}))
+            if any(face < 0 for face in values):
+                raise ValueError("refine mask face indexes must be non-negative")
+            normalized.append(values)
+        object.__setattr__(self, "mesh_faces", tuple(normalized))
+        normalized_weights = []
+        for weights in self.mesh_vertex_weights:
+            by_vertex: dict[int, float] = {}
+            for vertex, weight in weights:
+                vertex = int(vertex)
+                weight = float(weight)
+                if vertex < 0:
+                    raise ValueError(
+                        "refine mask vertex indexes must be non-negative"
+                    )
+                if not math.isfinite(weight) or not 0.0 <= weight <= 1.0:
+                    raise ValueError("refine mask weights must be from zero to one")
+                if weight > 1e-6:
+                    by_vertex[vertex] = weight
+            normalized_weights.append(tuple(sorted(by_vertex.items())))
+        object.__setattr__(
+            self, "mesh_vertex_weights", tuple(normalized_weights)
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        if self.mesh_vertex_weights or not self.mesh_faces:
+            return {
+                "kind": "weighted-source-vertices",
+                "geometry_fingerprint": self.geometry_fingerprint,
+                "mesh_vertex_weights": [
+                    [[vertex, weight] for vertex, weight in weights]
+                    for weights in self.mesh_vertex_weights
+                ],
+            }
+        return {
+            "kind": "binary-source-faces",
+            "geometry_fingerprint": self.geometry_fingerprint,
+            "mesh_faces": [list(faces) for faces in self.mesh_faces],
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "RefineFaceMask":
+        kind = payload.get("kind", "binary-source-faces")
+        if kind == "weighted-source-vertices":
+            return cls(
+                geometry_fingerprint=str(payload["geometry_fingerprint"]),
+                mesh_vertex_weights=tuple(
+                    tuple((int(vertex), float(weight)) for vertex, weight in weights)
+                    for weights in payload.get("mesh_vertex_weights", ())
+                ),
+            )
+        if kind != "binary-source-faces":
+            raise ValueError(f"unsupported refine mask kind: {kind}")
+        return cls(
+            geometry_fingerprint=str(payload["geometry_fingerprint"]),
+            mesh_faces=tuple(
+                tuple(int(face) for face in faces)
+                for faces in payload.get("mesh_faces", ())
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class RefineViewPatch:
+    """A normalized image rectangle used to condition one refine region."""
+
+    key: ViewKey
+    bounds: tuple[float, float, float, float]
+
+    def __post_init__(self) -> None:
+        bounds = tuple(float(value) for value in self.bounds)
+        if len(bounds) != 4 or not all(
+            math.isfinite(value) for value in bounds
+        ):
+            raise ValueError("refine view patch must contain four finite bounds")
+        x0, y0, x1, y1 = bounds
+        if not (0.0 <= x0 < x1 <= 1.0 and 0.0 <= y0 < y1 <= 1.0):
+            raise ValueError(
+                "refine view patch bounds must form a rectangle in [0, 1]"
+            )
+        object.__setattr__(self, "bounds", bounds)
+
+    def to_dict(self) -> dict[str, Any]:
+        x0, y0, x1, y1 = self.bounds
+        return {
+            "elevation": self.key.elevation,
+            "azimuth": self.key.azimuth,
+            "x": x0,
+            "y": y0,
+            "width": x1 - x0,
+            "height": y1 - y0,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "RefineViewPatch":
+        x = float(payload["x"])
+        y = float(payload["y"])
+        right = x + float(payload["width"])
+        bottom = y + float(payload["height"])
+        if math.isclose(right, 1.0, abs_tol=1e-9):
+            right = 1.0
+        if math.isclose(bottom, 1.0, abs_tol=1e-9):
+            bottom = 1.0
+        return cls(
+            key=ViewKey(str(payload["elevation"]), int(payload["azimuth"])),
+            bounds=(
+                x,
+                y,
+                right,
+                bottom,
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class RefineShapeSettings:
+    seed: int = 44
+    steps: int = 25
+    strength: float = 1.0
+    cfg: float = 5.0
+    resolution: int = 1024
+    preview_face_target: int = 250_000
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.seed <= 2_147_483_647:
+            raise ValueError("refine seed must fit a signed 32-bit integer")
+        if not 1 <= self.steps <= 100:
+            raise ValueError("refine steps must be from 1 to 100")
+        if not math.isfinite(self.strength) or not 0.0 <= self.strength <= 1.0:
+            raise ValueError("refine strength must be from zero to one")
+        if not math.isfinite(self.cfg) or not 0.0 <= self.cfg <= 20.0:
+            raise ValueError("refine CFG must be from zero to 20")
+        if not 1024 <= self.resolution <= 1536 or self.resolution % 128:
+            raise ValueError(
+                "refine resolution must be a multiple of 128 from 1024 to 1536"
+            )
+        if self.preview_face_target <= 0:
+            raise ValueError("refine preview face target must be positive")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "seed": self.seed,
+            "steps": self.steps,
+            "strength": self.strength,
+            "cfg": self.cfg,
+            "resolution": self.resolution,
+            "preview_face_target": self.preview_face_target,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "RefineShapeSettings":
+        return cls(
+            seed=int(payload.get("seed", 44)),
+            steps=int(payload.get("steps", 25)),
+            strength=float(payload.get("strength", 1.0)),
+            cfg=float(payload.get("cfg", 5.0)),
+            resolution=int(payload.get("resolution", 1024)),
+            preview_face_target=int(payload.get("preview_face_target", 250_000)),
+        )
+
+
+@dataclass(frozen=True)
+class RefineShapeResult:
+    geometry_fingerprint: str
+    request_key: str
+    source_region_path: str
+    refined_region_path: str
+    source_slat_path: str
+    refined_slat_path: str
+    manifest_path: str
+    textured_region_path: str = ""
+    texture_key: str = ""
+    texture_shape_slat_path: str = ""
+    texture_slat_path: str = ""
+    texture_manifest_path: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.geometry_fingerprint:
+            raise ValueError("refine result must identify its source geometry")
+        if not self.request_key:
+            raise ValueError("refine result must have a request key")
+        if not self.refined_region_path:
+            raise ValueError("refine result must have a refined region mesh")
+
+    def to_dict(self, root: Path) -> dict[str, Any]:
+        return {
+            "geometry_fingerprint": self.geometry_fingerprint,
+            "request_key": self.request_key,
+            "source_region": _encode_path(self.source_region_path, root),
+            "refined_region": _encode_path(self.refined_region_path, root),
+            "source_slat": _encode_path(self.source_slat_path, root),
+            "refined_slat": _encode_path(self.refined_slat_path, root),
+            "manifest": _encode_path(self.manifest_path, root),
+            "textured_region": _encode_path(self.textured_region_path, root),
+            "texture_key": self.texture_key,
+            "texture_shape_slat": _encode_path(
+                self.texture_shape_slat_path, root
+            ),
+            "texture_slat": _encode_path(self.texture_slat_path, root),
+            "texture_manifest": _encode_path(
+                self.texture_manifest_path, root
+            ),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any], root: Path) -> "RefineShapeResult":
+        return cls(
+            geometry_fingerprint=str(payload["geometry_fingerprint"]),
+            request_key=str(payload["request_key"]),
+            source_region_path=_decode_path(payload.get("source_region", ""), root),
+            refined_region_path=_decode_path(payload["refined_region"], root),
+            source_slat_path=_decode_path(payload.get("source_slat", ""), root),
+            refined_slat_path=_decode_path(payload.get("refined_slat", ""), root),
+            manifest_path=_decode_path(payload.get("manifest", ""), root),
+            textured_region_path=_decode_path(
+                payload.get("textured_region", ""), root
+            ),
+            texture_key=str(payload.get("texture_key", "")),
+            texture_shape_slat_path=_decode_path(
+                payload.get("texture_shape_slat", ""), root
+            ),
+            texture_slat_path=_decode_path(
+                payload.get("texture_slat", ""), root
+            ),
+            texture_manifest_path=_decode_path(
+                payload.get("texture_manifest", ""), root
+            ),
+        )
+
+
+@dataclass(frozen=True)
 class MultiviewProject:
     front_path: str = ""
     back_path: str = ""
@@ -182,6 +426,11 @@ class MultiviewProject:
     geometry_path: str = ""
     shape_path: str = ""
     refine_cube: RefineCube | None = None
+    refine_regions: tuple[RefineCube, ...] = ()
+    refine_masks: tuple[RefineFaceMask, ...] = ()
+    refine_view_patches: tuple[tuple[RefineViewPatch, ...], ...] = ()
+    refine_shape_settings: tuple[RefineShapeSettings, ...] = ()
+    refine_shape_results: tuple[tuple[RefineShapeResult, ...], ...] = ()
 
     def __post_init__(self) -> None:
         keys = tuple(slot.key for slot in self.slots)
@@ -190,6 +439,117 @@ class MultiviewProject:
             raise ValueError("multiview project must contain the canonical 3x8 grid")
         if not 0 <= self.qwen_seed <= 2_147_483_647:
             raise ValueError("Qwen seed must fit a signed 32-bit integer")
+        if len(self.refine_regions) > MAX_REFINE_REGIONS:
+            raise ValueError(
+                f"a project supports at most {MAX_REFINE_REGIONS} refine regions"
+            )
+        if any(not region.confirmed for region in self.refine_regions):
+            raise ValueError("stored refine regions must be confirmed")
+        if len(self.refine_masks) > len(self.refine_regions):
+            raise ValueError("refine masks must correspond to stored regions")
+        if len(self.refine_view_patches) > len(self.refine_regions):
+            raise ValueError("refine view patches must correspond to stored regions")
+        if len(self.refine_shape_settings) > len(self.refine_regions):
+            raise ValueError("refine settings must correspond to stored regions")
+        if len(self.refine_shape_results) > len(self.refine_regions):
+            raise ValueError("refine results must correspond to stored regions")
+        for index, mask in enumerate(self.refine_masks):
+            if (
+                mask.geometry_fingerprint
+                != self.refine_regions[index].geometry_fingerprint
+            ):
+                raise ValueError("refine mask geometry does not match its region")
+        for patches in self.refine_view_patches:
+            keys = tuple(patch.key for patch in patches)
+            if len(keys) != len(set(keys)):
+                raise ValueError("a refine region cannot repeat a view patch")
+            if keys != tuple(sorted(keys, key=all_view_keys().index)):
+                raise ValueError("refine view patches must use canonical view order")
+        for index, results in enumerate(self.refine_shape_results):
+            fingerprint = self.refine_regions[index].geometry_fingerprint
+            if any(
+                result.geometry_fingerprint != fingerprint for result in results
+            ):
+                raise ValueError("refine result geometry does not match its region")
+
+    def refine_mask(self, index: int) -> RefineFaceMask:
+        if not 0 <= index < len(self.refine_regions):
+            raise ValueError("refine region index is out of range")
+        if index < len(self.refine_masks):
+            return self.refine_masks[index]
+        return RefineFaceMask(self.refine_regions[index].geometry_fingerprint)
+
+    def view_patches(self, index: int) -> tuple[RefineViewPatch, ...]:
+        if not 0 <= index < len(self.refine_regions):
+            raise ValueError("refine region index is out of range")
+        if index < len(self.refine_view_patches):
+            return self.refine_view_patches[index]
+        return ()
+
+    def view_patch(self, index: int, key: ViewKey) -> RefineViewPatch | None:
+        return next(
+            (patch for patch in self.view_patches(index) if patch.key == key),
+            None,
+        )
+
+    def region_refine_settings(self, index: int) -> RefineShapeSettings:
+        if not 0 <= index < len(self.refine_regions):
+            raise ValueError("refine region index is out of range")
+        if index < len(self.refine_shape_settings):
+            return self.refine_shape_settings[index]
+        return RefineShapeSettings()
+
+    def region_refine_results(self, index: int) -> tuple[RefineShapeResult, ...]:
+        if not 0 <= index < len(self.refine_regions):
+            raise ValueError("refine region index is out of range")
+        if index < len(self.refine_shape_results):
+            return self.refine_shape_results[index]
+        return ()
+
+    def validate_refine_request(self, index: int) -> tuple[str, ...]:
+        if not 0 <= index < len(self.refine_regions):
+            return ("Select a refine region",)
+        errors = []
+        mask = self.refine_mask(index)
+        if not any(mask.mesh_vertex_weights) and not any(mask.mesh_faces):
+            errors.append("Paint a non-empty refine mask")
+        patches = self.view_patches(index)
+        if not patches:
+            errors.append("Assign at least one conditioning view patch")
+        for patch in patches:
+            slot = self.slot(patch.key)
+            if not slot.populated or not Path(slot.image_path).is_file():
+                errors.append(f"Conditioning view is missing: {patch.key.stable_id}")
+        if not self.geometry_path or not Path(self.geometry_path).is_file():
+            errors.append("Source geometry is missing")
+        return tuple(errors)
+
+    def validate_refine_texture_request(
+        self, region_index: int, result_index: int
+    ) -> tuple[str, ...]:
+        if not 0 <= region_index < len(self.refine_regions):
+            return ("Select a refine region",)
+        results = self.region_refine_results(region_index)
+        if not 0 <= result_index < len(results):
+            return ("Select a refined region result",)
+        errors: list[str] = []
+        result = results[result_index]
+        if not result.refined_region_path or not Path(
+            result.refined_region_path
+        ).is_file():
+            errors.append("Refined region mesh is missing")
+        patches = self.view_patches(region_index)
+        if not patches:
+            errors.append("Assign at least one conditioning view patch")
+        elif self.texture.total_steps < len(patches):
+            errors.append("Texture steps must cover every region view patch once")
+        for patch in patches:
+            slot = self.slot(patch.key)
+            if not slot.populated or not Path(slot.image_path).is_file():
+                errors.append(
+                    f"Conditioning view is missing: {patch.key.stable_id}"
+                )
+        return tuple(errors)
 
     def slot(self, key: ViewKey) -> ViewSlot:
         return self.slots[all_view_keys().index(key)]
@@ -312,7 +672,20 @@ class MultiviewProject:
                     self.refine_cube.to_dict()
                     if self.refine_cube is not None
                     else None
-                )
+                ),
+                "regions": [region.to_dict() for region in self.refine_regions],
+                "masks": [mask.to_dict() for mask in self.refine_masks],
+                "view_patches": [
+                    [patch.to_dict() for patch in patches]
+                    for patches in self.refine_view_patches
+                ],
+                "shape_settings": [
+                    settings.to_dict() for settings in self.refine_shape_settings
+                ],
+                "shape_results": [
+                    [result.to_dict(root) for result in results]
+                    for results in self.refine_shape_results
+                ],
             },
         }
 
@@ -397,9 +770,106 @@ class MultiviewProject:
             else None
         )
         refine_cube = RefineCube.from_dict(cube_payload) if cube_payload else None
-        if refine_cube is not None and Path(geometry_path).is_file():
-            if geometry_fingerprint(geometry_path) != refine_cube.geometry_fingerprint:
+        region_payloads = (
+            refine_payload.get("regions", ())
+            if isinstance(refine_payload, dict)
+            else ()
+        )
+        refine_regions = tuple(
+            RefineCube.from_dict(item) for item in region_payloads
+        )
+        mask_payloads = (
+            refine_payload.get("masks", ())
+            if isinstance(refine_payload, dict)
+            else ()
+        )
+        refine_masks = tuple(
+            RefineFaceMask.from_dict(item) for item in mask_payloads
+        )
+        patch_payloads = (
+            refine_payload.get("view_patches", ())
+            if isinstance(refine_payload, dict)
+            else ()
+        )
+        refine_view_patches = tuple(
+            tuple(RefineViewPatch.from_dict(item) for item in patches)
+            for patches in patch_payloads
+        )
+        settings_payloads = (
+            refine_payload.get("shape_settings", ())
+            if isinstance(refine_payload, dict)
+            else ()
+        )
+        refine_shape_settings = tuple(
+            RefineShapeSettings.from_dict(item) for item in settings_payloads
+        )
+        results_payloads = (
+            refine_payload.get("shape_results", ())
+            if isinstance(refine_payload, dict)
+            else ()
+        )
+        refine_shape_results = tuple(
+            tuple(RefineShapeResult.from_dict(item, root) for item in results)
+            for results in results_payloads
+        )
+        if len(refine_masks) > len(refine_regions):
+            raise ValueError("refine masks must correspond to stored regions")
+        if len(refine_view_patches) > len(refine_regions):
+            raise ValueError("refine view patches must correspond to stored regions")
+        if len(refine_shape_settings) > len(refine_regions):
+            raise ValueError("refine settings must correspond to stored regions")
+        if len(refine_shape_results) > len(refine_regions):
+            raise ValueError("refine results must correspond to stored regions")
+        if len(refine_regions) > MAX_REFINE_REGIONS:
+            raise ValueError(
+                f"a project supports at most {MAX_REFINE_REGIONS} refine regions"
+            )
+        if Path(geometry_path).is_file():
+            fingerprint = geometry_fingerprint(geometry_path)
+            if (
+                refine_cube is not None
+                and fingerprint != refine_cube.geometry_fingerprint
+            ):
                 refine_cube = None
+            retained = [
+                (
+                    region,
+                    refine_masks[index] if index < len(refine_masks) else None,
+                    refine_view_patches[index]
+                    if index < len(refine_view_patches)
+                    else (),
+                    refine_shape_settings[index]
+                    if index < len(refine_shape_settings)
+                    else RefineShapeSettings(),
+                    refine_shape_results[index]
+                    if index < len(refine_shape_results)
+                    else (),
+                )
+                for index, region in enumerate(refine_regions)
+                if region.geometry_fingerprint == fingerprint
+            ]
+            refine_regions = tuple(
+                region
+                for region, _mask, _patches, _settings, _results in retained
+            )
+            refine_masks = tuple(
+                mask
+                for region, mask, _patches, _settings, _results in retained
+                if mask is not None
+                and mask.geometry_fingerprint == region.geometry_fingerprint
+            )
+            refine_view_patches = tuple(
+                patches
+                for _region, _mask, patches, _settings, _results in retained
+            )
+            refine_shape_settings = tuple(
+                settings
+                for _region, _mask, _patches, settings, _results in retained
+            )
+            refine_shape_results = tuple(
+                results
+                for _region, _mask, _patches, _settings, results in retained
+            )
         return cls(
             front_path=_decode_path(source.get("front", ""), root),
             back_path=_decode_path(source.get("back", ""), root),
@@ -410,6 +880,11 @@ class MultiviewProject:
             geometry_path=geometry_path,
             shape_path=shape_path,
             refine_cube=refine_cube,
+            refine_regions=refine_regions,
+            refine_masks=refine_masks,
+            refine_view_patches=refine_view_patches,
+            refine_shape_settings=refine_shape_settings,
+            refine_shape_results=refine_shape_results,
         )
 
 

@@ -13,7 +13,7 @@ from PIL import Image
 from tcbase import Action, MouseButton
 from tcbase._geom_native import LinearColor
 from termin.geombase import OrbitCamera, Rect2, Vec2, Vec3
-from termin.gui_native import Size, TcDocument
+from termin.gui_native import ModifierFlag, Size, TcDocument
 from tgfx import (
     CULL_NONE,
     PIXEL_D32F,
@@ -40,6 +40,7 @@ from ..generation.types import ReconstructionRefinePlacement
 
 
 _VIEWPORT_RESOURCE_IDS = count()
+_SUBSET_MESH_IDS = count()
 
 
 def _allocate_resource_namespace(label: str) -> str:
@@ -162,6 +163,71 @@ void main() {
     float diffuse = abs(dot(normal, light_direction));
     vec3 color = U_COLOR.rgb * (0.28 + 0.72 * diffuse);
     frag_color = vec4(color, 1.0);
+}
+"""
+
+_WEIGHTED_MASK_VERTEX_SHADER = """#version 450 core
+#ifdef VULKAN
+layout(push_constant) uniform PCBlock {
+    mat4 u_mvp;
+    vec4 u_color;
+    vec4 u_light_direction;
+} pc;
+#define U_MVP pc.u_mvp
+#else
+uniform mat4 u_mvp;
+#define U_MVP u_mvp
+#endif
+layout(location=0) in vec3 a_position;
+layout(location=1) in vec3 a_normal;
+layout(location=2) in float a_mask_weight;
+layout(location=0) out vec3 v_position;
+layout(location=1) out vec3 v_normal;
+layout(location=2) out float v_mask_weight;
+void main() {
+    v_position = a_position;
+    v_normal = a_normal;
+    v_mask_weight = a_mask_weight;
+    gl_Position = U_MVP * vec4(a_position, 1.0);
+}
+"""
+
+_WEIGHTED_MASK_FRAGMENT_SHADER = """#version 450 core
+#ifdef VULKAN
+layout(push_constant) uniform PCBlock {
+    mat4 u_mvp;
+    vec4 u_color;
+    vec4 u_light_direction;
+} pc;
+#define U_COLOR pc.u_color
+#define U_LIGHT_DIRECTION pc.u_light_direction.xyz
+#define U_DISPLAY_MODE pc.u_light_direction.w
+#else
+uniform vec4 u_color;
+uniform vec4 u_light_direction;
+#define U_COLOR u_color
+#define U_LIGHT_DIRECTION u_light_direction.xyz
+#define U_DISPLAY_MODE u_light_direction.w
+#endif
+layout(location=0) in vec3 v_position;
+layout(location=1) in vec3 v_normal;
+layout(location=2) in float v_mask_weight;
+layout(location=0) out vec4 frag_color;
+void main() {
+    float weight = clamp(v_mask_weight, 0.0, 1.0);
+    if (weight <= 0.002) {
+        discard;
+    }
+    int display_mode = int(U_DISPLAY_MODE + 0.5);
+    vec3 color = U_COLOR.rgb;
+    if (display_mode != 2) {
+        vec3 normal = display_mode == 1
+            ? normalize(v_normal)
+            : normalize(cross(dFdy(v_position), dFdx(v_position)));
+        float diffuse = abs(dot(normal, normalize(U_LIGHT_DIRECTION)));
+        color *= 0.35 + 0.65 * diffuse;
+    }
+    frag_color = vec4(color, U_COLOR.a * weight);
 }
 """
 
@@ -326,6 +392,11 @@ class _MeshRenderItem:
     editable: bool = True
     positions: np.ndarray | None = None
     triangles: np.ndarray | None = None
+    source_mesh_index: int = 0
+    source_face_indices: np.ndarray | None = None
+    mask_vertex_weights: np.ndarray | None = None
+    mask_mesh: object | None = None
+    mask_wire_mesh: object | None = None
 
 
 def _wireframe_indices(triangles: np.ndarray) -> np.ndarray:
@@ -373,6 +444,164 @@ def _nearest_ray_triangle_hit(
         return None
     nearest = float(np.min(distance[hits]))
     return np.asarray(ray_origin + ray_direction * nearest, dtype=np.float32)
+
+
+def _select_cube_triangle_indices(
+    positions: np.ndarray,
+    triangles: np.ndarray,
+    center: tuple[float, float, float] | np.ndarray,
+    side: float,
+) -> np.ndarray:
+    """Return original face indexes whose bounds intersect a cube."""
+    vertices = np.asarray(positions, dtype=np.float64)
+    faces = np.asarray(triangles, dtype=np.int64)
+    cube_center = np.asarray(center, dtype=np.float64)
+    cube_side = float(side)
+    if vertices.ndim != 2 or vertices.shape[1:] != (3,):
+        raise ValueError("positions must have shape (count, 3)")
+    if faces.ndim != 2 or faces.shape[1:] != (3,):
+        raise ValueError("triangles must have shape (count, 3)")
+    if cube_center.shape != (3,) or not np.isfinite(cube_center).all():
+        raise ValueError("cube center must contain three finite values")
+    if not math.isfinite(cube_side) or cube_side <= 0.0:
+        raise ValueError("cube side must be finite and positive")
+    minimum = cube_center - cube_side * 0.5
+    maximum = cube_center + cube_side * 0.5
+    triangle_positions = vertices[faces]
+    intersects = np.all(
+        triangle_positions.max(axis=1) >= minimum, axis=1
+    ) & np.all(triangle_positions.min(axis=1) <= maximum, axis=1)
+    return np.flatnonzero(intersects).astype(np.uint32, copy=False)
+
+
+def _select_cube_triangles(
+    positions: np.ndarray,
+    triangles: np.ndarray,
+    center: tuple[float, float, float] | np.ndarray,
+    side: float,
+) -> np.ndarray:
+    faces = np.asarray(triangles, dtype=np.uint32)
+    selected = _select_cube_triangle_indices(positions, faces, center, side)
+    return np.ascontiguousarray(faces[selected], dtype=np.uint32)
+
+
+def _faces_under_screen_brush(
+    positions: np.ndarray,
+    triangles: np.ndarray,
+    mvp: np.ndarray,
+    width: int,
+    height: int,
+    center: tuple[float, float],
+    radius: float,
+) -> np.ndarray:
+    """Select every projected face intersecting a circular x-ray brush."""
+    vertices = np.asarray(positions, dtype=np.float64)
+    faces = np.asarray(triangles, dtype=np.int64)
+    if not len(vertices) or not len(faces):
+        return np.empty(0, dtype=np.uint32)
+    homogeneous = np.concatenate(
+        (vertices, np.ones((len(vertices), 1), dtype=np.float64)), axis=1
+    )
+    clip = homogeneous @ np.asarray(mvp, dtype=np.float64).T
+    valid_vertices = clip[:, 3] > 1e-8
+    ndc = np.zeros((len(vertices), 2), dtype=np.float64)
+    ndc[valid_vertices] = (
+        clip[valid_vertices, :2] / clip[valid_vertices, 3, None]
+    )
+    screen = np.empty_like(ndc)
+    screen[:, 0] = (ndc[:, 0] * 0.5 + 0.5) * max(int(width), 1)
+    # Termin's projection matrix already follows the native viewport's
+    # top-left screen convention: NDC -Y maps towards the top of the widget.
+    screen[:, 1] = (ndc[:, 1] * 0.5 + 0.5) * max(int(height), 1)
+    points = screen[faces]
+    valid = valid_vertices[faces].all(axis=1)
+    pointer = np.asarray(center, dtype=np.float64)
+
+    def edge_distance_squared(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        edge = b - a
+        length_squared = np.einsum("ij,ij->i", edge, edge)
+        parameter = np.zeros(len(edge), dtype=np.float64)
+        usable = length_squared > 1e-12
+        parameter[usable] = np.einsum(
+            "ij,ij->i", pointer - a[usable], edge[usable]
+        ) / length_squared[usable]
+        parameter = np.clip(parameter, 0.0, 1.0)
+        nearest = a + edge * parameter[:, None]
+        delta = nearest - pointer
+        return np.einsum("ij,ij->i", delta, delta)
+
+    a, b, c = points[:, 0], points[:, 1], points[:, 2]
+    def cross_2d(left: np.ndarray, right: np.ndarray) -> np.ndarray:
+        return left[:, 0] * right[:, 1] - left[:, 1] * right[:, 0]
+
+    ab = cross_2d(b - a, pointer - a)
+    bc = cross_2d(c - b, pointer - b)
+    ca = cross_2d(a - c, pointer - c)
+    inside = ((ab >= 0.0) & (bc >= 0.0) & (ca >= 0.0)) | (
+        (ab <= 0.0) & (bc <= 0.0) & (ca <= 0.0)
+    )
+    distance_squared = np.minimum.reduce((
+        edge_distance_squared(a, b),
+        edge_distance_squared(b, c),
+        edge_distance_squared(c, a),
+    ))
+    selected = valid & (inside | (distance_squared <= float(radius) ** 2))
+    return np.flatnonzero(selected).astype(np.uint32, copy=False)
+
+
+def _vertex_weights_under_screen_brush(
+    positions: np.ndarray,
+    mvp: np.ndarray,
+    width: int,
+    height: int,
+    center: tuple[float, float],
+    radius: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return projected source vertices and a smooth 1-to-0 brush falloff."""
+    vertices = np.asarray(positions, dtype=np.float64)
+    if not len(vertices):
+        return np.empty(0, dtype=np.uint32), np.empty(0, dtype=np.float32)
+    homogeneous = np.concatenate(
+        (vertices, np.ones((len(vertices), 1), dtype=np.float64)), axis=1
+    )
+    clip = homogeneous @ np.asarray(mvp, dtype=np.float64).T
+    valid = clip[:, 3] > 1e-8
+    ndc = np.zeros((len(vertices), 2), dtype=np.float64)
+    ndc[valid] = clip[valid, :2] / clip[valid, 3, None]
+    screen = np.empty_like(ndc)
+    screen[:, 0] = (ndc[:, 0] * 0.5 + 0.5) * max(int(width), 1)
+    screen[:, 1] = (ndc[:, 1] * 0.5 + 0.5) * max(int(height), 1)
+    distance = np.linalg.norm(screen - np.asarray(center, dtype=np.float64), axis=1)
+    selected = valid & (distance < float(radius))
+    indexes = np.flatnonzero(selected).astype(np.uint32, copy=False)
+    normalized = np.clip(distance[indexes] / float(radius), 0.0, 1.0)
+    smoothstep = normalized * normalized * (3.0 - 2.0 * normalized)
+    weights = np.ascontiguousarray(1.0 - smoothstep, dtype=np.float32)
+    return indexes, weights
+
+
+def _build_index_subset_mesh(source_mesh, triangles: np.ndarray):
+    """Copy a mesh verbatim while replacing only its triangle indices."""
+    from tmesh import TcMesh
+
+    faces = np.ascontiguousarray(triangles, dtype=np.uint32)
+    if faces.ndim != 2 or faces.shape[1:] != (3,) or not len(faces):
+        raise ValueError("triangle subset must be a non-empty Mx3 array")
+    raw_vertices = np.array(
+        source_mesh.mesh.get_vertices_buffer(),
+        dtype=np.float32,
+        order="C",
+        copy=True,
+    )
+    return TcMesh.from_interleaved(
+        raw_vertices,
+        source_mesh.vertex_count,
+        np.ascontiguousarray(faces.reshape(-1), dtype=np.uint32),
+        source_mesh.mesh.layout,
+        name=f"{source_mesh.name} Refine subset",
+        uuid=f"diffedit-subset-{next(_SUBSET_MESH_IDS)}",
+        draw_mode=source_mesh.draw_mode,
+    )
 
 
 def _build_unit_cube_meshes(namespace: str):
@@ -438,6 +667,31 @@ def _build_unit_arrow_mesh(namespace: str):
         layout,
         name="Refine gizmo arrow",
         uuid=f"{namespace}-refine-gizmo-arrow",
+    )
+
+
+def _build_unit_screen_circle_mesh(namespace: str):
+    from tmesh import TcAttribType, TcDrawMode, TcMesh, TcVertexLayout
+
+    segment_count = 64
+    angles = np.linspace(0.0, math.tau, segment_count, endpoint=False)
+    positions = np.zeros((segment_count, 3), dtype=np.float32)
+    positions[:, 0] = np.cos(angles)
+    positions[:, 1] = np.sin(angles)
+    indexes = np.empty(segment_count * 2, dtype=np.uint32)
+    indexes[0::2] = np.arange(segment_count, dtype=np.uint32)
+    indexes[1::2] = np.roll(np.arange(segment_count, dtype=np.uint32), -1)
+    layout = TcVertexLayout()
+    if not layout.add("position", 3, TcAttribType.FLOAT32, 0):
+        raise RuntimeError("failed to create refine brush cursor layout")
+    return TcMesh.from_interleaved(
+        np.ascontiguousarray(positions),
+        segment_count,
+        np.ascontiguousarray(indexes),
+        layout,
+        name="Refine mask brush cursor",
+        uuid=f"{namespace}-refine-mask-brush-cursor",
+        draw_mode=TcDrawMode.LINES,
     )
 
 
@@ -524,21 +778,23 @@ class _RefineGizmoDrag:
 
 
 def _build_wireframe_mesh(source_mesh):
-    from tmesh import TcAttribType, TcDrawMode, TcMesh, TcVertexLayout
+    from tmesh import TcDrawMode, TcMesh
 
-    positions = np.ascontiguousarray(source_mesh.vertices, dtype=np.float32)
     triangles = source_mesh.triangles
     if triangles is None or not len(triangles):
         return None
     indices = _wireframe_indices(triangles)
-    layout = TcVertexLayout()
-    if not layout.add("position", 3, TcAttribType.FLOAT32, 0):
-        raise RuntimeError("failed to create reconstruction wireframe layout")
+    raw_vertices = np.array(
+        source_mesh.mesh.get_vertices_buffer(),
+        dtype=np.float32,
+        order="C",
+        copy=True,
+    )
     return TcMesh.from_interleaved(
-        positions,
-        len(positions),
+        raw_vertices,
+        source_mesh.vertex_count,
         indices,
-        layout,
+        source_mesh.mesh.layout,
         name=f"{source_mesh.name} Wireframe",
         uuid=f"{source_mesh.uuid}-wireframe",
         draw_mode=TcDrawMode.LINES,
@@ -567,6 +823,48 @@ def _compute_vertex_normals(
     return np.ascontiguousarray(normals, dtype=np.float32)
 
 
+def _build_weighted_mask_mesh(
+    source_mesh,
+    positions: np.ndarray,
+    triangles: np.ndarray,
+    weights: np.ndarray,
+):
+    """Build an overlay mesh whose vertex scalar is interpolated by the GPU."""
+    from tmesh import TcAttribType, TcMesh, TcVertexLayout
+
+    vertices = np.ascontiguousarray(positions, dtype=np.float32)
+    faces = np.ascontiguousarray(triangles, dtype=np.uint32)
+    mask_weights = np.ascontiguousarray(weights, dtype=np.float32)
+    if mask_weights.shape != (len(vertices),):
+        raise ValueError("mask weights must match source vertices")
+    selected = np.max(mask_weights[faces], axis=1) > 1e-6
+    if not np.any(selected):
+        return None
+    normals = source_mesh.vertex_normals
+    if normals is None:
+        normals = _compute_vertex_normals(vertices, faces)
+    normals = np.ascontiguousarray(normals, dtype=np.float32)
+    interleaved = np.ascontiguousarray(
+        np.concatenate((vertices, normals, mask_weights[:, None]), axis=1),
+        dtype=np.float32,
+    )
+    layout = TcVertexLayout()
+    if not layout.add("position", 3, TcAttribType.FLOAT32, 0):
+        raise RuntimeError("failed to add weighted mask positions")
+    if not layout.add("normal", 3, TcAttribType.FLOAT32, 1):
+        raise RuntimeError("failed to add weighted mask normals")
+    if not layout.add("mask_weight", 1, TcAttribType.FLOAT32, 2):
+        raise RuntimeError("failed to add weighted mask values")
+    return TcMesh.from_interleaved(
+        interleaved,
+        len(vertices),
+        np.ascontiguousarray(faces[selected].reshape(-1), dtype=np.uint32),
+        layout,
+        name=f"{source_mesh.name} Weighted refine mask",
+        uuid=f"diffedit-weighted-mask-{next(_SUBSET_MESH_IDS)}",
+    )
+
+
 def _build_smooth_mesh(source_mesh):
     """Add generated normals to a position-only mesh for legacy GLBs."""
     from tmesh import TcAttribType, TcMesh, TcVertexLayout
@@ -583,7 +881,7 @@ def _build_smooth_mesh(source_mesh):
     layout = TcVertexLayout()
     if not layout.add("position", 3, TcAttribType.FLOAT32, 0):
         raise RuntimeError("failed to create smooth reconstruction position")
-    if not layout.add("normal", 3, TcAttribType.FLOAT32, 12):
+    if not layout.add("normal", 3, TcAttribType.FLOAT32, 1):
         raise RuntimeError("failed to create smooth reconstruction normal")
     return TcMesh.from_interleaved(
         vertices,
@@ -733,9 +1031,12 @@ class _ViewportSurface:
         self._camera = camera
         self._on_changed = on_changed
         self._key_handler: Callable[[int, int, int, int], bool] | None = None
-        self._pointer_press_handler: Callable[[float, float, int], bool] | None = None
+        self._pointer_press_handler: (
+            Callable[[float, float, int, int], bool] | None
+        ) = None
         self._pointer_move_handler: Callable[[float, float], bool] | None = None
         self._pointer_release_handler: Callable[[float, float, int], bool] | None = None
+        self._wheel_handler: Callable[[float], bool] | None = None
         self._valid = True
         self._width = 1
         self._height = 1
@@ -758,6 +1059,7 @@ class _ViewportSurface:
         self._pointer_press_handler = None
         self._pointer_move_handler = None
         self._pointer_release_handler = None
+        self._wheel_handler = None
 
     def set_key_handler(
         self,
@@ -766,7 +1068,7 @@ class _ViewportSurface:
         self._key_handler = handler
 
     def set_pointer_press_handler(
-        self, handler: Callable[[float, float, int], bool] | None
+        self, handler: Callable[[float, float, int, int], bool] | None
     ) -> None:
         self._pointer_press_handler = handler
 
@@ -779,6 +1081,11 @@ class _ViewportSurface:
         self, handler: Callable[[float, float, int], bool] | None
     ) -> None:
         self._pointer_release_handler = handler
+
+    def set_wheel_handler(
+        self, handler: Callable[[float], bool] | None
+    ) -> None:
+        self._wheel_handler = handler
 
     def is_valid(self) -> bool:
         return self._valid
@@ -834,7 +1141,7 @@ class _ViewportSurface:
         modifiers: int,
         click_count: int,
     ) -> bool:
-        del modifiers, click_count
+        del click_count
         if not self._valid:
             return False
         self._pointer = (float(x), float(y))
@@ -852,7 +1159,7 @@ class _ViewportSurface:
             if (
                 self._pointer_press_handler is not None
                 and self._pointer_press_handler(
-                    self._pointer[0], self._pointer[1], int(button)
+                    self._pointer[0], self._pointer[1], int(button), int(modifiers)
                 )
             ):
                 self._drag_mode = "handled"
@@ -880,6 +1187,8 @@ class _ViewportSurface:
         del x, y, wheel_x, modifiers
         if not self._valid:
             return False
+        if self._wheel_handler is not None and self._wheel_handler(float(wheel_y)):
+            return True
         self._camera.zoom(float(wheel_y))
         self._on_changed()
         return True
@@ -934,6 +1243,17 @@ class NativeReconstructionViewport:
         ) = None
         self._refine_cube_edit_enabled = True
         self._refine_gizmo_drag: _RefineGizmoDrag | None = None
+        self._refine_mask_edit_enabled = False
+        self._refine_mask_visible = False
+        self._refine_mask_brush_radius = 32.0
+        self._refine_mask_cursor: tuple[float, float] | None = None
+        self._refine_mask_stroke_active = False
+        self._refine_mask_paint = True
+        self._refine_mask_changed_handler: (
+            Callable[
+                [tuple[tuple[tuple[int, float], ...], ...]], None
+            ] | None
+        ) = None
         self._model_transform = np.eye(4, dtype=np.float32)
         self._refine_placement = ReconstructionRefinePlacement()
         self._refine_placement_pivot = (0.0, 0.0, 0.0)
@@ -966,6 +1286,12 @@ class NativeReconstructionViewport:
         )
         self._smooth_fragment_shader = self._graphics.device.create_shader(
             Tgfx2ShaderStage.Fragment, _SMOOTH_FRAGMENT_SHADER
+        )
+        self._weighted_mask_vertex_shader = self._graphics.device.create_shader(
+            Tgfx2ShaderStage.Vertex, _WEIGHTED_MASK_VERTEX_SHADER
+        )
+        self._weighted_mask_fragment_shader = self._graphics.device.create_shader(
+            Tgfx2ShaderStage.Fragment, _WEIGHTED_MASK_FRAGMENT_SHADER
         )
         self._textured_shader = TcShader.get_or_create(
             "diffusion-editor-reconstruction-textured"
@@ -1022,12 +1348,16 @@ class NativeReconstructionViewport:
         self._refine_gizmo_arrow_mesh = _build_unit_arrow_mesh(
             self._resource_namespace
         )
+        self._refine_mask_cursor_mesh = _build_unit_screen_circle_mesh(
+            self._resource_namespace
+        )
         self.surface = _ViewportSurface(self._camera, self.invalidate)
         self.surface.set_pointer_press_handler(self._handle_pointer_press)
         self.surface.set_pointer_move_handler(self._handle_gizmo_pointer_move)
         self.surface.set_pointer_release_handler(
             self._handle_gizmo_pointer_release
         )
+        self.surface.set_wheel_handler(self._handle_wheel)
         self.viewport = document.create_viewport3d()
         self.viewport.widget.stable_id = "diffusion-editor.reconstruction.viewport"
         self.viewport.widget.preferred_size = Size(480.0, 600.0)
@@ -1110,12 +1440,307 @@ class NativeReconstructionViewport:
         if not self._refine_cube_edit_enabled:
             self._refine_gizmo_drag = None
 
+    @property
+    def refine_mask_brush_radius(self) -> float:
+        return self._refine_mask_brush_radius
+
+    @property
+    def refine_mask_visible(self) -> bool:
+        return self._refine_mask_visible
+
+    @property
+    def refine_mask_edit_enabled(self) -> bool:
+        return self._refine_mask_edit_enabled
+
+    def bind_refine_mask_changed(
+        self,
+        handler: Callable[
+            [tuple[tuple[tuple[int, float], ...], ...]], None
+        ] | None,
+    ) -> None:
+        self._require_open()
+        self._refine_mask_changed_handler = handler
+
+    def set_refine_mask_edit_enabled(self, enabled: bool) -> None:
+        self._refine_mask_edit_enabled = bool(enabled)
+        self._refine_mask_stroke_active = False
+        if not enabled:
+            self._refine_mask_cursor = None
+        if enabled:
+            self.cancel_refine_cube_pick()
+            self._refine_gizmo_drag = None
+
+    def set_refine_mask_visible(self, visible: bool) -> None:
+        value = bool(visible)
+        if value == self._refine_mask_visible:
+            return
+        self._refine_mask_visible = value
+        self.invalidate()
+
+    def set_refine_mask_brush_radius(self, radius: float) -> None:
+        value = float(radius)
+        if not math.isfinite(value) or not 4.0 <= value <= 256.0:
+            raise ValueError("refine mask brush radius must be from 4 to 256 pixels")
+        self._refine_mask_brush_radius = value
+
+    def set_refine_face_mask(
+        self, mesh_faces: tuple[tuple[int, ...], ...]
+    ) -> None:
+        """Compatibility adapter for projects saved with binary face masks."""
+        self.set_refine_vertex_mask((), legacy_mesh_faces=mesh_faces)
+
+    def set_refine_vertex_mask(
+        self,
+        mesh_vertex_weights: tuple[
+            tuple[tuple[int, float], ...], ...
+        ],
+        *,
+        legacy_mesh_faces: tuple[tuple[int, ...], ...] = (),
+    ) -> None:
+        """Load sparse source-vertex weights into the displayed mesh subset."""
+        for item in self._mesh_items:
+            if item.positions is None:
+                continue
+            weights = np.zeros(len(item.positions), dtype=np.float32)
+            sparse = (
+                mesh_vertex_weights[item.source_mesh_index]
+                if item.source_mesh_index < len(mesh_vertex_weights)
+                else ()
+            )
+            for vertex, weight in sparse:
+                if 0 <= int(vertex) < len(weights):
+                    weights[int(vertex)] = float(weight)
+            legacy_faces = (
+                legacy_mesh_faces[item.source_mesh_index]
+                if item.source_mesh_index < len(legacy_mesh_faces)
+                else ()
+            )
+            if (
+                legacy_faces
+                and item.triangles is not None
+                and item.source_face_indices is not None
+            ):
+                selected_faces = np.isin(
+                    item.source_face_indices,
+                    np.asarray(legacy_faces, dtype=np.uint32),
+                )
+                if np.any(selected_faces):
+                    weights[np.unique(item.triangles[selected_faces])] = 1.0
+            item.mask_vertex_weights = weights
+            self._rebuild_mask_mesh(item)
+        self.invalidate()
+
+    def refine_vertex_mask(
+        self,
+    ) -> tuple[tuple[tuple[int, float], ...], ...]:
+        maximum = max(
+            (item.source_mesh_index for item in self._mesh_items), default=-1
+        )
+        result: list[dict[int, float]] = [dict() for _ in range(maximum + 1)]
+        for item in self._mesh_items:
+            if item.mask_vertex_weights is None:
+                continue
+            indexes = np.flatnonzero(item.mask_vertex_weights > 1e-6)
+            result[item.source_mesh_index].update(
+                (int(index), float(item.mask_vertex_weights[index]))
+                for index in indexes
+            )
+        return tuple(tuple(sorted(weights.items())) for weights in result)
+
     def clear_refine_cube(self) -> None:
         self._refine_cube_center = None
         self._refine_cube_side = 0.0
         self._refine_cube_confirmed = False
         self._refine_gizmo_drag = None
         self.invalidate()
+
+    def cube_subset_triangle_count(
+        self,
+        center: tuple[float, float, float],
+        side: float,
+    ) -> int:
+        """Count original faces conservatively intersecting a cube."""
+        count = 0
+        for item in self._mesh_items:
+            if item.positions is None or item.triangles is None:
+                continue
+            count += len(_select_cube_triangles(
+                item.positions, item.triangles, center, side
+            ))
+        return count
+
+    def cube_mesh_subset_arrays(
+        self,
+        center: tuple[float, float, float],
+        side: float,
+        *,
+        mesh_vertex_weights: tuple[
+            tuple[tuple[int, float], ...], ...
+        ] = (),
+        legacy_mesh_faces: tuple[tuple[int, ...], ...] = (),
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return a compact geometric copy of the displayed cube subset."""
+        positions_out = []
+        faces_out = []
+        weights_out = []
+        vertex_offset = 0
+        for item in self._mesh_items:
+            if item.positions is None or item.triangles is None:
+                continue
+            selected = _select_cube_triangle_indices(
+                item.positions, item.triangles, center, side
+            )
+            if not len(selected):
+                continue
+            faces = np.ascontiguousarray(
+                item.triangles[selected], dtype=np.uint32
+            )
+            used = np.unique(faces.reshape(-1))
+            remap = np.full(len(item.positions), -1, dtype=np.int64)
+            remap[used] = np.arange(len(used), dtype=np.int64)
+            compact_faces = remap[faces].astype(np.uint32, copy=False)
+            weights = np.zeros(len(item.positions), dtype=np.float32)
+            sparse = (
+                mesh_vertex_weights[item.source_mesh_index]
+                if item.source_mesh_index < len(mesh_vertex_weights)
+                else ()
+            )
+            for vertex, weight in sparse:
+                if 0 <= int(vertex) < len(weights):
+                    weights[int(vertex)] = float(weight)
+            legacy = (
+                legacy_mesh_faces[item.source_mesh_index]
+                if item.source_mesh_index < len(legacy_mesh_faces)
+                else ()
+            )
+            if legacy:
+                source_faces = (
+                    item.source_face_indices[selected]
+                    if item.source_face_indices is not None
+                    else selected
+                )
+                selected_legacy = np.isin(
+                    source_faces,
+                    np.asarray(legacy, dtype=np.uint32),
+                )
+                if np.any(selected_legacy):
+                    weights[np.unique(faces[selected_legacy])] = 1.0
+            positions_out.append(
+                np.ascontiguousarray(item.positions[used], dtype=np.float32)
+            )
+            faces_out.append(
+                np.ascontiguousarray(
+                    compact_faces + vertex_offset, dtype=np.uint32
+                )
+            )
+            weights_out.append(
+                np.ascontiguousarray(weights[used], dtype=np.float32)
+            )
+            vertex_offset += len(used)
+        if not faces_out:
+            return (
+                np.empty((0, 3), dtype=np.float32),
+                np.empty((0, 3), dtype=np.uint32),
+                np.empty(0, dtype=np.float32),
+            )
+        return (
+            np.concatenate(positions_out, axis=0),
+            np.concatenate(faces_out, axis=0),
+            np.concatenate(weights_out, axis=0),
+        )
+
+    def show_cube_mesh_subset(
+        self,
+        center: tuple[float, float, float],
+        side: float,
+        *,
+        fit_camera: bool = True,
+    ) -> tuple[int, int, int]:
+        """Keep source vertices/attributes and remove faces outside a cube."""
+        self._require_open()
+        selections = []
+        triangle_count = 0
+        for item in self._mesh_items:
+            selected = (
+                _select_cube_triangle_indices(
+                    item.positions, item.triangles, center, side
+                )
+                if item.positions is not None and item.triangles is not None
+                else np.empty(0, dtype=np.uint32)
+            )
+            faces = (
+                np.ascontiguousarray(item.triangles[selected], dtype=np.uint32)
+                if item.triangles is not None
+                else np.empty((0, 3), dtype=np.uint32)
+            )
+            selections.append((item, faces, selected))
+            triangle_count += len(faces)
+        if not triangle_count:
+            return 0, 0, 0
+
+        subset_items = []
+        bounds_min = None
+        bounds_max = None
+        vertex_count = 0
+        for item, faces, selected in selections:
+            if not len(faces):
+                if item.texture is not None:
+                    self._graphics.destroy_texture(item.texture)
+                continue
+            mesh = _build_index_subset_mesh(item.mesh, faces)
+            authored_normals = mesh.vertex_normals is not None
+            smooth_mesh = None
+            if not authored_normals and item.texture is None:
+                smooth_mesh = _build_smooth_mesh(mesh)
+            positions = np.ascontiguousarray(item.positions, dtype=np.float32)
+            referenced = positions[np.unique(faces.reshape(-1))]
+            local_min = referenced.min(axis=0)
+            local_max = referenced.max(axis=0)
+            bounds_min = (
+                local_min
+                if bounds_min is None
+                else np.minimum(bounds_min, local_min)
+            )
+            bounds_max = (
+                local_max
+                if bounds_max is None
+                else np.maximum(bounds_max, local_max)
+            )
+            subset_items.append(_MeshRenderItem(
+                mesh=mesh,
+                texture=item.texture,
+                color=item.color,
+                has_normals=authored_normals or smooth_mesh is not None,
+                smooth_mesh=smooth_mesh,
+                editable=item.editable,
+                positions=positions,
+                triangles=faces,
+                source_mesh_index=item.source_mesh_index,
+                source_face_indices=(
+                    np.ascontiguousarray(
+                        item.source_face_indices[selected], dtype=np.uint32
+                    )
+                    if item.source_face_indices is not None
+                    else np.ascontiguousarray(selected, dtype=np.uint32)
+                ),
+                mask_vertex_weights=(
+                    np.array(item.mask_vertex_weights, copy=True)
+                    if item.mask_vertex_weights is not None
+                    else np.zeros(len(positions), dtype=np.float32)
+                ),
+            ))
+            vertex_count += mesh.vertex_count
+
+        self._mesh_items = subset_items
+        self._model_bounds_min = bounds_min
+        self._model_bounds_max = bounds_max
+        self.cancel_refine_cube_pick()
+        self._refine_gizmo_drag = None
+        if fit_camera and bounds_min is not None and bounds_max is not None:
+            self._camera.fit(bounds_min, bounds_max)
+            self._light_direction = self._camera.direction_from_target()
+        self.invalidate()
+        return vertex_count, triangle_count, len(subset_items)
 
     def begin_refine_cube_pick(
         self,
@@ -1130,8 +1755,18 @@ class NativeReconstructionViewport:
     def cancel_refine_cube_pick(self) -> None:
         self._refine_cube_pick_handler = None
 
-    def _handle_pointer_press(self, x: float, y: float, button: int) -> bool:
+    def _handle_pointer_press(
+        self, x: float, y: float, button: int, modifiers: int
+    ) -> bool:
         del button
+        if self._refine_mask_edit_enabled:
+            self._refine_mask_cursor = (float(x), float(y))
+            self._refine_mask_stroke_active = True
+            self._refine_mask_paint = not bool(
+                int(modifiers) & int(ModifierFlag.Shift)
+            )
+            self._apply_refine_mask_brush(x, y)
+            return True
         handler = self._refine_cube_pick_handler
         if handler is None:
             return self._begin_refine_gizmo_drag(x, y)
@@ -1272,6 +1907,12 @@ class NativeReconstructionViewport:
         return True
 
     def _handle_gizmo_pointer_move(self, x: float, y: float) -> bool:
+        if getattr(self, "_refine_mask_edit_enabled", False):
+            self._refine_mask_cursor = (float(x), float(y))
+            self.invalidate()
+        if getattr(self, "_refine_mask_stroke_active", False):
+            self._apply_refine_mask_brush(x, y)
+            return True
         drag = self._refine_gizmo_drag
         if drag is None:
             return False
@@ -1310,10 +1951,79 @@ class NativeReconstructionViewport:
         self, x: float, y: float, button: int
     ) -> bool:
         del x, y, button
+        if getattr(self, "_refine_mask_stroke_active", False):
+            self._refine_mask_stroke_active = False
+            if self._refine_mask_changed_handler is not None:
+                self._refine_mask_changed_handler(self.refine_vertex_mask())
+            return True
         if self._refine_gizmo_drag is None:
             return False
         self._refine_gizmo_drag = None
         return True
+
+    def _handle_wheel(self, delta: float) -> bool:
+        if not self._refine_mask_edit_enabled:
+            return False
+        factor = 1.12 ** float(delta)
+        self._refine_mask_brush_radius = min(
+            max(self._refine_mask_brush_radius * factor, 4.0), 256.0
+        )
+        self.invalidate()
+        return True
+
+    def _apply_refine_mask_brush(self, x: float, y: float) -> None:
+        width, height = self.surface.size
+        camera_mvp = self._camera.mvp(width, height)
+        changed = False
+        for item in self._mesh_items:
+            if item.positions is None or item.triangles is None:
+                continue
+            item_mvp = (
+                camera_mvp @ self._model_transform
+                if item.editable
+                else camera_mvp
+            )
+            vertices, brush_weights = _vertex_weights_under_screen_brush(
+                item.positions,
+                item_mvp,
+                width,
+                height,
+                (x, y),
+                self._refine_mask_brush_radius,
+            )
+            if not len(vertices):
+                continue
+            weights = item.mask_vertex_weights
+            if weights is None or len(weights) != len(item.positions):
+                weights = np.zeros(len(item.positions), dtype=np.float32)
+                item.mask_vertex_weights = weights
+            before = weights[vertices].copy()
+            if self._refine_mask_paint:
+                weights[vertices] = np.maximum(before, brush_weights)
+            else:
+                weights[vertices] = before * (1.0 - brush_weights)
+            if not np.array_equal(before, weights[vertices]):
+                self._rebuild_mask_mesh(item)
+                changed = True
+        if changed:
+            self.invalidate()
+
+    def _rebuild_mask_mesh(self, item: _MeshRenderItem) -> None:
+        item.mask_mesh = None
+        item.mask_wire_mesh = None
+        if (
+            item.mask_vertex_weights is None
+            or item.triangles is None
+            or item.positions is None
+            or not np.any(item.mask_vertex_weights > 1e-6)
+        ):
+            return
+        item.mask_mesh = _build_weighted_mask_mesh(
+            item.mesh,
+            item.positions,
+            item.triangles,
+            item.mask_vertex_weights,
+        )
 
     def set_shading_mode(self, mode: str) -> None:
         normalized = str(mode).strip().lower()
@@ -1680,6 +2390,58 @@ class NativeReconstructionViewport:
                 if use_smooth_normals and item.smooth_mesh is not None
                 else item.mesh,
             )
+        if self._refine_mask_visible:
+            ctx.set_depth_write(False)
+            if self._shading_mode == "wireframe":
+                # Wireframe is intentionally x-ray-like: show all selected
+                # edges, including the far side, while the user rotates the
+                # region to inspect the through-mesh stroke.
+                ctx.set_depth_test(False)
+                ctx.set_blend(True)
+                ctx.bind_shader(
+                    self._weighted_mask_vertex_shader,
+                    self._weighted_mask_fragment_shader,
+                )
+                for item in self._mesh_items:
+                    if item.mask_mesh is None:
+                        continue
+                    if item.mask_wire_mesh is None:
+                        item.mask_wire_mesh = _build_wireframe_mesh(item.mask_mesh)
+                    item_mvp = (
+                        mvp @ self._model_transform if item.editable else mvp
+                    )
+                    self._set_draw_state(
+                        item_mvp,
+                        (1.0, 0.08, 0.04, 1.0),
+                        self._light_direction,
+                        _SHADING_MODE_IDS["unlit"],
+                    )
+                    draw_tc_mesh(ctx, item.mask_wire_mesh)
+            else:
+                ctx.set_depth_test(True)
+                ctx.set_depth_bias(True, -1.0, -1.0, 0.0)
+                ctx.set_blend(True)
+                for item in self._mesh_items:
+                    if item.mask_mesh is None:
+                        continue
+                    item_mvp = (
+                        mvp @ self._model_transform if item.editable else mvp
+                    )
+                    ctx.bind_shader(
+                        self._weighted_mask_vertex_shader,
+                        self._weighted_mask_fragment_shader,
+                    )
+                    self._set_draw_state(
+                        item_mvp,
+                        (1.0, 0.08, 0.04, 0.72),
+                        self._light_direction,
+                        1.0 if self._shading_mode == "smooth" else 0.0,
+                    )
+                    draw_tc_mesh(ctx, item.mask_mesh)
+                ctx.set_depth_bias(False)
+            ctx.set_blend(False)
+            ctx.set_depth_test(True)
+            ctx.set_depth_write(True)
         if not self._point_cloud.empty:
             self._point_cloud_draw_params.view_projection = tuple(
                 np.ascontiguousarray(mvp.T, dtype=np.float32).reshape(-1)
@@ -1755,6 +2517,24 @@ class NativeReconstructionViewport:
                 _SHADING_MODE_IDS["unlit"],
             )
             draw_tc_mesh(ctx, self._refine_cube_fill_mesh)
+        if self._refine_mask_edit_enabled and self._refine_mask_cursor is not None:
+            cursor_x, cursor_y = self._refine_mask_cursor
+            cursor_transform = np.eye(4, dtype=np.float32)
+            cursor_transform[0, 0] = 2.0 * self._refine_mask_brush_radius / width
+            cursor_transform[1, 1] = 2.0 * self._refine_mask_brush_radius / height
+            cursor_transform[0, 3] = cursor_x * 2.0 / width - 1.0
+            cursor_transform[1, 3] = cursor_y * 2.0 / height - 1.0
+            ctx.bind_shader(self._vertex_shader, self._fragment_shader)
+            ctx.set_depth_test(False)
+            ctx.set_depth_write(False)
+            ctx.set_blend(False)
+            self._set_draw_state(
+                cursor_transform,
+                (1.0, 0.82, 0.20, 1.0),
+                self._light_direction,
+                _SHADING_MODE_IDS["unlit"],
+            )
+            draw_tc_mesh(ctx, self._refine_mask_cursor_mesh)
         ctx.end_pass()
         if opened_frame:
             ctx.end_frame()
@@ -1776,6 +2556,8 @@ class NativeReconstructionViewport:
         self._graphics.device.destroy_shader(self._fragment_shader)
         self._graphics.device.destroy_shader(self._smooth_vertex_shader)
         self._graphics.device.destroy_shader(self._smooth_fragment_shader)
+        self._graphics.device.destroy_shader(self._weighted_mask_vertex_shader)
+        self._graphics.device.destroy_shader(self._weighted_mask_fragment_shader)
         self._point_cloud.release(self._graphics.context)
         self._point_cloud_renderer.release(self._graphics.context)
         self._color_texture = None
@@ -1842,6 +2624,15 @@ class NativeReconstructionViewport:
                     np.ascontiguousarray(mesh.triangles, dtype=np.uint32)
                     if mesh.triangles is not None
                     else None
+                ),
+                source_mesh_index=mesh_offset + index,
+                source_face_indices=(
+                    np.arange(len(mesh.triangles), dtype=np.uint32)
+                    if mesh.triangles is not None
+                    else None
+                ),
+                mask_vertex_weights=np.zeros(
+                    int(mesh.vertex_count), dtype=np.float32
                 ),
             ))
             vertices += int(mesh.vertex_count)

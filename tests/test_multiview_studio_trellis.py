@@ -4,11 +4,18 @@ from dataclasses import replace
 import json
 from pathlib import Path
 import shutil
+import sys
 import threading
+
+import numpy as np
+import pytest
 
 from diffusion_editor.multiview_studio.model import (
     MultiviewProject,
     MeshPostprocessSettings,
+    RefineCube,
+    RefineShapeResult,
+    RefineViewPatch,
     TrellisShapeSettings,
     TrellisTextureSettings,
     ViewKey,
@@ -29,6 +36,19 @@ from diffusion_editor.multiview_studio.trellis_shape_runner import (
 from diffusion_editor.multiview_studio.trellis_texture_generation import (
     TrellisTextureGenerator,
     schedule_texture_images,
+)
+from diffusion_editor.multiview_studio.trellis_texture_runner import (
+    _write_texture_result,
+)
+from diffusion_editor.multiview_studio.controller import MultiviewStudioController
+from diffusion_editor.multiview_studio.trellis_refine_generation import (
+    TrellisRegionRefineGenerator,
+)
+from diffusion_editor.multiview_studio.trellis_refine_runner import (
+    DECODER_ACTIVATION_CHUNK_BYTES,
+    ENCODER_MLP_CHUNK_BYTES,
+    REFINE_PIPELINE_MODEL_NAMES,
+    _decode_mesh_cache,
 )
 
 
@@ -70,6 +90,37 @@ def test_shape_export_conversion_is_standard_gltf_y_up():
         -3.0,
         1.0,
     ]
+
+
+def test_refine_worker_loads_only_models_used_by_shape_refine():
+    assert REFINE_PIPELINE_MODEL_NAMES == (
+        "shape_slat_flow_model_1024",
+        "shape_slat_decoder",
+    )
+    assert ENCODER_MLP_CHUNK_BYTES == 256 * 1024 * 1024
+    assert DECODER_ACTIVATION_CHUNK_BYTES == 256 * 1024 * 1024
+
+
+def test_refine_worker_reuses_decoded_mesh_cache_without_decoder(tmp_path: Path):
+    cache = tmp_path / "decoded-region-raw.npz"
+    np.savez(
+        cache,
+        vertices=np.asarray(((1.0, 2.0, 3.0),), dtype=np.float64),
+        faces=np.asarray(((0, 0, 0),), dtype=np.int64),
+    )
+
+    class DecoderMustNotRun:
+        def decode_shape_slat(self, *_args):
+            raise AssertionError("decoded mesh cache was ignored")
+
+    vertices, faces = _decode_mesh_cache(
+        DecoderMustNotRun(), object(), 1536, cache, np, object()
+    )
+
+    assert vertices.dtype == np.float32
+    assert faces.dtype == np.int32
+    assert vertices.tolist() == [[1.0, 2.0, 3.0]]
+    assert faces.tolist() == [[0, 0, 0]]
 
 
 def test_postprocess_key_changes_only_with_postprocess_configuration():
@@ -180,6 +231,124 @@ def test_exact_zero_area_faces_are_identified_without_area_epsilon():
     assert _exact_degenerate_faces(vertices, faces).tolist() == [False, True]
 
 
+def test_region_refine_request_is_deterministic_and_reuses_result(
+    tmp_path: Path,
+):
+    python = tmp_path / "python"
+    model = tmp_path / "model"
+    image = tmp_path / "right.png"
+    geometry = tmp_path / "geometry.glb"
+    python.touch()
+    model.mkdir()
+    image.write_bytes(b"image")
+    geometry.write_bytes(b"mesh")
+    controller = MultiviewStudioController()
+    controller.set_geometry_path(geometry)
+    controller.set_slot_image(ViewKey("eye", 90), image)
+    controller.set_refine_cube((0.0, 0.0, 0.0), 1.0)
+    controller.confirm_refine_cube()
+    controller.set_refine_mask_weights(0, (((0, 1.0),),))
+    controller.set_refine_view_patch(
+        0, ViewKey("eye", 90), (0.1, 0.2, 0.8, 0.9)
+    )
+    controller.set_refine_shape_setting(0, "steps", 3)
+    generator = TrellisRegionRefineGenerator(
+        python=python, trellis_root=tmp_path, model_path=model
+    )
+    calls = []
+
+    def fake_worker(command, *, result_path, **_kwargs):
+        calls.append(command)
+        request = json.loads(Path(command[-1]).read_text(encoding="utf-8"))
+        output = result_path.parent
+        artifacts = {
+            "source_region": output / "source-region.glb",
+            "shape": output / "refined-region.glb",
+            "source_slat": output / "source-shape-slat.npz",
+            "refined_slat": output / "refined-shape-slat.npz",
+        }
+        for path in artifacts.values():
+            path.touch()
+        result_path.write_text(json.dumps({
+            "request_key": request["request_key"],
+            "geometry_fingerprint": request["geometry_fingerprint"],
+            **{key: str(path) for key, path in artifacts.items()},
+        }), encoding="utf-8")
+
+    generator._run_worker = fake_worker
+    arrays = (
+        np.asarray(((-0.4, 0.0, 0.0), (0.4, 0.0, 0.0), (0.0, 0.4, 0.0))),
+        np.asarray(((0, 1, 2),), dtype=np.uint32),
+        np.asarray((1.0, 0.0, 0.0), dtype=np.float32),
+    )
+    manifest = tmp_path / "project.mvstudio.json"
+
+    first = generator.generate(
+        controller.project, 0, manifest, arrays, threading.Event()
+    )
+    second = generator.generate(
+        controller.project, 0, manifest, arrays, threading.Event()
+    )
+    request = json.loads(Path(calls[0][-1]).read_text(encoding="utf-8"))
+
+    assert first == second
+    assert len(calls) == 1
+    assert request["schedule"] == ["eye-090", "eye-090", "eye-090"]
+    assert request["patches"][0]["bounds"] == [0.1, 0.2, 0.8, 0.9]
+
+
+def test_worker_failure_is_streamed_and_persisted(
+    tmp_path: Path, monkeypatch
+):
+    worker = tmp_path / "failing-worker.py"
+    worker.write_text(
+        "import sys\n"
+        "print('[load] encoder', flush=True)\n"
+        "print('torch.OutOfMemoryError: CUDA out of memory', flush=True)\n"
+        "raise SystemExit(7)\n",
+        encoding="utf-8",
+    )
+    generator = TrellisShapeGenerator(
+        python=Path(sys.executable),
+        trellis_root=tmp_path,
+        model_path=tmp_path,
+    )
+    logged = []
+    monkeypatch.setattr(
+        "diffusion_editor.multiview_studio.trellis_generation.log.info",
+        logged.append,
+    )
+    errors = []
+    monkeypatch.setattr(
+        "diffusion_editor.multiview_studio.trellis_generation.log.error",
+        errors.append,
+    )
+    progress = []
+    result_path = tmp_path / "run" / "result.json"
+
+    with pytest.raises(RuntimeError, match="Full worker log") as failure:
+        generator._run_worker(
+            [sys.executable, str(worker)],
+            result_path=result_path,
+            cancel=threading.Event(),
+            on_progress=progress.append,
+            operation="test refine",
+        )
+
+    worker_log = result_path.parent / "worker.log"
+    assert worker_log.read_text(encoding="utf-8").splitlines() == [
+        "[load] encoder",
+        "torch.OutOfMemoryError: CUDA out of memory",
+    ]
+    assert progress == [
+        "[load] encoder",
+        "torch.OutOfMemoryError: CUDA out of memory",
+    ]
+    assert any("CUDA out of memory" in message for message in logged)
+    assert errors and str(worker_log) in errors[-1]
+    assert str(worker_log) in str(failure.value)
+
+
 def test_texture_schedule_uses_its_own_steps_and_every_view(tmp_path: Path):
     front = tmp_path / "front.png"
     right = tmp_path / "right.png"
@@ -270,3 +439,121 @@ def test_texture_generator_returns_matching_cached_result(tmp_path: Path):
 
     assert result == textured
     assert progress == [f"[texture-cache] {textured.name}"]
+
+
+def test_refined_region_texture_uses_only_manual_patches_and_updates_result(
+    tmp_path: Path,
+):
+    python = tmp_path / "python"
+    model = tmp_path / "model"
+    image = tmp_path / "right.png"
+    geometry = tmp_path / "refined.glb"
+    refine_run = tmp_path / "refine-runs" / "region-1-request"
+    manifest = refine_run / "result.json"
+    python.touch()
+    model.mkdir()
+    image.write_bytes(b"image")
+    refine_run.mkdir(parents=True)
+    geometry.write_bytes(b"geometry")
+    manifest.write_text("{}", encoding="utf-8")
+    region = RefineCube(
+        center=(0.0, 0.0, 0.0),
+        side=1.0,
+        geometry_fingerprint="sha256:test",
+        confirmed=True,
+    )
+    source = RefineShapeResult(
+        geometry_fingerprint="sha256:test",
+        request_key="shape-request",
+        source_region_path=str(tmp_path / "source.glb"),
+        refined_region_path=str(geometry),
+        source_slat_path=str(tmp_path / "source.npz"),
+        refined_slat_path=str(tmp_path / "refined.npz"),
+        manifest_path=str(manifest),
+    )
+    project = MultiviewProject().with_slot(
+        ViewKey("eye", 90), image_path=str(image)
+    )
+    project = replace(
+        project,
+        texture=TrellisTextureSettings(total_steps=3, warmup_steps=2),
+        refine_regions=(region,),
+        refine_view_patches=((
+            RefineViewPatch(ViewKey("eye", 90), (0.1, 0.2, 0.8, 0.9)),
+        ),),
+        refine_shape_results=((source,),),
+    )
+    generator = TrellisTextureGenerator(
+        python=python,
+        trellis_root=tmp_path,
+        model_path=model,
+    )
+    requests = []
+
+    def fake_worker(command, *, result_path, **_kwargs):
+        request = json.loads(Path(command[-1]).read_text(encoding="utf-8"))
+        requests.append(request)
+        output = result_path.parent
+        textured = output / "textured.glb"
+        shape_slat = output / "encoded-shape-slat.npz"
+        texture_slat = output / "texture-slat.npz"
+        for path in (textured, shape_slat, texture_slat):
+            path.touch()
+        result_path.write_text(json.dumps({
+            "texture_key": request["texture_key"],
+            "shape": str(textured),
+            "shape_slat": str(shape_slat),
+            "texture_slat": str(texture_slat),
+        }), encoding="utf-8")
+
+    generator._run_worker = fake_worker
+    result = generator.generate_refined_region(
+        project,
+        0,
+        0,
+        tmp_path / "project.mvstudio.json",
+        threading.Event(),
+    )
+
+    assert requests[0]["input_mesh"] == str(geometry)
+    assert requests[0]["schedule"] == ["eye-090"] * 3
+    assert requests[0]["warmup_steps"] == 0
+    assert requests[0]["views"] == [{
+        "id": "eye-090",
+        "image": str(image),
+        "bounds": [0.1, 0.2, 0.8, 0.9],
+    }]
+    assert result.request_key == source.request_key
+    assert Path(result.textured_region_path).name == "textured.glb"
+    assert result.texture_key == requests[0]["texture_key"]
+
+
+def test_texture_result_writer_accepts_list_bounds(tmp_path: Path):
+    class Mesh:
+        vertices = ((0.0, 0.0, 0.0), (1.0, 1.0, 1.0))
+        faces = ((0, 1, 1),)
+        bounds = [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]]
+
+    request = {
+        "texture_key": "texture-key",
+        "resolution": 1024,
+        "texture_size": 2048,
+        "schedule": ["eye-000"],
+    }
+    shape = tmp_path / "textured.glb"
+    shape.touch()
+
+    _write_texture_result(
+        request,
+        tmp_path,
+        tmp_path / "refined.glb",
+        Mesh(),
+        0,
+        Mesh(),
+        shape,
+        np,
+    )
+
+    result = json.loads((tmp_path / "result.json").read_text(encoding="utf-8"))
+    assert result["source_bounds"] == Mesh.bounds
+    assert result["output_bounds"] == Mesh.bounds

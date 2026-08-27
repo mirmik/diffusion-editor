@@ -30,6 +30,11 @@ class _SmokeSettings:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("glb", type=Path)
+    parser.add_argument(
+        "--mask",
+        action="store_true",
+        help="also render a source-face mask and its brush cursor",
+    )
     args = parser.parse_args()
     if not args.glb.is_file():
         raise FileNotFoundError(args.glb)
@@ -56,10 +61,31 @@ def main() -> int:
                         "reconstruction viewport published no texture "
                         f"in {mode!r} shading mode"
                     )
+            if args.mask:
+                first_item = viewport._mesh_items[0]
+                vertex_count = min(len(first_item.positions), 128)
+                viewport.set_refine_vertex_mask((tuple(
+                    (index, (index + 1) / vertex_count)
+                    for index in range(vertex_count)
+                ),))
+                viewport.set_refine_mask_visible(True)
+                viewport.set_refine_mask_edit_enabled(True)
+                viewport._refine_mask_cursor = (480.0, 300.0)
+                for mode in ("flat", "smooth", "wireframe"):
+                    viewport.set_shading_mode(mode)
+                    for _ in range(3):
+                        root.composition.request_repaint()
+                        root.tick()
+                    if not viewport.viewport.texture_id:
+                        raise RuntimeError(
+                            "reconstruction viewport published no texture with "
+                            f"mask overlay in {mode!r} mode"
+                        )
             print(
                 "Reconstruction viewport smoke OK: "
                 f"vertices={stats[0]} triangles={stats[1]} meshes={stats[2]} "
                 f"shading={','.join(RECONSTRUCTION_SHADING_MODES)}"
+                f" mask={args.mask}"
             )
     return 0
 

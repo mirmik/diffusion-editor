@@ -13,6 +13,10 @@ from diffusion_editor.multiview_studio.model import (
     MeshPostprocessSettings,
     MultiviewProject,
     RefineCube,
+    RefineFaceMask,
+    RefineShapeResult,
+    RefineShapeSettings,
+    RefineViewPatch,
     TrellisShapeSettings,
     TrellisTextureSettings,
     ViewKey,
@@ -221,6 +225,164 @@ def test_refine_cube_roundtrip_is_bound_to_geometry(tmp_path: Path):
     assert restored.refine_cube.center == (1.0, 2.0, 3.0)
     assert restored.refine_cube.side == 0.75
     assert restored.refine_cube.confirmed
+    assert restored.refine_regions == (restored.refine_cube,)
+
+
+def test_refine_face_mask_roundtrip_and_region_update_preserve_source_faces(
+    tmp_path: Path,
+):
+    geometry = tmp_path / "geometry.glb"
+    geometry.write_bytes(b"mesh-v1")
+    manifest = tmp_path / "mask.mvstudio.json"
+    controller = MultiviewStudioController()
+    controller.set_geometry_path(geometry)
+    controller.set_refine_cube((0.0, 0.0, 0.0), 1.0)
+    controller.confirm_refine_cube()
+    controller.set_refine_mask(0, ((9, 2, 2), (), (17,)))
+
+    controller.select_refine_region(0)
+    controller.update_refine_cube((0.25, 0.0, 0.0), 1.25)
+    controller.confirm_refine_cube(0)
+    controller.save(manifest)
+    restored = MultiviewProject.load(manifest)
+
+    assert restored.refine_masks == (
+        RefineFaceMask(
+            restored.refine_regions[0].geometry_fingerprint,
+            ((2, 9), (), (17,)),
+        ),
+    )
+
+
+def test_refine_vertex_weights_roundtrip_as_sparse_mask(tmp_path: Path):
+    geometry = tmp_path / "geometry.glb"
+    geometry.write_bytes(b"mesh-v1")
+    manifest = tmp_path / "weighted-mask.mvstudio.json"
+    controller = MultiviewStudioController()
+    controller.set_geometry_path(geometry)
+    controller.set_refine_cube((0.0, 0.0, 0.0), 1.0)
+    controller.confirm_refine_cube()
+    controller.set_refine_mask_weights(
+        0,
+        (((9, 0.25), (2, 1.0), (9, 0.75)), (), ((17, 0.5),)),
+    )
+
+    controller.save(manifest)
+    payload = json.loads(manifest.read_text())
+    restored = MultiviewProject.load(manifest)
+
+    assert payload["refine"]["masks"][0]["kind"] == (
+        "weighted-source-vertices"
+    )
+    assert restored.refine_masks[0].mesh_faces == ()
+    assert restored.refine_masks[0].mesh_vertex_weights == (
+        ((2, 1.0), (9, 0.75)),
+        (),
+        ((17, 0.5),),
+    )
+
+
+def test_refine_view_patches_roundtrip_and_follow_region_edits(tmp_path: Path):
+    geometry = tmp_path / "geometry.glb"
+    geometry.write_bytes(b"mesh-v1")
+    front = tmp_path / "front.png"
+    right = tmp_path / "right.png"
+    front.touch()
+    right.touch()
+    manifest = tmp_path / "view-patches.mvstudio.json"
+    controller = MultiviewStudioController()
+    controller.set_geometry_path(geometry)
+    controller.set_source("front", front)
+    controller.set_slot_image(ViewKey("eye", 90), right)
+    controller.set_refine_cube((0.0, 0.0, 0.0), 1.0)
+    controller.confirm_refine_cube()
+
+    controller.set_refine_view_patch(
+        0, ViewKey("eye", 90), (0.2, 0.1, 0.8, 0.9)
+    )
+    controller.set_refine_view_patch(
+        0, ViewKey("eye", 0), (0.1, 0.2, 0.6, 0.7)
+    )
+    controller.select_refine_region(0)
+    controller.update_refine_cube((0.25, 0.0, 0.0), 1.25)
+    controller.confirm_refine_cube(0)
+    controller.save(manifest)
+    restored = MultiviewProject.load(manifest)
+
+    assert restored.view_patches(0) == (
+        RefineViewPatch(ViewKey("eye", 0), (0.1, 0.2, 0.6, 0.7)),
+        RefineViewPatch(ViewKey("eye", 90), (0.2, 0.1, 0.8, 0.9)),
+    )
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    assert payload["refine"]["view_patches"][0][0]["width"] == 0.5
+
+
+def test_refine_view_patch_requires_populated_view_and_clears_with_slot(
+    tmp_path: Path,
+):
+    geometry = tmp_path / "geometry.glb"
+    geometry.write_bytes(b"mesh")
+    view_path = tmp_path / "right.png"
+    view_path.touch()
+    key = ViewKey("eye", 90)
+    controller = MultiviewStudioController()
+    controller.set_geometry_path(geometry)
+    controller.set_refine_cube((0.0, 0.0, 0.0), 1.0)
+    controller.confirm_refine_cube()
+
+    with pytest.raises(ValueError, match="populated view"):
+        controller.set_refine_view_patch(0, key, (0.0, 0.0, 1.0, 1.0))
+
+    controller.set_slot_image(key, view_path)
+    controller.set_refine_view_patch(0, key, (0.0, 0.0, 1.0, 1.0))
+    controller.clear_slot(key)
+
+    assert controller.project.view_patches(0) == ()
+
+
+def test_project_persists_up_to_eight_confirmed_refine_regions(tmp_path: Path):
+    geometry = tmp_path / "geometry.glb"
+    geometry.write_bytes(b"mesh-v1")
+    manifest = tmp_path / "regions.mvstudio.json"
+    controller = MultiviewStudioController()
+    controller.set_geometry_path(geometry)
+
+    for index in range(8):
+        controller.set_refine_cube((float(index), 0.0, 0.0), 1.0)
+        controller.confirm_refine_cube()
+
+    controller.save(manifest)
+    restored = MultiviewProject.load(manifest)
+
+    assert len(restored.refine_regions) == 8
+    assert [region.center[0] for region in restored.refine_regions] == list(
+        map(float, range(8))
+    )
+
+    controller.set_refine_cube((9.0, 0.0, 0.0), 1.0)
+    with pytest.raises(ValueError, match="at most 8"):
+        controller.confirm_refine_cube()
+
+
+def test_confirming_selected_region_updates_it_without_appending(tmp_path: Path):
+    geometry = tmp_path / "geometry.glb"
+    geometry.write_bytes(b"mesh-v1")
+    controller = MultiviewStudioController()
+    controller.set_geometry_path(geometry)
+    controller.set_refine_cube((0.0, 0.0, 0.0), 1.0)
+    controller.confirm_refine_cube()
+    controller.set_refine_cube((2.0, 0.0, 0.0), 1.0)
+    controller.confirm_refine_cube()
+
+    controller.select_refine_region(0)
+    controller.update_refine_cube((1.0, 2.0, 3.0), 0.5)
+    controller.confirm_refine_cube(0)
+
+    assert len(controller.project.refine_regions) == 2
+    assert controller.project.refine_regions[0].center == (1.0, 2.0, 3.0)
+    assert controller.project.refine_regions[0].side == 0.5
+    assert controller.project.refine_regions[0].confirmed
+    assert controller.project.refine_regions[1].center == (2.0, 0.0, 0.0)
 
 
 def test_loading_drops_refine_cube_when_geometry_content_changed(tmp_path: Path):
@@ -236,6 +398,7 @@ def test_loading_drops_refine_cube_when_geometry_content_changed(tmp_path: Path)
     restored = MultiviewProject.load(manifest)
 
     assert restored.refine_cube is None
+    assert restored.refine_regions == ()
 
 
 def test_interactive_refine_cube_update_keeps_geometry_binding(tmp_path: Path):
@@ -267,6 +430,101 @@ def test_numeric_refine_cube_edit_returns_confirmed_cube_to_draft(tmp_path: Path
 
     assert controller.project.refine_cube.center == (0.0, 2.5, 0.0)
     assert not controller.project.refine_cube.confirmed
+
+
+def test_refine_settings_and_standalone_results_roundtrip(tmp_path: Path):
+    geometry = tmp_path / "geometry.glb"
+    geometry.write_bytes(b"mesh")
+    run = tmp_path / "refine-runs" / "region-1"
+    run.mkdir(parents=True)
+    paths = {
+        name: run / name
+        for name in (
+            "source-region.glb",
+            "refined-region.glb",
+            "source-shape-slat.npz",
+            "refined-shape-slat.npz",
+            "result.json",
+            "texture-runs/texture-1/textured.glb",
+            "texture-runs/texture-1/encoded-shape-slat.npz",
+            "texture-runs/texture-1/texture-slat.npz",
+            "texture-runs/texture-1/result.json",
+        )
+    }
+    for path in paths.values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+    controller = MultiviewStudioController()
+    controller.set_geometry_path(geometry)
+    controller.set_refine_cube((0.0, 0.0, 0.0), 1.0)
+    controller.confirm_refine_cube()
+    controller.set_refine_shape_setting(0, "steps", 17)
+    controller.set_refine_shape_setting(0, "strength", 0.65)
+    fingerprint = controller.project.refine_regions[0].geometry_fingerprint
+    controller.add_refine_shape_result(0, RefineShapeResult(
+        geometry_fingerprint=fingerprint,
+        request_key="request-1",
+        source_region_path=str(paths["source-region.glb"]),
+        refined_region_path=str(paths["refined-region.glb"]),
+        source_slat_path=str(paths["source-shape-slat.npz"]),
+        refined_slat_path=str(paths["refined-shape-slat.npz"]),
+        manifest_path=str(paths["result.json"]),
+        textured_region_path=str(
+            paths["texture-runs/texture-1/textured.glb"]
+        ),
+        texture_key="texture-1",
+        texture_shape_slat_path=str(
+            paths["texture-runs/texture-1/encoded-shape-slat.npz"]
+        ),
+        texture_slat_path=str(
+            paths["texture-runs/texture-1/texture-slat.npz"]
+        ),
+        texture_manifest_path=str(
+            paths["texture-runs/texture-1/result.json"]
+        ),
+    ))
+    manifest = tmp_path / "project.mvstudio.json"
+
+    controller.save(manifest)
+    restored = MultiviewProject.load(manifest)
+
+    assert restored.region_refine_settings(0) == RefineShapeSettings(
+        steps=17, strength=0.65
+    )
+    assert restored.region_refine_results(0)[0].request_key == "request-1"
+    assert restored.region_refine_results(0)[0].texture_key == "texture-1"
+    assert Path(
+        restored.region_refine_results(0)[0].textured_region_path
+    ).name == "textured.glb"
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    assert payload["refine"]["shape_results"][0][0]["refined_region"] == (
+        "refine-runs/region-1/refined-region.glb"
+    )
+    assert payload["refine"]["shape_results"][0][0]["textured_region"] == (
+        "refine-runs/region-1/texture-runs/texture-1/textured.glb"
+    )
+
+
+def test_refine_request_rejects_structurally_present_but_empty_mask(
+    tmp_path: Path,
+):
+    geometry = tmp_path / "geometry.glb"
+    view = tmp_path / "view.png"
+    geometry.write_bytes(b"mesh")
+    view.touch()
+    controller = MultiviewStudioController()
+    controller.set_geometry_path(geometry)
+    controller.set_slot_image(ViewKey("eye", 90), view)
+    controller.set_refine_cube((0.0, 0.0, 0.0), 1.0)
+    controller.confirm_refine_cube()
+    controller.set_refine_mask_weights(0, ((), ()))
+    controller.set_refine_view_patch(
+        0, ViewKey("eye", 90), (0.0, 0.0, 1.0, 1.0)
+    )
+
+    assert "Paint a non-empty refine mask" in (
+        controller.project.validate_refine_request(0)
+    )
 
 
 def test_textured_result_does_not_replace_geometry_source(tmp_path: Path):

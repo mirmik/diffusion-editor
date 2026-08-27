@@ -49,6 +49,14 @@ one uniform transform.  For a cube side `s`, `local_scale = 1 / s` and
 is explicit at the worker boundary.
 
 The selected cube is the local generation domain, not the final seam policy.
+
+The implemented conservative subset keeps every triangle intersecting the
+cube, including its complete boundary vertices. Because those fringe vertices
+can extend outside the authored cube, the Shape-SLat worker uses a second,
+recorded uniform fit of the materialized subset bounds into the encoder cube.
+This does not change the authored ROI or introduce anisotropic scaling; it
+keeps all selected polygons valid and provides an exact inverse transform for
+the standalone output.
 Frozen anchor bands, feathering, overlap collars, cut planes and patch welding
 remain pipeline parameters derived inside that domain.  Likewise, per-view 2D
 conditioning rectangles are separate authored data; a projected cube may
@@ -125,9 +133,23 @@ evidence that the added degrees of freedom improve the first head workflow.
 The selector is implemented in Multiview Studio. It includes geometry-bound
 serialization, mesh raycasting, a translucent/wire viewport overlay, direct
 glTF X/Y/Z translation arrows, a uniform-size handle, conditional numeric
-controls, and
-Confirm/Cancel/Clear. The current user workflow is documented in
+controls, and Confirm/Cancel/Clear. A project may retain up to eight confirmed
+instances of this per-operation cube; the compact mesh collection switches the
+single 3D viewport between the complete model and each region subset. The
+subset preserves the source GLB vertex buffer and removes only out-of-region
+triangle indices, so authored normals, UVs, tangents, and compatible textures
+remain identical to Main. A
+single click selects the region's source cube for editing on the complete
+model, while activation by double click opens the subset mesh. The
+current user workflow is documented in
 `docs/multiview-studio-refine.md`.
 
-Shape-SLat and PBR processing are deliberately not launched by this slice;
-they remain follow-up work in #1923 and #1943.
+Isolated Shape-SLat processing of the already displayed region subset is now
+implemented (#1958). It persists per-region sampling settings, materializes an
+exact standalone source artifact, encodes it with the official Shape VAE,
+maps vertex weights to a soft token mask, alternates manual view patches during
+RePaint, restores the source trajectory outside the mask, and publishes each
+refined GLB as another mesh variant. Source and refined regions remain
+standalone models and Main is untouched. Returning a chosen result to
+Main—including registration, seam processing, and topology cleanup—is a
+separate subsequent stage. PBR follow-up remains tracked in #1943.

@@ -247,6 +247,49 @@ def _bake_pbr_preserving_faces(
     )
 
 
+def _write_texture_result(
+    request,
+    output: Path,
+    input_mesh_path: Path,
+    source_mesh,
+    removed_degenerate_faces: int,
+    textured,
+    shape_path: Path,
+    np,
+) -> None:
+    source_bounds = np.asarray(source_mesh.bounds, dtype=np.float64)
+    output_bounds = np.asarray(textured.bounds, dtype=np.float64)
+    result = {
+        "protocol": 1,
+        "status": "complete",
+        "texture_key": str(request["texture_key"]),
+        "input_mesh": str(input_mesh_path),
+        "shape": str(shape_path.resolve()),
+        "shape_slat": str((output / "encoded-shape-slat.npz").resolve()),
+        "texture_slat": str((output / "texture-slat.npz").resolve()),
+        "source_vertices": int(len(source_mesh.vertices)),
+        "source_faces": int(len(source_mesh.faces)),
+        "removed_exact_degenerate_faces": removed_degenerate_faces,
+        "output_vertices": int(len(textured.vertices)),
+        "output_faces": int(len(textured.faces)),
+        "source_bounds": source_bounds.tolist(),
+        "output_bounds": output_bounds.tolist(),
+        "resolution": int(request["resolution"]),
+        "texture_size": int(request["texture_size"]),
+        "views": list(dict.fromkeys(map(str, request["schedule"]))),
+        "schedule": list(map(str, request["schedule"])),
+        "material": {
+            "base_color": True,
+            "metallic_roughness": True,
+            "normal": False,
+        },
+    }
+    (output / "result.json").write_text(
+        json.dumps(result, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         raise SystemExit("usage: trellis_texture_runner.py REQUEST.json")
@@ -261,11 +304,11 @@ def main() -> int:
     schedule = tuple(str(value) for value in request["schedule"])
     if len(schedule) != int(request["steps"]) or not schedule:
         raise ValueError("texture schedule length does not match steps")
-    images = {
-        str(item["id"]): Path(item["image"]).expanduser().resolve()
+    view_specs = {
+        str(item["id"]): item
         for item in request["views"]
     }
-    missing = sorted(set(schedule) - images.keys())
+    missing = sorted(set(schedule) - view_specs.keys())
     if missing:
         raise ValueError(f"texture schedule refers to missing views: {missing}")
 
@@ -276,9 +319,38 @@ def main() -> int:
     os.environ.setdefault("SPARSE_ATTN_BACKEND", "xformers")
 
     import numpy as np
+    import trimesh
+    _emit(f"[mesh] loading final geometry: {input_mesh_path.name}")
+    source_mesh, removed_degenerate_faces = _load_mesh(input_mesh_path)
+    if removed_degenerate_faces:
+        _emit(
+            "[mesh] removed "
+            f"{removed_degenerate_faces} exact zero-area input triangles"
+        )
+    shape_path = output / "textured.glb"
+    shape_slat_path = output / "encoded-shape-slat.npz"
+    texture_slat_path = output / "texture-slat.npz"
+    if all(
+        path.is_file()
+        for path in (shape_path, shape_slat_path, texture_slat_path)
+    ):
+        _emit("[resume] baked PBR GLB and SLat caches found; writing result")
+        textured, _removed_output_faces = _load_mesh(shape_path)
+        _write_texture_result(
+            request,
+            output,
+            input_mesh_path,
+            source_mesh,
+            removed_degenerate_faces,
+            textured,
+            shape_path,
+            np,
+        )
+        _emit(f"[complete] {shape_path}")
+        return 0
+
     import torch
     from PIL import Image
-    import trimesh
     from trellis2.pipelines import Trellis2TexturingPipeline
 
     torch.set_grad_enabled(False)
@@ -290,18 +362,9 @@ def main() -> int:
     pipeline.low_vram = True
     pipeline.cuda()
 
-    _emit(f"[mesh] loading final geometry: {input_mesh_path.name}")
-    source_mesh, removed_degenerate_faces = _load_mesh(input_mesh_path)
-    source_vertices = int(len(source_mesh.vertices))
-    source_faces = int(len(source_mesh.faces))
-    if removed_degenerate_faces:
-        _emit(
-            "[mesh] removed "
-            f"{removed_degenerate_faces} exact zero-area input triangles"
-        )
-    bounds = np.asarray(source_mesh.bounds, dtype=np.float64)
-    center = bounds.mean(axis=0)
-    extent = float(np.max(bounds[1] - bounds[0]))
+    source_bounds = np.asarray(source_mesh.bounds, dtype=np.float64)
+    center = source_bounds.mean(axis=0)
+    extent = float(np.max(source_bounds[1] - source_bounds[0]))
     if not np.isfinite(extent) or extent <= 0:
         raise ValueError("input mesh has degenerate bounds")
     normalization_scale = 0.99999 / extent
@@ -315,10 +378,24 @@ def main() -> int:
 
     prepared_images = {}
     for view_id in dict.fromkeys(schedule):
-        image_path = images[view_id]
+        spec = view_specs[view_id]
+        image_path = Path(spec["image"]).expanduser().resolve()
         if not image_path.is_file():
             raise FileNotFoundError(image_path)
-        image = pipeline.preprocess_image(Image.open(image_path))
+        with Image.open(image_path) as opened:
+            source_image = opened.convert("RGB")
+            crop_bounds = spec.get("bounds")
+            if crop_bounds is not None:
+                x0, y0, x1, y1 = map(float, crop_bounds)
+                width, height = source_image.size
+                source_image = source_image.crop((
+                    round(x0 * width),
+                    round(y0 * height),
+                    round(x1 * width),
+                    round(y1 * height),
+                ))
+                source_image.save(output / f"patch-{view_id}.png")
+            image = pipeline.preprocess_image(source_image)
         image.save(output / f"prepared-{view_id}.png")
         prepared_images[view_id] = image
 
@@ -355,38 +432,16 @@ def main() -> int:
     restore[:3, :3] /= normalization_scale
     restore[:3, 3] = center
     textured.apply_transform(restore)
-    shape_path = output / "textured.glb"
     textured.export(shape_path, extension_webp=True)
-
-    output_bounds = np.asarray(textured.bounds, dtype=np.float64)
-    result = {
-        "protocol": 1,
-        "status": "complete",
-        "texture_key": str(request["texture_key"]),
-        "input_mesh": str(input_mesh_path),
-        "shape": str(shape_path.resolve()),
-        "shape_slat": str((output / "encoded-shape-slat.npz").resolve()),
-        "texture_slat": str((output / "texture-slat.npz").resolve()),
-        "source_vertices": source_vertices,
-        "source_faces": source_faces,
-        "removed_exact_degenerate_faces": removed_degenerate_faces,
-        "output_vertices": int(len(textured.vertices)),
-        "output_faces": int(len(textured.faces)),
-        "source_bounds": bounds.tolist(),
-        "output_bounds": output_bounds.tolist(),
-        "resolution": resolution,
-        "texture_size": int(request["texture_size"]),
-        "views": list(dict.fromkeys(schedule)),
-        "schedule": list(schedule),
-        "material": {
-            "base_color": True,
-            "metallic_roughness": True,
-            "normal": False,
-        },
-    }
-    (output / "result.json").write_text(
-        json.dumps(result, indent=2) + "\n",
-        encoding="utf-8",
+    _write_texture_result(
+        request,
+        output,
+        input_mesh_path,
+        source_mesh,
+        removed_degenerate_faces,
+        textured,
+        shape_path,
+        np,
     )
     _emit(f"[complete] {shape_path}")
     return 0

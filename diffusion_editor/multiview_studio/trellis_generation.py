@@ -11,6 +11,8 @@ import threading
 import time
 from typing import Callable
 
+from tcbase import log
+
 from .model import MultiviewProject, ViewKey, view_schedule
 from .trellis_mesh_postprocess import postprocess_key
 
@@ -196,6 +198,8 @@ class TrellisShapeGenerator:
         on_progress: Callable[[str], None] | None,
         operation: str = "shape generation",
     ) -> Path:
+        worker_log_path = result_path.parent / "worker.log"
+        worker_log_path.parent.mkdir(parents=True, exist_ok=True)
         process = subprocess.Popen(
             command,
             cwd=str(self._trellis_root),
@@ -211,33 +215,43 @@ class TrellisShapeGenerator:
             self._process = process
         tail: list[str] = []
         try:
-            assert process.stdout is not None
-            while True:
-                if cancel.is_set():
-                    self._terminate(process)
-                    raise RuntimeError(f"TRELLIS.2 {operation} cancelled")
-                line = process.stdout.readline()
-                if line:
-                    message = line.strip()
-                    if message:
-                        tail.append(message)
-                        tail = tail[-20:]
-                        self._progress(on_progress, message)
-                    continue
-                if process.poll() is not None:
-                    break
-                cancel.wait(0.05)
-            return_code = process.wait()
+            with worker_log_path.open("w", encoding="utf-8") as worker_log:
+                assert process.stdout is not None
+                while True:
+                    if cancel.is_set():
+                        self._terminate(process)
+                        raise RuntimeError(
+                            f"TRELLIS.2 {operation} cancelled; "
+                            f"worker log: {worker_log_path}"
+                        )
+                    line = process.stdout.readline()
+                    if line:
+                        worker_log.write(line)
+                        worker_log.flush()
+                        message = line.rstrip("\r\n")
+                        if message:
+                            tail.append(message)
+                            tail = tail[-20:]
+                            log.info(f"[TRELLIS.2 {operation}] {message}")
+                            self._progress(on_progress, message.strip())
+                        continue
+                    if process.poll() is not None:
+                        break
+                    cancel.wait(0.05)
+                return_code = process.wait()
         finally:
             with self._lock:
                 if self._process is process:
                     self._process = None
         if return_code:
             detail = "\n".join(tail[-8:])
-            raise RuntimeError(
+            message = (
                 f"TRELLIS.2 worker exited with code {return_code}"
                 + (f":\n{detail}" if detail else "")
+                + f"\nFull worker log: {worker_log_path}"
             )
+            log.error(message)
+            raise RuntimeError(message)
         if not result_path.is_file():
             raise RuntimeError("TRELLIS.2 worker did not produce its result")
         result = json.loads(result_path.read_text(encoding="utf-8"))
