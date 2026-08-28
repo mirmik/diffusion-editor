@@ -179,7 +179,9 @@ class MultiviewStudioController:
                     view_patches[index] if index < len(view_patches) else (),
                     refine_settings[index]
                     if index < len(refine_settings)
-                    else RefineShapeSettings(),
+                    else RefineShapeSettings(
+                        postprocess=self.project.trellis.postprocess
+                    ),
                     refine_results[index] if index < len(refine_results) else (),
                 )
                 for index, region in enumerate(regions)
@@ -319,7 +321,9 @@ class MultiviewStudioController:
             while len(view_patches) < len(regions):
                 view_patches.append(())
             while len(refine_settings) < len(regions):
-                refine_settings.append(RefineShapeSettings())
+                refine_settings.append(RefineShapeSettings(
+                    postprocess=self.project.trellis.postprocess
+                ))
             while len(refine_results) < len(regions):
                 refine_results.append(())
         else:
@@ -345,6 +349,7 @@ class MultiviewStudioController:
         if field not in {
             "seed",
             "steps",
+            "warmup_steps",
             "strength",
             "cfg",
             "resolution",
@@ -353,12 +358,52 @@ class MultiviewStudioController:
             raise ValueError(f"unknown refine shape setting: {field}")
         settings = list(self.project.refine_shape_settings)
         while len(settings) < len(self.project.refine_regions):
-            settings.append(RefineShapeSettings())
+            settings.append(RefineShapeSettings(
+                postprocess=self.project.trellis.postprocess
+            ))
         normalized = (
             float(value) if field in {"strength", "cfg"} else int(value)
         )
         settings[region_index] = replace(
             settings[region_index], **{field: normalized}
+        )
+        self._replace(replace(
+            self.project,
+            refine_shape_settings=tuple(settings),
+        ))
+
+    def set_refine_postprocess(
+        self, region_index: int, field: str, value: bool | float
+    ) -> None:
+        if not 0 <= region_index < len(self.project.refine_regions):
+            raise ValueError("refine region index is out of range")
+        boolean_fields = {
+            "fill_holes",
+            "remesh",
+            "simplify",
+            "cleanup",
+            "final_repair",
+            "remove_isolated_double_faces",
+            "remove_degenerate_faces",
+        }
+        if field in boolean_fields:
+            normalized: bool | float = bool(value)
+        elif field == "fill_hole_perimeter":
+            normalized = float(value)
+        else:
+            raise ValueError(f"unknown refine postprocess setting: {field}")
+        settings = list(self.project.refine_shape_settings)
+        while len(settings) < len(self.project.refine_regions):
+            settings.append(RefineShapeSettings(
+                postprocess=self.project.trellis.postprocess
+            ))
+        current = settings[region_index]
+        settings[region_index] = replace(
+            current,
+            postprocess=replace(
+                current.postprocess,
+                **{field: normalized},
+            ),
         )
         self._replace(replace(
             self.project,

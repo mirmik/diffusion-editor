@@ -53,8 +53,9 @@ def run_mesh_postprocess(
     report_path = output_dir / f"postprocess-{key}.json"
     if output_path.is_file() and report_path.is_file():
         report = json.loads(report_path.read_text(encoding="utf-8"))
-        _progress(progress, f"[postprocess-cache] {output_path.name}")
-        return output_path, report
+        if Path(report.get("cache", "")).resolve() == cache_path:
+            _progress(progress, f"[postprocess-cache] {output_path.name}")
+            return output_path, report
 
     started = time.perf_counter()
     cached = np.load(cache_path)

@@ -68,6 +68,7 @@ class StudioActions(Protocol):
     def set_model_shading(self, mode: str) -> None: ...
     def toggle_refine_mask_visible(self) -> None: ...
     def toggle_refine_mask_painting(self) -> None: ...
+    def clear_refine_protection(self) -> None: ...
     def set_refine_view_patch(
         self,
         region_index: int,
@@ -76,6 +77,9 @@ class StudioActions(Protocol):
     ) -> None: ...
     def set_refine_shape_setting(
         self, region_index: int, field: str, value: int | float
+    ) -> None: ...
+    def set_refine_postprocess(
+        self, region_index: int, field: str, value: bool | float
     ) -> None: ...
     def refine_region(self, region_index: int) -> None: ...
     def texture_refine_result(
@@ -305,13 +309,17 @@ class NativeMultiviewStudioView:
             )
             shading_row.add_preferred_child(button.widget)
             self.model_shading_buttons[mode] = button
-        self.show_mask_button = document.create_button("Show mask")
+        self.show_mask_button = document.create_button("Show protection")
         self.show_mask_button.widget.stable_id = (
             "multiview-studio.workspace.model.mask.show"
         )
-        self.paint_mask_button = document.create_button("Paint mask")
+        self.paint_mask_button = document.create_button("Paint protection")
         self.paint_mask_button.widget.stable_id = (
             "multiview-studio.workspace.model.mask.paint"
+        )
+        self.clear_mask_button = document.create_button("Clear protection")
+        self.clear_mask_button.widget.stable_id = (
+            "multiview-studio.workspace.model.mask.clear"
         )
         self._connections.append(
             self.show_mask_button.connect_clicked(
@@ -323,8 +331,14 @@ class NativeMultiviewStudioView:
                 actions.toggle_refine_mask_painting
             )
         )
+        self._connections.append(
+            self.clear_mask_button.connect_clicked(
+                actions.clear_refine_protection
+            )
+        )
         shading_row.add_preferred_child(self.show_mask_button.widget)
         shading_row.add_preferred_child(self.paint_mask_button.widget)
+        shading_row.add_preferred_child(self.clear_mask_button.widget)
         self.model_content.add_preferred_child(shading_row)
         self._update_model_shading_buttons()
 
@@ -521,14 +535,14 @@ class NativeMultiviewStudioView:
         self._append_menu_command(
             view_model,
             CommandData(
-                "view.mask.show", "Show Refine Mask",
+                "view.mask.show", "Show Protection Mask",
                 checkable=True, enabled=False,
             ),
         )
         self._append_menu_command(
             view_model,
             CommandData(
-                "view.mask.paint", "Paint Refine Mask",
+                "view.mask.paint", "Paint Protection Mask",
                 checkable=True, enabled=False,
             ),
         )
@@ -671,11 +685,16 @@ class NativeMultiviewStudioView:
         enabled = self._model_mask_available and not self._busy
         self.show_mask_button.widget.enabled = enabled
         self.paint_mask_button.widget.enabled = enabled
+        self.clear_mask_button.widget.enabled = enabled
         self.show_mask_button.set_text(
-            "Show mask •" if self._model_mask_visible else "Show mask"
+            "Show protection •"
+            if self._model_mask_visible
+            else "Show protection"
         )
         self.paint_mask_button.set_text(
-            "Paint mask •" if self._model_mask_painting else "Paint mask"
+            "Paint protection •"
+            if self._model_mask_painting
+            else "Paint protection"
         )
         self._set_menu_command_enabled(
             "view.mask.show", enabled
@@ -959,11 +978,11 @@ class NativeMultiviewStudioView:
         mask = self._project.refine_mask(region_index)
         weighted = sum(len(weights) for weights in mask.mesh_vertex_weights)
         legacy_faces = sum(len(faces) for faces in mask.mesh_faces)
-        masked = f"{weighted:,} weighted vertices"
+        masked = f"{weighted:,} protected weighted vertices"
         if not weighted and legacy_faces:
-            masked = f"{legacy_faces:,} legacy faces"
+            masked = f"{legacy_faces:,} protected legacy faces"
         elif not weighted:
-            masked = "mask empty"
+            masked = "nothing protected"
         self.refine_region_title.text = f"Region {self._selected_mesh_index}"
         self.refine_region_summary.text = (
             f"Cube {region.side:.3g} · {masked} · {len(patches)} view patches"
@@ -1009,6 +1028,7 @@ class NativeMultiviewStudioView:
             self.refine_shape_controls["seed"].widget.enabled = not self._busy
             for field in (
                 "steps",
+                "warmup_steps",
                 "strength",
                 "cfg",
                 "resolution",
@@ -1017,6 +1037,24 @@ class NativeMultiviewStudioView:
                 control = self.refine_shape_controls[field]
                 control.value = float(getattr(settings, field))
                 control.widget.enabled = not self._busy
+            postprocess = settings.postprocess
+            for field in (
+                "fill_holes",
+                "remesh",
+                "simplify",
+                "cleanup",
+                "final_repair",
+                "remove_isolated_double_faces",
+                "remove_degenerate_faces",
+            ):
+                control = self.refine_postprocess_controls[field]
+                control.checked = bool(getattr(postprocess, field))
+                control.widget.enabled = not self._busy
+            perimeter = self.refine_postprocess_controls[
+                "fill_hole_perimeter"
+            ]
+            perimeter.value = postprocess.fill_hole_perimeter
+            perimeter.widget.enabled = not self._busy
             for field, value in values.items():
                 control = self.refine_patch_controls[field]
                 control.value = value
@@ -1439,6 +1477,7 @@ class NativeMultiviewStudioView:
         )
         for field, label, value, minimum, maximum, step in (
             ("steps", "Refine steps", 25, 1, 100, 1),
+            ("warmup_steps", "Front warmup / stage", 15, 0, 100, 1),
             ("resolution", "Shape resolution", 1024, 1024, 1536, 128),
             (
                 "preview_face_target",
@@ -1462,8 +1501,16 @@ class NativeMultiviewStudioView:
                 ),
             )
         for field, label, value, minimum, maximum, step, decimals in (
-            ("strength", "Strength", 1.0, 0.0, 1.0, 0.05, 2),
-            ("cfg", "CFG", 5.0, 0.0, 20.0, 0.25, 2),
+            (
+                "strength",
+                "Structure strength",
+                1.0,
+                0.0,
+                1.0,
+                0.05,
+                2,
+            ),
+            ("cfg", "CFG", 1.0, 0.0, 20.0, 0.25, 2),
         ):
             control = self._float_spin(
                 content,
@@ -1479,6 +1526,56 @@ class NativeMultiviewStudioView:
             )
             control.decimals = decimals
             self.refine_shape_controls[field] = control
+
+        postprocess_title = self._document.create_label(
+            "Region mesh postprocess (cached)"
+        )
+        postprocess_title.stable_id = (
+            "multiview-studio.refine-settings.postprocess-title"
+        )
+        content.add_preferred_child(postprocess_title)
+        self.refine_postprocess_controls: dict[str, object] = {}
+        for field, label in (
+            ("fill_holes", "Initial fill holes"),
+            ("remesh", "Narrow-band DC remesh"),
+            ("simplify", "CuMesh simplify"),
+            ("cleanup", "CuMesh topology cleanup"),
+            ("final_repair", "Final MeshLib repair"),
+            (
+                "remove_isolated_double_faces",
+                "Remove isolated double faces",
+            ),
+            ("remove_degenerate_faces", "Remove zero-area faces"),
+        ):
+            self.refine_postprocess_controls[field] = self._checkbox(
+                content,
+                label,
+                f"refine-postprocess.{field.replace('_', '-')}",
+                lambda checked, selected=field: self._set_refine_postprocess(
+                    selected, checked
+                ),
+            )
+        self.refine_postprocess_controls["fill_hole_perimeter"] = (
+            self._float_spin(
+                content,
+                "Fill max perimeter",
+                "refine-postprocess.fill-hole-perimeter",
+                0.03,
+                0.0001,
+                1.0,
+                0.001,
+                lambda value: self._set_refine_postprocess(
+                    "fill_hole_perimeter", value
+                ),
+            )
+        )
+        postprocess_hint = self._document.create_label(
+            "Changing these stages reuses the cached neural refine result."
+        )
+        postprocess_hint.stable_id = (
+            "multiview-studio.refine-settings.postprocess-hint"
+        )
+        content.add_preferred_child(postprocess_hint)
 
         content.add_preferred_child(self.refine_view_title)
         content.add_preferred_child(hint)
@@ -1760,6 +1857,17 @@ class NativeMultiviewStudioView:
         ):
             return
         self._actions.set_refine_shape_setting(
+            self._selected_mesh_index - 1, field, value
+        )
+
+    def _set_refine_postprocess(
+        self, field: str, value: bool | float
+    ) -> None:
+        if self._syncing or not 0 < self._selected_mesh_index <= len(
+            self._project.refine_regions
+        ):
+            return
+        self._actions.set_refine_postprocess(
             self._selected_mesh_index - 1, field, value
         )
 

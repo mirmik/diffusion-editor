@@ -43,8 +43,8 @@ def _parse_args() -> argparse.Namespace:
         default="flowedit",
     )
     parser.add_argument("--flow-averages", type=int, default=2)
-    parser.add_argument("--cfg-source", type=float, default=5.0)
-    parser.add_argument("--cfg-target", type=float, default=5.0)
+    parser.add_argument("--cfg-source", type=float, default=1.0)
+    parser.add_argument("--cfg-target", type=float, default=1.0)
     parser.add_argument(
         "--head-core",
         type=float,
@@ -72,8 +72,6 @@ def _save_sparse(path: Path, value) -> None:
 
 def _soft_head_mask(coords, core: float, feather_end: float):
     """Return per-token weights for the top of TRELLIS.2's internal Z axis."""
-    import torch
-
     xyz = coords[:, 1:].float()
     vertical = xyz[:, 2]
     upper = vertical.max()

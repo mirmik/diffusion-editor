@@ -301,16 +301,22 @@ class RefineViewPatch:
 class RefineShapeSettings:
     seed: int = 44
     steps: int = 25
+    warmup_steps: int = 15
     strength: float = 1.0
-    cfg: float = 5.0
+    cfg: float = 1.0
     resolution: int = 1024
     preview_face_target: int = 250_000
+    postprocess: MeshPostprocessSettings = MeshPostprocessSettings()
 
     def __post_init__(self) -> None:
         if not 0 <= self.seed <= 2_147_483_647:
             raise ValueError("refine seed must fit a signed 32-bit integer")
         if not 1 <= self.steps <= 100:
             raise ValueError("refine steps must be from 1 to 100")
+        if not 0 <= self.warmup_steps <= self.steps:
+            raise ValueError(
+                "refine warmup must be between zero and refine steps"
+            )
         if not math.isfinite(self.strength) or not 0.0 <= self.strength <= 1.0:
             raise ValueError("refine strength must be from zero to one")
         if not math.isfinite(self.cfg) or not 0.0 <= self.cfg <= 20.0:
@@ -326,22 +332,98 @@ class RefineShapeSettings:
         return {
             "seed": self.seed,
             "steps": self.steps,
+            "warmup_steps": self.warmup_steps,
             "strength": self.strength,
             "cfg": self.cfg,
             "resolution": self.resolution,
             "preview_face_target": self.preview_face_target,
+            "postprocess": {
+                "fill_holes": self.postprocess.fill_holes,
+                "fill_hole_perimeter": self.postprocess.fill_hole_perimeter,
+                "remesh": self.postprocess.remesh,
+                "simplify": self.postprocess.simplify,
+                "cleanup": self.postprocess.cleanup,
+                "final_repair": self.postprocess.final_repair,
+                "remove_isolated_double_faces": (
+                    self.postprocess.remove_isolated_double_faces
+                ),
+                "remove_degenerate_faces": (
+                    self.postprocess.remove_degenerate_faces
+                ),
+            },
         }
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "RefineShapeSettings":
+    def from_dict(
+        cls,
+        payload: dict[str, Any],
+        *,
+        postprocess_default: MeshPostprocessSettings | None = None,
+    ) -> "RefineShapeSettings":
+        default = postprocess_default or MeshPostprocessSettings()
+        postprocess_payload = payload.get("postprocess")
+        if isinstance(postprocess_payload, dict):
+            postprocess = MeshPostprocessSettings(
+                fill_holes=bool(
+                    postprocess_payload.get("fill_holes", default.fill_holes)
+                ),
+                fill_hole_perimeter=float(
+                    postprocess_payload.get(
+                        "fill_hole_perimeter", default.fill_hole_perimeter
+                    )
+                ),
+                remesh=bool(postprocess_payload.get("remesh", default.remesh)),
+                simplify=bool(
+                    postprocess_payload.get("simplify", default.simplify)
+                ),
+                cleanup=bool(
+                    postprocess_payload.get("cleanup", default.cleanup)
+                ),
+                final_repair=bool(
+                    postprocess_payload.get(
+                        "final_repair", default.final_repair
+                    )
+                ),
+                remove_isolated_double_faces=bool(
+                    postprocess_payload.get(
+                        "remove_isolated_double_faces",
+                        default.remove_isolated_double_faces,
+                    )
+                ),
+                remove_degenerate_faces=bool(
+                    postprocess_payload.get(
+                        "remove_degenerate_faces",
+                        default.remove_degenerate_faces,
+                    )
+                ),
+            )
+        else:
+            # Projects written before per-region controls shared Main's values.
+            postprocess = default
+        steps = int(payload.get("steps", 25))
         return cls(
             seed=int(payload.get("seed", 44)),
-            steps=int(payload.get("steps", 25)),
+            steps=steps,
+            warmup_steps=int(
+                payload.get("warmup_steps", min(15, steps))
+            ),
             strength=float(payload.get("strength", 1.0)),
-            cfg=float(payload.get("cfg", 5.0)),
+            cfg=float(payload.get("cfg", 1.0)),
             resolution=int(payload.get("resolution", 1024)),
             preview_face_target=int(payload.get("preview_face_target", 250_000)),
+            postprocess=postprocess,
         )
+
+    def neural_dict(self) -> dict[str, int | float]:
+        """Settings that affect the expensive TRELLIS refine stage."""
+        return {
+            "seed": self.seed,
+            "steps": self.steps,
+            "warmup_steps": self.warmup_steps,
+            "strength": self.strength,
+            "cfg": self.cfg,
+            "resolution": self.resolution,
+        }
 
 
 @dataclass(frozen=True)
@@ -497,7 +579,7 @@ class MultiviewProject:
             raise ValueError("refine region index is out of range")
         if index < len(self.refine_shape_settings):
             return self.refine_shape_settings[index]
-        return RefineShapeSettings()
+        return RefineShapeSettings(postprocess=self.trellis.postprocess)
 
     def region_refine_results(self, index: int) -> tuple[RefineShapeResult, ...]:
         if not 0 <= index < len(self.refine_regions):
@@ -510,12 +592,23 @@ class MultiviewProject:
         if not 0 <= index < len(self.refine_regions):
             return ("Select a refine region",)
         errors = []
-        mask = self.refine_mask(index)
-        if not any(mask.mesh_vertex_weights) and not any(mask.mesh_faces):
-            errors.append("Paint a non-empty refine mask")
         patches = self.view_patches(index)
         if not patches:
             errors.append("Assign at least one conditioning view patch")
+        settings = self.region_refine_settings(index)
+        front = ViewKey("eye", 0)
+        if settings.warmup_steps and not any(
+            patch.key == front for patch in patches
+        ):
+            errors.append("Assign an eye-000 patch for front warmup")
+        if (
+            patches
+            and settings.steps - settings.warmup_steps < len(patches)
+        ):
+            errors.append(
+                "Post-warmup refine steps must cover every conditioning "
+                "patch once"
+            )
         for patch in patches:
             slot = self.slot(patch.key)
             if not slot.populated or not Path(slot.image_path).is_file():
@@ -801,7 +894,10 @@ class MultiviewProject:
             else ()
         )
         refine_shape_settings = tuple(
-            RefineShapeSettings.from_dict(item) for item in settings_payloads
+            RefineShapeSettings.from_dict(
+                item, postprocess_default=settings.postprocess
+            )
+            for item in settings_payloads
         )
         results_payloads = (
             refine_payload.get("shape_results", ())
@@ -840,7 +936,7 @@ class MultiviewProject:
                     else (),
                     refine_shape_settings[index]
                     if index < len(refine_shape_settings)
-                    else RefineShapeSettings(),
+                    else RefineShapeSettings(postprocess=settings.postprocess),
                     refine_shape_results[index]
                     if index < len(refine_shape_results)
                     else (),

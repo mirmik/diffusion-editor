@@ -39,6 +39,13 @@ def test_project_has_canonical_24_view_grid_and_maps_sources():
     assert project.validate_shape_request() == ()
 
 
+def test_refine_cfg_defaults_to_one_in_new_and_legacy_settings():
+    assert RefineShapeSettings().cfg == 1.0
+    assert RefineShapeSettings.from_dict({}).cfg == 1.0
+    assert RefineShapeSettings().warmup_steps == 15
+    assert RefineShapeSettings.from_dict({}).warmup_steps == 15
+
+
 def test_every_populated_slot_participates_in_schedule():
     project = MultiviewProject().with_source("front", "/tmp/front.png")
     project = project.with_slot(ViewKey("eye", 90), image_path="/tmp/right.png")
@@ -460,6 +467,8 @@ def test_refine_settings_and_standalone_results_roundtrip(tmp_path: Path):
     controller.confirm_refine_cube()
     controller.set_refine_shape_setting(0, "steps", 17)
     controller.set_refine_shape_setting(0, "strength", 0.65)
+    controller.set_refine_postprocess(0, "remesh", False)
+    controller.set_refine_postprocess(0, "fill_hole_perimeter", 0.0125)
     fingerprint = controller.project.refine_regions[0].geometry_fingerprint
     controller.add_refine_shape_result(0, RefineShapeResult(
         geometry_fingerprint=fingerprint,
@@ -489,7 +498,12 @@ def test_refine_settings_and_standalone_results_roundtrip(tmp_path: Path):
     restored = MultiviewProject.load(manifest)
 
     assert restored.region_refine_settings(0) == RefineShapeSettings(
-        steps=17, strength=0.65
+        steps=17,
+        strength=0.65,
+        postprocess=MeshPostprocessSettings(
+            remesh=False,
+            fill_hole_perimeter=0.0125,
+        ),
     )
     assert restored.region_refine_results(0)[0].request_key == "request-1"
     assert restored.region_refine_results(0)[0].texture_key == "texture-1"
@@ -503,9 +517,31 @@ def test_refine_settings_and_standalone_results_roundtrip(tmp_path: Path):
     assert payload["refine"]["shape_results"][0][0]["textured_region"] == (
         "refine-runs/region-1/texture-runs/texture-1/textured.glb"
     )
+    assert not payload["refine"]["shape_settings"][0]["postprocess"][
+        "remesh"
+    ]
 
 
-def test_refine_request_rejects_structurally_present_but_empty_mask(
+def test_new_refine_region_copies_main_postprocess_then_changes_independently(
+    tmp_path: Path,
+):
+    geometry = tmp_path / "geometry.glb"
+    geometry.write_bytes(b"mesh")
+    controller = MultiviewStudioController()
+    controller.set_geometry_path(geometry)
+    controller.set_mesh_postprocess("remesh", False)
+    controller.set_refine_cube((0.0, 0.0, 0.0), 1.0)
+    controller.confirm_refine_cube()
+
+    assert not controller.project.region_refine_settings(0).postprocess.remesh
+
+    controller.set_refine_postprocess(0, "remesh", True)
+
+    assert controller.project.region_refine_settings(0).postprocess.remesh
+    assert not controller.project.trellis.postprocess.remesh
+
+
+def test_refine_request_allows_empty_protection_mask(
     tmp_path: Path,
 ):
     geometry = tmp_path / "geometry.glb"
@@ -521,10 +557,9 @@ def test_refine_request_rejects_structurally_present_but_empty_mask(
     controller.set_refine_view_patch(
         0, ViewKey("eye", 90), (0.0, 0.0, 1.0, 1.0)
     )
+    controller.set_refine_shape_setting(0, "warmup_steps", 0)
 
-    assert "Paint a non-empty refine mask" in (
-        controller.project.validate_refine_request(0)
-    )
+    assert controller.project.validate_refine_request(0) == ()
 
 
 def test_textured_result_does_not_replace_geometry_source(tmp_path: Path):

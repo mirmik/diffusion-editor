@@ -18,8 +18,10 @@ def _save_sparse(path: Path, value) -> None:
 
     np.savez_compressed(
         path,
-        coords=value.coords.detach().cpu().numpy(),
-        feats=value.feats.detach().float().cpu().numpy(),
+        coords=np.ascontiguousarray(value.coords.detach().cpu().numpy()),
+        feats=np.ascontiguousarray(
+            value.feats.detach().float().cpu().numpy()
+        ),
     )
 
 
@@ -35,12 +37,30 @@ def _alternating_sample(
     guidance_strength: float,
     guidance_rescale: float,
     guidance_interval: tuple[float, float],
+    source=None,
+    protected_mask=None,
+    strength: float = 1.0,
 ):
     import numpy as np
 
-    sample = noise
-    times = np.linspace(1, 0, len(schedule) + 1)
+    times = np.linspace(strength, 0, len(schedule) + 1)
     times = rescale_t * times / (1 + (rescale_t - 1) * times)
+    if source is None:
+        sample = noise
+    else:
+        sigma_min = float(sampler.sigma_min)
+        start = float(times[0])
+        start_sigma = sigma_min + (1.0 - sigma_min) * start
+        if hasattr(source, "feats"):
+            candidate = source.replace(
+                (1.0 - start) * source.feats
+                + start_sigma * noise.feats
+            )
+        else:
+            candidate = (1.0 - start) * source + start_sigma * noise
+        sample = _restore_protected_sample(
+            source, candidate, protected_mask
+        )
     for index, ((current, previous), view_id) in enumerate(
         zip(zip(times[:-1], times[1:]), schedule), 1
     ):
@@ -56,12 +76,35 @@ def _alternating_sample(
             guidance_rescale=guidance_rescale,
             guidance_interval=guidance_interval,
         )
-        sample = out.pred_x_prev
+        sample = _restore_protected_sample(
+            source, out.pred_x_prev, protected_mask
+        )
         _emit(f"[{stage}] {index}/{len(schedule)} · {view_id}")
     return sample
 
 
-def _sample_sparse(pipeline, conditions, schedule):
+def _restore_protected_sample(source, candidate, protected_mask):
+    """Restore clean source values without changing the sampler topology."""
+    if source is None or protected_mask is None:
+        return candidate
+    if hasattr(source, "feats"):
+        return source.replace(
+            protected_mask * source.feats
+            + (1.0 - protected_mask) * candidate.feats
+        )
+    return protected_mask * source + (1.0 - protected_mask) * candidate
+
+
+def _sample_sparse_latent(
+    pipeline,
+    conditions,
+    schedule,
+    *,
+    guidance_strength: float = 1.0,
+    source=None,
+    protected_mask=None,
+    strength: float = 1.0,
+):
     import torch
 
     model = pipeline.models["sparse_structure_flow_model"]
@@ -75,35 +118,71 @@ def _sample_sparse(pipeline, conditions, schedule):
     )
     if pipeline.low_vram:
         model.to(pipeline.device)
-    latent = _alternating_sample(
-        pipeline.sparse_structure_sampler,
-        model,
-        noise,
-        conditions,
-        schedule,
-        stage="occupancy",
-        rescale_t=5.0,
-        guidance_strength=7.5,
-        guidance_rescale=0.7,
-        guidance_interval=(0.6, 1.0),
-    )
-    if pipeline.low_vram:
-        model.cpu()
+    try:
+        return _alternating_sample(
+            pipeline.sparse_structure_sampler,
+            model,
+            noise,
+            conditions,
+            schedule,
+            stage="occupancy",
+            rescale_t=5.0,
+            guidance_strength=guidance_strength,
+            guidance_rescale=0.7,
+            guidance_interval=(0.6, 1.0),
+            source=source,
+            protected_mask=protected_mask,
+            strength=strength,
+        )
+    finally:
+        if pipeline.low_vram:
+            model.cpu()
+
+
+def _decode_sparse_coords(pipeline, latent, target_resolution: int = 32):
+    import torch
+
     decoder = pipeline.models["sparse_structure_decoder"]
     if pipeline.low_vram:
         decoder.to(pipeline.device)
-    decoded = decoder(latent) > 0
-    if pipeline.low_vram:
-        decoder.cpu()
-    if decoded.shape[2] != 32:
-        ratio = decoded.shape[2] // 32
+    try:
+        decoded = decoder(latent) > 0
+    finally:
+        if pipeline.low_vram:
+            decoder.cpu()
+    if decoded.shape[2] != target_resolution:
+        ratio = decoded.shape[2] // target_resolution
         decoded = torch.nn.functional.max_pool3d(
             decoded.float(), ratio, ratio, 0
         ) > 0.5
-    return torch.argwhere(decoded)[:, [0, 2, 3, 4]].int()
+    return torch.argwhere(decoded)[:, [0, 2, 3, 4]].int().contiguous()
 
 
-def _sample_shape(pipeline, conditions, schedule, model, coords, stage: str):
+def _sample_sparse(
+    pipeline, conditions, schedule, *, guidance_strength: float = 1.0
+):
+    latent = _sample_sparse_latent(
+        pipeline,
+        conditions,
+        schedule,
+        guidance_strength=guidance_strength,
+    )
+    return _decode_sparse_coords(pipeline, latent, 32)
+
+
+def _sample_shape(
+    pipeline,
+    conditions,
+    schedule,
+    model,
+    coords,
+    stage: str,
+    *,
+    guidance_strength: float = 1.0,
+    source=None,
+    protected_mask=None,
+    strength: float = 1.0,
+):
     import torch
     from trellis2.modules.sparse import SparseTensor
 
@@ -113,29 +192,68 @@ def _sample_shape(pipeline, conditions, schedule, model, coords, stage: str):
         ),
         coords=coords,
     )
-    if pipeline.low_vram:
-        model.to(pipeline.device)
-    latent = _alternating_sample(
-        pipeline.shape_slat_sampler,
-        model,
-        noise,
-        conditions,
-        schedule,
-        stage=stage,
-        rescale_t=3.0,
-        guidance_strength=7.5,
-        guidance_rescale=0.5,
-        guidance_interval=(0.6, 1.0),
-    )
-    if pipeline.low_vram:
-        model.cpu()
     std = torch.tensor(
-        pipeline.shape_slat_normalization["std"], device=latent.device
+        pipeline.shape_slat_normalization["std"], device=noise.device
     )[None]
     mean = torch.tensor(
-        pipeline.shape_slat_normalization["mean"], device=latent.device
+        pipeline.shape_slat_normalization["mean"], device=noise.device
     )[None]
+    normalized_source = None
+    if source is not None:
+        if not torch.equal(source.coords, coords):
+            raise ValueError("source Shape-SLat coordinates do not match stage")
+        normalized_source = (source - mean) / std
+    if pipeline.low_vram:
+        model.to(pipeline.device)
+    try:
+        latent = _alternating_sample(
+            pipeline.shape_slat_sampler,
+            model,
+            noise,
+            conditions,
+            schedule,
+            stage=stage,
+            rescale_t=3.0,
+            guidance_strength=guidance_strength,
+            guidance_rescale=0.5,
+            guidance_interval=(0.6, 1.0),
+            source=normalized_source,
+            protected_mask=protected_mask,
+            strength=strength,
+        )
+    finally:
+        if pipeline.low_vram:
+            model.cpu()
     return latent * std + mean
+
+
+def _quantize_high_coords(
+    high_coords,
+    requested_resolution: int,
+    *,
+    max_num_tokens: int = 49_152,
+):
+    """Apply the Main pipeline's adaptive high-resolution token budget."""
+    import torch
+
+    actual_resolution = int(requested_resolution)
+    while True:
+        grid_resolution = actual_resolution // 16
+        quantized = torch.cat(
+            (
+                high_coords[:, :1],
+                (
+                    (high_coords[:, 1:] + 0.5)
+                    / 512
+                    * grid_resolution
+                ).int(),
+            ),
+            dim=1,
+        )
+        unique_coords = quantized.unique(dim=0).contiguous()
+        if len(unique_coords) < max_num_tokens or actual_resolution == 1024:
+            return unique_coords, actual_resolution
+        actual_resolution -= 128
 
 
 def _cache_decoded_meshes(meshes, path: Path) -> dict[str, int]:
@@ -270,22 +388,10 @@ def main() -> int:
         decoder.low_vram = False
 
     requested_resolution = int(request["resolution"])
-    actual_resolution = requested_resolution
-    max_num_tokens = 49_152
-    while True:
-        grid_resolution = actual_resolution // 16
-        quantized = torch.cat(
-            (
-                high_coords[:, :1],
-                ((high_coords[:, 1:] + 0.5) / 512 * grid_resolution).int(),
-            ),
-            dim=1,
-        )
-        unique_coords = quantized.unique(dim=0)
-        if len(unique_coords) < max_num_tokens or actual_resolution == 1024:
-            break
-        actual_resolution -= 128
-    del conditions_512, coords, high_coords, quantized
+    unique_coords, actual_resolution = _quantize_high_coords(
+        high_coords, requested_resolution
+    )
+    del conditions_512, coords, high_coords
     torch.cuda.empty_cache()
 
     _emit(f"[condition-1024] {len(prepared)} view(s)")

@@ -197,8 +197,9 @@ class TrellisShapeGenerator:
         cancel: threading.Event,
         on_progress: Callable[[str], None] | None,
         operation: str = "shape generation",
+        log_name: str = "worker.log",
     ) -> Path:
-        worker_log_path = result_path.parent / "worker.log"
+        worker_log_path = result_path.parent / log_name
         worker_log_path.parent.mkdir(parents=True, exist_ok=True)
         process = subprocess.Popen(
             command,

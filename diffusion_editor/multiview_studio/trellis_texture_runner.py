@@ -23,6 +23,74 @@ def _save_sparse(path: Path, value) -> None:
     )
 
 
+def _load_sparse(path: Path, sparse, torch, np):
+    with np.load(path, allow_pickle=False) as saved:
+        coords = torch.from_numpy(saved["coords"].copy()).int()
+        feats = torch.from_numpy(saved["feats"].copy()).float()
+    return sparse.SparseTensor(feats, coords).cuda()
+
+
+def _shape_guide_subs(shape_slat, levels: int, sparse, torch):
+    """Recover decoder subdivision guides from the shape encoder hierarchy."""
+    guides = []
+    coords = shape_slat.coords
+    scale = tuple(shape_slat._scale)
+    cache_root = shape_slat._spatial_cache
+    for _index in range(levels):
+        cache = cache_root.get(str(scale), {}).get("channel2spatial_2")
+        if cache is None:
+            raise RuntimeError(
+                f"shape SLat is missing channel2spatial_2 cache at scale {scale}"
+            )
+        next_coords, parent_indexes, child_indexes = cache
+        children = torch.zeros(
+            (len(coords), 8),
+            dtype=torch.bool,
+            device=coords.device,
+        )
+        children[parent_indexes, child_indexes] = True
+        guides.append(sparse.SparseTensor(children, coords))
+        coords = next_coords
+        scale = tuple(value / 2 for value in scale)
+    return tuple(guides)
+
+
+def _save_guide_subs(path: Path, guides) -> None:
+    import numpy as np
+
+    payload = {"count": np.asarray([len(guides)], dtype=np.int32)}
+    for index, guide in enumerate(guides):
+        payload[f"coords_{index}"] = guide.coords.detach().cpu().numpy()
+        payload[f"feats_{index}"] = guide.feats.detach().cpu().numpy()
+    np.savez_compressed(path, **payload)
+
+
+def _load_guide_subs(path: Path, sparse, torch, np):
+    guides = []
+    with np.load(path, allow_pickle=False) as saved:
+        count = int(saved["count"][0])
+        for index in range(count):
+            coords = torch.from_numpy(saved[f"coords_{index}"].copy()).int()
+            feats = torch.from_numpy(saved[f"feats_{index}"].copy()).bool()
+            guides.append(sparse.SparseTensor(feats, coords).cuda())
+    return tuple(guides)
+
+
+def _texture_model_names(
+    resolution: int,
+    *,
+    shape_cached: bool,
+    guides_cached: bool,
+    texture_cached: bool,
+) -> tuple[str, ...]:
+    names = ["tex_slat_decoder"]
+    if not shape_cached or not guides_cached:
+        names.append("shape_slat_encoder")
+    if not texture_cached:
+        names.append(f"tex_slat_flow_model_{resolution}")
+    return tuple(names)
+
+
 def _sample_texture(pipeline, conditions, schedule, shape_slat, *, seed: int):
     import numpy as np
     import torch
@@ -317,6 +385,8 @@ def main() -> int:
     sys.path.insert(0, str(trellis_root))
     os.environ.setdefault("ATTN_BACKEND", "sdpa")
     os.environ.setdefault("SPARSE_ATTN_BACKEND", "xformers")
+    os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
     import numpy as np
     import trimesh
@@ -329,6 +399,7 @@ def main() -> int:
         )
     shape_path = output / "textured.glb"
     shape_slat_path = output / "encoded-shape-slat.npz"
+    shape_guides_path = output / "shape-guide-subs.npz"
     texture_slat_path = output / "texture-slat.npz"
     if all(
         path.is_file()
@@ -351,10 +422,30 @@ def main() -> int:
 
     import torch
     from PIL import Image
+    from trellis2.modules import sparse
     from trellis2.pipelines import Trellis2TexturingPipeline
+    from trellis_refine_runner import (
+        DECODER_ACTIVATION_CHUNK_BYTES,
+        _enable_chunked_decoder,
+        _enable_chunked_encoder_mlp,
+    )
 
     torch.set_grad_enabled(False)
-    _emit("[load] TRELLIS.2 dedicated texturing pipeline")
+    resolution = int(request["resolution"])
+    shape_cached = shape_slat_path.is_file()
+    guides_cached = shape_guides_path.is_file()
+    texture_cached = texture_slat_path.is_file()
+    model_names = _texture_model_names(
+        resolution,
+        shape_cached=shape_cached,
+        guides_cached=guides_cached,
+        texture_cached=texture_cached,
+    )
+    _emit(
+        "[load] minimal TRELLIS.2 texturing pipeline: "
+        + ", ".join(model_names)
+    )
+    Trellis2TexturingPipeline.model_names_to_load = list(model_names)
     pipeline = Trellis2TexturingPipeline.from_pretrained(
         str(model_path),
         config_file="texturing_pipeline.json",
@@ -371,52 +462,93 @@ def main() -> int:
     prepared_mesh = pipeline.preprocess_mesh(source_mesh)
     prepared_mesh.export(output / "geometry-normalized.glb")
 
-    resolution = int(request["resolution"])
-    _emit(f"[shape-encode] current mesh at resolution {resolution}")
-    shape_slat = pipeline.encode_shape_slat(prepared_mesh, resolution)
-    _save_sparse(output / "encoded-shape-slat.npz", shape_slat)
+    decoder = pipeline.models["tex_slat_decoder"]
+    guide_levels = len(decoder.blocks) - 1
+    if shape_cached and guides_cached:
+        _emit("[resume] encoded Shape-SLat and subdivision guides found")
+        shape_slat = _load_sparse(shape_slat_path, sparse, torch, np)
+        guide_subs = _load_guide_subs(shape_guides_path, sparse, torch, np)
+    else:
+        if shape_cached:
+            _emit(
+                "[resume] legacy Shape-SLat cache has no subdivision guides; "
+                "rebuilding shape hierarchy once"
+            )
+        encoder = pipeline.models["shape_slat_encoder"]
+        chunked_blocks = _enable_chunked_encoder_mlp(encoder, torch)
+        _emit(
+            f"[low-vram] chunked {chunked_blocks} Shape VAE encoder MLP "
+            "blocks"
+        )
+        _emit(f"[shape-encode] current mesh at resolution {resolution}")
+        shape_slat = pipeline.encode_shape_slat(prepared_mesh, resolution)
+        guide_subs = _shape_guide_subs(
+            shape_slat, guide_levels, sparse, torch
+        )
+        _save_sparse(shape_slat_path, shape_slat)
+        _save_guide_subs(shape_guides_path, guide_subs)
+        torch.cuda.empty_cache()
 
-    prepared_images = {}
-    for view_id in dict.fromkeys(schedule):
-        spec = view_specs[view_id]
-        image_path = Path(spec["image"]).expanduser().resolve()
-        if not image_path.is_file():
-            raise FileNotFoundError(image_path)
-        with Image.open(image_path) as opened:
-            source_image = opened.convert("RGB")
-            crop_bounds = spec.get("bounds")
-            if crop_bounds is not None:
-                x0, y0, x1, y1 = map(float, crop_bounds)
-                width, height = source_image.size
-                source_image = source_image.crop((
-                    round(x0 * width),
-                    round(y0 * height),
-                    round(x1 * width),
-                    round(y1 * height),
-                ))
-                source_image.save(output / f"patch-{view_id}.png")
-            image = pipeline.preprocess_image(source_image)
-        image.save(output / f"prepared-{view_id}.png")
-        prepared_images[view_id] = image
+    if texture_cached:
+        _emit("[resume] texture SLat cache found; skipping conditioning/sampling")
+        texture_slat = _load_sparse(texture_slat_path, sparse, torch, np)
+    else:
+        prepared_images = {}
+        for view_id in dict.fromkeys(schedule):
+            spec = view_specs[view_id]
+            image_path = Path(spec["image"]).expanduser().resolve()
+            if not image_path.is_file():
+                raise FileNotFoundError(image_path)
+            with Image.open(image_path) as opened:
+                source_image = opened.convert("RGB")
+                crop_bounds = spec.get("bounds")
+                if crop_bounds is not None:
+                    x0, y0, x1, y1 = map(float, crop_bounds)
+                    width, height = source_image.size
+                    source_image = source_image.crop((
+                        round(x0 * width),
+                        round(y0 * height),
+                        round(x1 * width),
+                        round(y1 * height),
+                    ))
+                    source_image.save(output / f"patch-{view_id}.png")
+                image = pipeline.preprocess_image(source_image)
+            image.save(output / f"prepared-{view_id}.png")
+            prepared_images[view_id] = image
 
-    _emit(f"[condition-{resolution}] {len(prepared_images)} view(s)")
-    conditions = {
-        view_id: pipeline.get_cond([image], resolution)
-        for view_id, image in prepared_images.items()
-    }
-    texture_slat = _sample_texture(
-        pipeline,
-        conditions,
-        schedule,
-        shape_slat,
-        seed=int(request["seed"]),
-    )
-    _save_sparse(output / "texture-slat.npz", texture_slat)
-    del conditions
+        _emit(f"[condition-{resolution}] {len(prepared_images)} view(s)")
+        conditions = {
+            view_id: pipeline.get_cond([image], resolution)
+            for view_id, image in prepared_images.items()
+        }
+        texture_slat = _sample_texture(
+            pipeline,
+            conditions,
+            schedule,
+            shape_slat,
+            seed=int(request["seed"]),
+        )
+        _save_sparse(texture_slat_path, texture_slat)
+        del conditions, prepared_images
+
+    del shape_slat
     torch.cuda.empty_cache()
 
     _emit("[decode] sparse PBR attribute volume")
-    pbr_voxel = pipeline.decode_tex_slat(texture_slat)
+    decoder_mlps, decoder_upsamples = _enable_chunked_decoder(decoder, torch)
+    _emit(
+        f"[low-vram] chunked texture decoder: {decoder_mlps} MLP, "
+        f"{decoder_upsamples} upsample blocks; activation budget "
+        f"{DECODER_ACTIVATION_CHUNK_BYTES // (1024 * 1024)} MiB"
+    )
+    decoder.to(pipeline.device)
+    try:
+        pbr_voxel = decoder(texture_slat, guide_subs=guide_subs)
+        pbr_voxel.feats.mul_(0.5).add_(0.5)
+    finally:
+        decoder.cpu()
+    del texture_slat, guide_subs
+    torch.cuda.empty_cache()
     _emit(f"[bake] {int(request['texture_size'])}px PBR atlas")
     textured = _bake_pbr_preserving_faces(
         prepared_mesh,

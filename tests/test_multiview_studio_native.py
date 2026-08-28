@@ -19,9 +19,11 @@ from termin.gui_native import (
 )
 
 from diffusion_editor.multiview_studio.model import (
+    MeshPostprocessSettings,
     MultiviewProject,
     RefineCube,
     RefineShapeResult,
+    RefineShapeSettings,
     RefineViewPatch,
     ViewKey,
 )
@@ -166,6 +168,7 @@ def test_native_multiview_view_builds_compact_navigator_and_workspace():
         )
         assert not view.show_mask_button.widget.enabled
         assert not view.paint_mask_button.widget.enabled
+        assert not view.clear_mask_button.widget.enabled
         assert not view.stop_refine_button.widget.enabled
         assert tuple(view.refine_cube_controls) == ("x", "y", "z", "side")
         assert all(not row.visible for row in view.refine_cube_value_rows)
@@ -267,6 +270,12 @@ def test_selected_refine_region_switches_left_panel_and_marks_view_patch(
         MultiviewProject().with_slot(key, image_path=str(image)),
         refine_cube=region,
         refine_regions=(region,),
+        refine_shape_settings=(RefineShapeSettings(
+            postprocess=MeshPostprocessSettings(
+                remesh=False,
+                fill_hole_perimeter=0.0125,
+            )
+        ),),
         refine_view_patches=((RefineViewPatch(
             key, (0.2, 0.1, 0.8, 0.9)
         ),),),
@@ -292,6 +301,13 @@ def test_selected_refine_region_switches_left_panel_and_marks_view_patch(
         ).subtitle.endswith("patch 60×80%")
         assert view.refine_patch_controls["x"].value == 20.0
         assert view.refine_patch_controls["height"].value == 80.0
+        assert view.refine_shape_controls["warmup_steps"].value == 15.0
+        assert not view.refine_postprocess_controls["remesh"].checked
+        assert view.refine_postprocess_controls["cleanup"].checked
+        assert abs(
+            view.refine_postprocess_controls["fill_hole_perimeter"].value
+            - 0.0125
+        ) < 1e-6
 
         view.set_busy(True)
         assert view.stop_refine_button.widget.enabled
@@ -532,6 +548,7 @@ def test_mask_buttons_keep_state_when_shading_changes():
 
         assert view.show_mask_button.widget.enabled
         assert view.paint_mask_button.widget.enabled
+        assert view.clear_mask_button.widget.enabled
         assert view._model_mask_visible
         assert not view._model_mask_painting
     finally:

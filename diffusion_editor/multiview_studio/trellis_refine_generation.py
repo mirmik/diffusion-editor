@@ -10,7 +10,7 @@ from typing import Callable
 
 import numpy as np
 
-from .model import MultiviewProject, RefineShapeResult
+from .model import MultiviewProject, RefineShapeResult, ViewKey
 from .trellis_generation import (
     DEFAULT_MODEL_PATH,
     DEFAULT_TRELLIS_PYTHON,
@@ -57,14 +57,19 @@ class TrellisRegionRefineGenerator(TrellisShapeGenerator):
         weights = np.ascontiguousarray(weights, dtype=np.float32)
         if not len(vertices) or not len(faces):
             raise ValueError("selected refine region contains no triangles")
-        if len(weights) != len(vertices) or not np.any(weights > 1e-6):
-            raise ValueError("selected refine region has an empty vertex mask")
+        if len(weights) != len(vertices):
+            raise ValueError(
+                "selected refine region protection weights do not match vertices"
+            )
 
+        shape_key = self.shape_refine_key(
+            project, region_index, region_geometry
+        )
         key = self.refine_key(project, region_index, region_geometry)
         output = (
             project_path.parent
             / "refine-runs"
-            / f"region-{region_index + 1}-{key[:16]}"
+            / f"region-{region_index + 1}-{shape_key[:16]}"
         )
         output.mkdir(parents=True, exist_ok=True)
         result_path = output / "result.json"
@@ -81,11 +86,13 @@ class TrellisRegionRefineGenerator(TrellisShapeGenerator):
             weights=weights,
         )
         settings = project.region_refine_settings(region_index)
+        postprocess = _region_postprocess_payload(project, settings)
         region = project.refine_regions[region_index]
         patches = project.view_patches(region_index)
-        schedule = tuple(
-            patches[index % len(patches)].key.stable_id
-            for index in range(settings.steps)
+        schedule = _refine_view_schedule(
+            patches,
+            settings.steps,
+            settings.warmup_steps,
         )
         request = {
             "protocol": 1,
@@ -104,6 +111,9 @@ class TrellisRegionRefineGenerator(TrellisShapeGenerator):
             ],
             "schedule": list(schedule),
             **settings.to_dict(),
+            "postprocess": postprocess,
+            "postprocess_resolution": settings.resolution,
+            "shape_request_key": shape_key,
             "request_key": key,
             "trellis_root": str(self._trellis_root.resolve()),
             "model_path": str(self._model_path.resolve()),
@@ -113,14 +123,28 @@ class TrellisRegionRefineGenerator(TrellisShapeGenerator):
         request_path.write_text(
             json.dumps(request, indent=2) + "\n", encoding="utf-8"
         )
+        stage_result_path = output / "shape-stage-result.json"
         runner = Path(__file__).with_name("trellis_refine_runner.py")
         self._progress(on_progress, "Starting isolated TRELLIS.2 region refine")
         self._run_worker(
             [str(self._python), str(runner), str(request_path)],
+            result_path=stage_result_path,
+            cancel=cancel,
+            on_progress=on_progress,
+            operation="region shape refine",
+            log_name="shape-worker.log",
+        )
+        postprocess_runner = Path(__file__).with_name(
+            "trellis_refine_postprocess_runner.py"
+        )
+        self._progress(on_progress, "Starting refined region mesh postprocess")
+        self._run_worker(
+            [str(self._python), str(postprocess_runner), str(request_path)],
             result_path=result_path,
             cancel=cancel,
             on_progress=on_progress,
-            operation="region refine",
+            operation="region mesh postprocess",
+            log_name="postprocess-worker.log",
         )
         result = _cached_result(result_path, key)
         if result is None:
@@ -133,6 +157,28 @@ class TrellisRegionRefineGenerator(TrellisShapeGenerator):
         region_index: int,
         region_geometry: tuple[np.ndarray, np.ndarray, np.ndarray],
     ) -> str:
+        settings = project.region_refine_settings(region_index)
+        payload = {
+            "pipeline": (
+                "isolated-region-main-shape-cascade-"
+                "postprocess-v6-protected-inpaint"
+            ),
+            "shape_request_key": self.shape_refine_key(
+                project, region_index, region_geometry
+            ),
+            "postprocess": _region_postprocess_payload(project, settings),
+            "postprocess_resolution": settings.resolution,
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    def shape_refine_key(
+        self,
+        project: MultiviewProject,
+        region_index: int,
+        region_geometry: tuple[np.ndarray, np.ndarray, np.ndarray],
+    ) -> str:
+        """Legacy-compatible neural-stage key, independent of mesh repair."""
         arrays = []
         for value in region_geometry:
             array = np.ascontiguousarray(value)
@@ -142,7 +188,10 @@ class TrellisRegionRefineGenerator(TrellisShapeGenerator):
             )
         patches = project.view_patches(region_index)
         payload = {
-            "pipeline": "isolated-region-shape-slat-repaint-v1",
+            "pipeline": (
+                "isolated-region-main-shape-cascade-"
+                "inpaint-v7-coarse-strength-full-detail"
+            ),
             "geometry_fingerprint": project.refine_regions[
                 region_index
             ].geometry_fingerprint,
@@ -156,11 +205,52 @@ class TrellisRegionRefineGenerator(TrellisShapeGenerator):
                 }
                 for patch in patches
             ],
-            "settings": project.region_refine_settings(region_index).to_dict(),
+            "settings": project.region_refine_settings(
+                region_index
+            ).neural_dict(),
             "model_path": str(self._model_path.resolve()),
         }
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _refine_view_schedule(
+    patches, steps: int, warmup_steps: int
+) -> tuple[str, ...]:
+    """Use the Main pipeline's front warmup before cycling manual patches."""
+    if not patches:
+        raise ValueError("cannot build a refine schedule without view patches")
+    if not 0 <= warmup_steps <= steps:
+        raise ValueError("refine warmup must be between zero and refine steps")
+    front = ViewKey("eye", 0)
+    if warmup_steps and not any(patch.key == front for patch in patches):
+        raise ValueError("front warmup requires an eye-000 patch")
+    return tuple(
+        front.stable_id
+        if index < warmup_steps
+        else patches[(index - warmup_steps) % len(patches)].key.stable_id
+        for index in range(steps)
+    )
+
+
+def _region_postprocess_payload(project, settings) -> dict[str, object]:
+    """Return this region's independent shared-pipeline configuration."""
+    postprocess = settings.postprocess
+    return {
+        "fill_holes": postprocess.fill_holes,
+        "fill_hole_perimeter": postprocess.fill_hole_perimeter,
+        "remesh": postprocess.remesh,
+        "remesh_band": 1.0,
+        "remesh_project": 0.0,
+        "simplify": postprocess.simplify,
+        "decimation_target": int(settings.preview_face_target),
+        "cleanup": postprocess.cleanup,
+        "final_repair": postprocess.final_repair,
+        "remove_isolated_double_faces": (
+            postprocess.remove_isolated_double_faces
+        ),
+        "remove_degenerate_faces": postprocess.remove_degenerate_faces,
+    }
 
 
 def _cached_result(result_path: Path, key: str) -> RefineShapeResult | None:

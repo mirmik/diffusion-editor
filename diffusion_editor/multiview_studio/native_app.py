@@ -216,6 +216,15 @@ class NativeMultiviewStudioApplication:
             )
         )
 
+    def set_refine_postprocess(
+        self, region_index: int, field: str, value: bool | float
+    ) -> None:
+        self._safe(
+            lambda: self.controller.set_refine_postprocess(
+                region_index, field, value
+            )
+        )
+
     def set_mesh_postprocess(self, field: str, value: bool | float) -> None:
         self._safe(lambda: self.controller.set_mesh_postprocess(field, value))
 
@@ -338,7 +347,7 @@ class NativeMultiviewStudioApplication:
     def toggle_refine_mask_visible(self) -> None:
         if self._displayed_mesh_index == 0:
             self.view.set_status(
-                "Double-click a refine region before showing its mask"
+                "Double-click a refine region before showing its protection"
             )
             return
         self._refine_mask_visible = not self._refine_mask_visible
@@ -347,21 +356,38 @@ class NativeMultiviewStudioApplication:
     def toggle_refine_mask_painting(self) -> None:
         if self._displayed_mesh_index == 0:
             self.view.set_status(
-                "Double-click a refine region before painting its mask"
+                "Double-click a refine region before painting its protection"
             )
             return
         self._refine_mask_painting = not self._refine_mask_painting
         if self._refine_mask_painting:
             self._refine_mask_visible = True
             self.view.set_status(
-                "Mask brush: drag to paint through the mesh; Shift+drag erases; "
-                "wheel changes radius"
+                "Protection brush: red geometry stays unchanged; drag paints "
+                "through the mesh; Shift+drag unlocks; wheel changes radius"
             )
         else:
             self.view.set_status(
-                "Mask painting off; orbit controls are active and mask stays visible"
+                "Protection painting off; orbit controls are active and "
+                "protection stays visible"
             )
         self._apply_refine_mask_controls()
+
+    def clear_refine_protection(self) -> None:
+        index = self._displayed_mesh_index - 1
+        if index < 0 or index >= len(self.controller.project.refine_regions):
+            self.view.set_status(
+                "Double-click a refine region before clearing protection"
+            )
+            return
+        self.controller.set_refine_mask_weights(index, ())
+        protection = self.controller.project.refine_mask(index)
+        self._set_viewport_refine_mask(protection)
+        self._refine_mask_visible = True
+        self._apply_refine_mask_controls()
+        self.view.set_status(
+            f"Refine region {index + 1} protection cleared; all latents editable"
+        )
 
     def _apply_refine_mask_controls(self) -> None:
         available = self._displayed_mesh_index > 0
@@ -400,7 +426,8 @@ class NativeMultiviewStudioApplication:
         self.controller.set_refine_mask_weights(index, mesh_vertex_weights)
         vertex_count = sum(len(weights) for weights in mesh_vertex_weights)
         self.view.set_status(
-            f"Refine region {index + 1} mask · {vertex_count:,} weighted vertices"
+            f"Refine region {index + 1} protection · "
+            f"{vertex_count:,} weighted vertices"
         )
 
     def _set_viewport_refine_mask(self, refine_mask) -> None:
@@ -724,9 +751,6 @@ class NativeMultiviewStudioApplication:
         if not len(faces):
             self.view.set_status("The refine region contains no model surface")
             return
-        if not len(weights) or not bool((weights > 1e-6).any()):
-            self.view.set_status("The refine region mask is empty")
-            return
         project_path = self.controller.project_path
         generation_path = project_path or self._unsaved_project_path
         settings = snapshot.region_refine_settings(region_index)
@@ -735,7 +759,9 @@ class NativeMultiviewStudioApplication:
         self.view.apply_project(snapshot, project_path, self.controller.dirty)
         self.view.set_status(
             f"Encoding standalone region {region_index + 1} to Shape-SLat · "
-            f"{settings.steps} refine steps"
+            f"{settings.steps} refine steps · "
+            f"{settings.warmup_steps} front warmup / stage · "
+            f"structure strength {settings.strength:.2f} · full detail rebuild"
         )
         self._qwen.shutdown()
 

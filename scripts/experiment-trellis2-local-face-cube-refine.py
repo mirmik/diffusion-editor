@@ -49,7 +49,7 @@ def _arguments() -> argparse.Namespace:
             "1 starts from pure noise and 0 preserves the encoded geometry"
         ),
     )
-    parser.add_argument("--cfg", type=float, default=5.0)
+    parser.add_argument("--cfg", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=43)
     parser.add_argument("--preview-face-target", type=int, default=200_000)
     return parser.parse_args()
@@ -200,8 +200,6 @@ def _mesh_to_shape_slat(mesh, encoder, resolution, sp, torch, o_voxel):
 
 
 def _neck_mask(coords, freeze_fraction: float, feather_end: float):
-    import torch
-
     vertical = coords[:, 3].float()
     minimum = vertical.min()
     span = (vertical.max() - minimum).clamp(min=1.0)
@@ -329,7 +327,6 @@ def main() -> int:
     sys.path.insert(0, str(args.trellis2_root.resolve()))
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-    import numpy as np
     import o_voxel
     from PIL import Image
     import torch
