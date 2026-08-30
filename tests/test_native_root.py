@@ -490,6 +490,25 @@ def test_real_offscreen_canvas_renders_and_routes_image_space_paint(
         root.layer_tree_coordinator.handle_intent(LayerTreeIntent(
             LayerTreeAction.ATTACH_TOOL,
             layer_id=active_id,
+            value="text_to_image",
+        ))
+        assert (
+            application.layer_stack.active_layer.tool.tool_type
+            == "text_to_image"
+        )
+        assert (
+            root.generation_panels_coordinator.state.active_kind
+            == GenerationPanelKind.TEXT_TO_IMAGE
+        )
+        assert root.generation_panels.text_to_image_group.widget.visible
+        assert not root.generation_panels.mask_group.widget.visible
+        root.layer_tree_coordinator.handle_intent(LayerTreeIntent(
+            LayerTreeAction.DETACH_TOOL,
+            layer_id=active_id,
+        ))
+        root.layer_tree_coordinator.handle_intent(LayerTreeIntent(
+            LayerTreeAction.ATTACH_TOOL,
+            layer_id=active_id,
             value="instruct",
         ))
         ai_edit_tool = application.layer_stack.active_layer.tool

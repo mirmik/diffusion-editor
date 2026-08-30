@@ -34,6 +34,7 @@ from ..generation.image_edit_profiles import (
     parse_float_list,
     parse_int_tuple,
 )
+from ..generation.text_to_image_profiles import text_to_image_profile
 
 
 _VPRED_HINTS = (
@@ -61,6 +62,15 @@ class RealMlBackend:
         self._instruct_dtype: str | None = None
         self._image_edit_profile_id: str | None = None
         self._image_edit_lora_adapters: tuple[dict[str, Any], ...] = ()
+        self._text_to_image_pipe = None
+        self._text_to_image_identity: ModelIdentity | None = None
+        self._text_to_image_warnings: tuple[str, ...] = ()
+        self._text_to_image_device: str | None = None
+        self._text_to_image_dtype: str | None = None
+        self._text_to_image_offload_mode: str | None = None
+        self._text_to_image_component_mode: str | None = None
+        self._text_to_image_profile_id: str | None = None
+        self._text_to_image_lora_adapters: tuple[dict[str, Any], ...] = ()
         self._dino_model = None
         self._dino_processor = None
         self._dino_key: tuple[str, str] | None = None
@@ -211,6 +221,20 @@ class RealMlBackend:
         self._instruct_dtype = None
         self._image_edit_profile_id = None
         self._image_edit_lora_adapters = ()
+        del pipe
+        self._release_accelerator_memory()
+
+    def unload_text_to_image(self) -> None:
+        pipe = self._text_to_image_pipe
+        self._text_to_image_pipe = None
+        self._text_to_image_identity = None
+        self._text_to_image_warnings = ()
+        self._text_to_image_device = None
+        self._text_to_image_dtype = None
+        self._text_to_image_offload_mode = None
+        self._text_to_image_component_mode = None
+        self._text_to_image_profile_id = None
+        self._text_to_image_lora_adapters = ()
         del pipe
         self._release_accelerator_memory()
 
@@ -599,6 +623,225 @@ class RealMlBackend:
             "model_identity": identity.to_dict(),
             "warnings": list(identity_warnings),
         }
+
+    def load_text_to_image(self, data: dict[str, Any]) -> dict[str, Any]:
+        from diffusers import QwenImagePipeline
+
+        profile_id = str(data["profile_id"])
+        profile = text_to_image_profile(profile_id)
+        parameters = profile.normalize(data.get("parameters"))
+        adapters = profile.normalize_lora_adapters(data.get("lora_adapters"))
+        device = self._device(str(parameters["device"]))
+        dtype = self._configured_dtype(str(parameters["dtype"]), device)
+        model = str(parameters["model"])
+        revision = str(parameters.get("revision", "")).strip() or None
+        if Path(model).expanduser().exists():
+            candidate = Path(model).expanduser().absolute()
+            model = str(candidate)
+            if candidate.is_file():
+                identity, warnings = resolve_local_model_identity(
+                    model, policy=ModelIdentityPolicy.WARN)
+            else:
+                identity = floating_model_identity(
+                    "local-directory", candidate.name,
+                    local_override=model)
+                warnings = enforce_model_identity_policy(
+                    identity, ModelIdentityPolicy.WARN.value)
+        else:
+            identity = floating_model_identity(
+                "huggingface", model, revision=revision)
+            warnings = enforce_model_identity_policy(
+                identity, ModelIdentityPolicy.WARN.value)
+
+        self.unload_text_to_image()
+        kwargs: dict[str, Any] = {
+            "torch_dtype": dtype,
+            "local_files_only": bool(parameters["local_files_only"]),
+        }
+        if revision is not None:
+            kwargs["revision"] = revision
+        transformer_path = str(
+            parameters.get("transformer_checkpoint", "")).strip()
+        text_encoder_path = str(
+            parameters.get("text_encoder_checkpoint", "")).strip()
+        if bool(transformer_path) != bool(text_encoder_path):
+            raise ValueError(
+                "Qwen Image scaled FP8 loading requires both Transformer "
+                "checkpoint and Text encoder checkpoint")
+        component_mode = "upstream-bfloat16"
+        if transformer_path:
+            transformer, text_encoder = self._load_qwen_fp8_components(
+                model,
+                transformer_path=transformer_path,
+                text_encoder_path=text_encoder_path,
+                revision=revision,
+                local_files_only=bool(parameters["local_files_only"]),
+            )
+            kwargs.update(
+                transformer=transformer,
+                text_encoder=text_encoder,
+            )
+            component_mode = "local-scaled-fp8"
+        pipe = QwenImagePipeline.from_pretrained(model, **kwargs)
+        active = tuple(
+            adapter for adapter in adapters
+            if adapter.enabled and adapter.source)
+        adapter_names: list[str] = []
+        adapter_weights: list[float] = []
+        for index, adapter in enumerate(active):
+            name = (
+                f"text_to_image_{index}_"
+                f"{adapter.stable_id.replace('-', '_')}")
+            pipe.load_lora_weights(
+                str(Path(adapter.source).expanduser()),
+                adapter_name=name)
+            self._cast_adapter_parameters(pipe.transformer, name, dtype)
+            adapter_names.append(name)
+            adapter_weights.append(adapter.weight)
+        if adapter_names:
+            pipe.set_adapters(
+                adapter_names, adapter_weights=adapter_weights)
+        if bool(parameters["vae_tiling"]):
+            pipe.vae.enable_tiling()
+        offload_mode = self._configure_text_to_image_memory(
+            pipe, str(parameters["offload_mode"]), device)
+
+        self._text_to_image_pipe = pipe
+        self._text_to_image_identity = identity
+        self._text_to_image_warnings = warnings
+        self._text_to_image_device = device
+        self._text_to_image_dtype = str(dtype).removeprefix("torch.")
+        self._text_to_image_offload_mode = offload_mode
+        self._text_to_image_component_mode = component_mode
+        self._text_to_image_profile_id = profile_id
+        self._text_to_image_lora_adapters = tuple(
+            adapter.to_dict() for adapter in adapters)
+        return {
+            "loaded": True,
+            "profile_id": profile_id,
+            "profile_title": profile.title,
+            "device": device,
+            "dtype": self._text_to_image_dtype,
+            "offload_mode": offload_mode,
+            "component_mode": component_mode,
+            "pipeline": type(pipe).__name__,
+            "active_lora_adapters": adapter_names,
+            "active_lora_weights": adapter_weights,
+            "model_identity": identity.to_dict(),
+            "warnings": list(warnings),
+        }
+
+    def text_to_image(
+            self, data: dict[str, Any]
+    ) -> tuple[Image.Image, int, dict[str, Any]]:
+        import torch
+
+        profile_id = str(data["profile_id"])
+        if (
+                self._text_to_image_pipe is None
+                or self._text_to_image_profile_id != profile_id):
+            raise RuntimeError(
+                f"Text-to-image profile is not loaded: {profile_id}")
+        profile = text_to_image_profile(profile_id)
+        parameters = profile.normalize(data.get("parameters"))
+        adapters = tuple(
+            adapter.to_dict()
+            for adapter in profile.normalize_lora_adapters(
+                data.get("lora_adapters")))
+        if adapters != self._text_to_image_lora_adapters:
+            raise RuntimeError(
+                "Text-to-image LoRA configuration is not loaded")
+        width = int(data["width"])
+        height = int(data["height"])
+        if width < 1 or height < 1:
+            raise ValueError("Text-to-image dimensions must be positive")
+        inference_width, inference_height = profile.inference_size(
+            width, height)
+        seed = self._resolve_seed(int(parameters["seed"]))
+        generator = torch.Generator(device="cpu").manual_seed(seed)
+        true_cfg_scale = float(parameters["true_cfg_scale"])
+        kwargs: dict[str, Any] = {
+            "prompt": str(parameters["prompt"]),
+            "true_cfg_scale": true_cfg_scale,
+            "num_inference_steps": int(parameters["steps"]),
+            "max_sequence_length": int(parameters["max_sequence_length"]),
+            "width": inference_width,
+            "height": inference_height,
+            "generator": generator,
+        }
+        if true_cfg_scale > 1.0:
+            kwargs["negative_prompt"] = str(parameters["negative_prompt"])
+        attention = str(parameters.get("attention_kwargs", "")).strip()
+        if attention:
+            parsed = json.loads(attention)
+            if not isinstance(parsed, dict):
+                raise ValueError("attention_kwargs must be a JSON object")
+            kwargs["attention_kwargs"] = parsed
+        result = self._text_to_image_pipe(**kwargs).images[0]
+        if result.size != (width, height):
+            result = result.resize((width, height), Image.Resampling.LANCZOS)
+        request = RequestProvenance.capture("text_to_image", {
+            "model_profile_id": profile_id,
+            "parameters": parameters,
+            "lora_adapters": list(adapters),
+            "width": width,
+            "height": height,
+        })
+        provenance = GenerationProvenance(
+            operation="text_to_image",
+            model=self._text_to_image_identity or floating_model_identity(
+                "huggingface", str(parameters["model"])),
+            request=request,
+            seed=seed,
+            width=result.width,
+            height=result.height,
+            runtime=FrozenJsonObject.capture({
+                "pipeline": type(self._text_to_image_pipe).__name__,
+                "model_profile_id": profile_id,
+                "inference_width": inference_width,
+                "inference_height": inference_height,
+                "device": self._text_to_image_device,
+                "dtype": self._text_to_image_dtype,
+                "offload_mode": self._text_to_image_offload_mode,
+                "component_mode": self._text_to_image_component_mode,
+                "torch_version": self._package_version("torch"),
+                "diffusers_version": self._package_version("diffusers"),
+                "transformers_version": self._package_version(
+                    "transformers"),
+            }),
+            warnings=self._text_to_image_warnings,
+        )
+        return result, seed, provenance.to_dict()
+
+    @staticmethod
+    def _configure_text_to_image_memory(
+            pipe, offload_mode: str, device: str) -> str:
+        """Apply the selected Qwen memory strategy and return its runtime mode."""
+
+        if device != "cuda":
+            pipe.to(device)
+            return "none"
+        if offload_mode == "group":
+            import torch
+
+            pipe.enable_group_offload(
+                onload_device=torch.device(device),
+                offload_device=torch.device("cpu"),
+                offload_type="block_level",
+                num_blocks_per_group=1,
+                use_stream=True,
+                low_cpu_mem_usage=True,
+            )
+        elif offload_mode == "model":
+            pipe.enable_model_cpu_offload()
+        elif offload_mode == "sequential":
+            pipe.enable_sequential_cpu_offload()
+        elif offload_mode == "none":
+            pipe.to(device)
+        else:
+            raise ValueError(
+                f"Unsupported text-to-image offload mode: {offload_mode}")
+        return offload_mode
 
     @staticmethod
     def _load_qwen_fp8_components(

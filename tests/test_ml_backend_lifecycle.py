@@ -13,6 +13,10 @@ from diffusion_editor.generation.image_edit_profiles import (
     SENSENOVA_U15_PROFILE_ID,
     image_edit_profile,
 )
+from diffusion_editor.generation.text_to_image_profiles import (
+    QWEN_IMAGE_2512_PROFILE_ID,
+    text_to_image_profile,
+)
 from diffusion_editor.workers.ml_backend import RealMlBackend
 
 
@@ -133,6 +137,215 @@ def test_failed_image_edit_reload_leaves_backend_unloaded(monkeypatch):
     assert backend._instruct_device is None
     assert backend._instruct_dtype is None
     assert backend._image_edit_profile_id is None
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        ("group", "group"),
+        ("model", "model"),
+        ("sequential", "sequential"),
+        ("none", "to:cuda"),
+    ],
+)
+def test_text_to_image_memory_modes(monkeypatch, mode, expected):
+    events: list[object] = []
+
+    class FakePipeline:
+        def enable_group_offload(self, **kwargs):
+            events.append(("group", kwargs))
+
+        def enable_model_cpu_offload(self):
+            events.append("model")
+
+        def enable_sequential_cpu_offload(self):
+            events.append("sequential")
+
+        def to(self, device):
+            events.append(f"to:{device}")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        SimpleNamespace(device=lambda value: f"device:{value}"),
+    )
+
+    effective = RealMlBackend._configure_text_to_image_memory(
+        FakePipeline(), mode, "cuda")
+
+    assert effective == mode
+    if mode == "group":
+        event, kwargs = events[0]
+        assert event == expected
+        assert kwargs == {
+            "onload_device": "device:cuda",
+            "offload_device": "device:cpu",
+            "offload_type": "block_level",
+            "num_blocks_per_group": 1,
+            "use_stream": True,
+            "low_cpu_mem_usage": True,
+        }
+    else:
+        assert events == [expected]
+
+
+def test_text_to_image_cpu_ignores_accelerator_offload_mode():
+    events: list[str] = []
+    pipe = SimpleNamespace(to=lambda device: events.append(device))
+
+    effective = RealMlBackend._configure_text_to_image_memory(
+        pipe, "group", "cpu")
+
+    assert effective == "none"
+    assert events == ["cpu"]
+
+
+def test_text_to_image_load_applies_scaled_fp8_component_offload(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeQwenPipeline(_FakePipeline):
+        transformer = object()
+
+        def enable_model_cpu_offload(self):
+            captured["model_offload"] = True
+
+        def load_lora_weights(self, path, *, adapter_name):
+            captured["loaded_lora"] = (path, adapter_name)
+
+        def set_adapters(self, names, *, adapter_weights):
+            captured["active_lora"] = (names, adapter_weights)
+
+    class PipelineFactory:
+        @classmethod
+        def from_pretrained(cls, model, **kwargs):
+            captured["model"] = model
+            captured["load_kwargs"] = kwargs
+            return FakeQwenPipeline()
+
+    backend = RealMlBackend()
+    monkeypatch.setattr(
+        backend, "_release_accelerator_memory", lambda: None)
+    monkeypatch.setattr(backend, "_device", lambda _requested: "cuda")
+    monkeypatch.setattr(
+        backend, "_configured_dtype",
+        lambda _name, _device: "bfloat16")
+    monkeypatch.setattr(
+        backend, "_cast_adapter_parameters",
+        lambda _model, name, dtype: captured.update(
+            cast_lora=(name, dtype)))
+    monkeypatch.setattr(
+        backend,
+        "_load_qwen_fp8_components",
+        lambda model, **kwargs: (
+            captured.update(fp8_model=model, fp8_kwargs=kwargs)
+            or ("fp8-transformer", "fp8-text-encoder")
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        SimpleNamespace(device=lambda value: f"device:{value}"),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "diffusers",
+        SimpleNamespace(QwenImagePipeline=PipelineFactory),
+    )
+    parameters = text_to_image_profile(
+        QWEN_IMAGE_2512_PROFILE_ID).defaults()
+    parameters.update({
+        "model": "fake/qwen-image",
+        "local_files_only": True,
+        "transformer_checkpoint": "/models/qwen-image-2512-fp8.safetensors",
+        "text_encoder_checkpoint": "/models/qwen-vl-fp8.safetensors",
+    })
+
+    loaded = backend.load_text_to_image({
+        "profile_id": QWEN_IMAGE_2512_PROFILE_ID,
+        "parameters": parameters,
+        "lora_adapters": [{
+            "stable_id": "lightning",
+            "label": "Lightning 4-step",
+            "source": "/models/qwen-image-lightning.safetensors",
+            "weight": 1.0,
+            "enabled": True,
+        }],
+    })
+
+    assert loaded["loaded"] is True
+    assert loaded["offload_mode"] == "model"
+    assert loaded["component_mode"] == "local-scaled-fp8"
+    assert captured["model"] == "fake/qwen-image"
+    assert captured["fp8_model"] == "fake/qwen-image"
+    assert captured["fp8_kwargs"] == {
+        "transformer_path": "/models/qwen-image-2512-fp8.safetensors",
+        "text_encoder_path": "/models/qwen-vl-fp8.safetensors",
+        "revision": None,
+        "local_files_only": True,
+    }
+    assert captured["load_kwargs"]["transformer"] == "fp8-transformer"
+    assert captured["load_kwargs"]["text_encoder"] == "fp8-text-encoder"
+    assert captured["loaded_lora"] == (
+        "/models/qwen-image-lightning.safetensors",
+        "text_to_image_0_lightning",
+    )
+    assert captured["cast_lora"] == (
+        "text_to_image_0_lightning", "bfloat16")
+    assert captured["active_lora"] == (
+        ["text_to_image_0_lightning"], [1.0])
+    assert loaded["active_lora_adapters"] == [
+        "text_to_image_0_lightning"]
+    assert captured["model_offload"] is True
+
+
+def test_text_to_image_omits_inactive_negative_prompt(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeGenerator:
+        def __init__(self, *, device):
+            captured["generator_device"] = device
+
+        def manual_seed(self, seed):
+            captured["seed"] = seed
+            return self
+
+    class FakeQwenPipeline:
+        def __call__(self, **kwargs):
+            captured["kwargs"] = kwargs
+            return SimpleNamespace(
+                images=[Image.new("RGB", (16, 16), "red")])
+
+    monkeypatch.setitem(
+        sys.modules, "torch", SimpleNamespace(Generator=FakeGenerator))
+    profile = text_to_image_profile(QWEN_IMAGE_2512_PROFILE_ID)
+    adapters = tuple(
+        adapter.to_dict() for adapter in profile.default_lora_adapters)
+    backend = RealMlBackend()
+    backend._text_to_image_pipe = FakeQwenPipeline()
+    backend._text_to_image_profile_id = QWEN_IMAGE_2512_PROFILE_ID
+    backend._text_to_image_lora_adapters = adapters
+    backend._text_to_image_device = "cpu"
+    backend._text_to_image_dtype = "bfloat16"
+    backend._text_to_image_offload_mode = "none"
+    backend._text_to_image_component_mode = "local-scaled-fp8"
+    parameters = profile.defaults()
+    parameters.update({
+        "prompt": "teapot",
+        "negative_prompt": "watermark",
+        "true_cfg_scale": 1.0,
+        "seed": 42,
+    })
+
+    backend.text_to_image({
+        "profile_id": QWEN_IMAGE_2512_PROFILE_ID,
+        "parameters": parameters,
+        "lora_adapters": adapters,
+        "width": 16,
+        "height": 16,
+    })
+
+    assert "negative_prompt" not in captured["kwargs"]
+    assert captured["kwargs"]["true_cfg_scale"] == 1.0
 
 
 @pytest.mark.parametrize(

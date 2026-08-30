@@ -203,8 +203,14 @@ class NativeLayerPanel:
         if is_reconstruction:
             subtitle = f"3D Reconstruction · {node.status}"
         else:
+            tool_labels = {
+                "text_to_image": "Text to Image",
+                "instruct": "AI Edit",
+                "diffusion": "Diffusion",
+                "lama": "LaMa",
+            }
             subtitle = (
-                f"{node.tool_type.capitalize()} tool"
+                f"{tool_labels.get(node.tool_type, node.tool_type)} tool"
                 if node.tool_type else ""
             )
         return CollectionItem(
@@ -267,6 +273,11 @@ class NativeLayerPanel:
         commands = [
             CommandData("rename", "Rename", enabled=node is not None),
             CommandData("separator.0", kind=CommandKind.Separator),
+            CommandData(
+                "attach.text_to_image",
+                "Attach Text to Image Tool",
+                enabled=accepts_tool and not has_tool,
+            ),
             CommandData(
                 "attach.diffusion",
                 "Attach Diffusion Tool",

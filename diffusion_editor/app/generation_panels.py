@@ -21,10 +21,16 @@ from ..document.commands import (
     SetImageEditReferenceCommand,
     UpdateDiffusionToolCommand,
     UpdateImageEditToolCommand,
+    UpdateTextToImageToolCommand,
 )
 from ..document.change_event import DocumentChangeEvent
 from ..document.layer import Layer
-from ..document.tool import DiffusionTool, InstructTool, LamaTool
+from ..document.tool import (
+    DiffusionTool,
+    InstructTool,
+    LamaTool,
+    TextToImageTool,
+)
 from .application import EditorApplication
 from .presentation import PanelUpdate
 from ..generation.image_edit_profiles import (
@@ -33,10 +39,17 @@ from ..generation.image_edit_profiles import (
     image_edit_profile,
     image_edit_profiles,
 )
+from ..generation.text_to_image_profiles import (
+    TextToImageLoraAdapter,
+    TextToImageParameter,
+    text_to_image_profile,
+    text_to_image_profiles,
+)
 
 
 class GenerationPanelKind(str, Enum):
     NONE = "none"
+    TEXT_TO_IMAGE = "text_to_image"
     DIFFUSION = "diffusion"
     LAMA = "lama"
     INSTRUCT = "instruct"
@@ -80,6 +93,12 @@ class GenerationAction(str, Enum):
     SELECT_IMAGE_EDIT_REFERENCE = "select_image_edit_reference"
     PICK_IMAGE_EDIT_REFERENCE = "pick_image_edit_reference"
     CLEAR_IMAGE_EDIT_REFERENCE = "clear_image_edit_reference"
+    SELECT_TEXT_TO_IMAGE_PROFILE = "select_text_to_image_profile"
+    SET_TEXT_TO_IMAGE_PARAMETER = "set_text_to_image_parameter"
+    ADD_TEXT_TO_IMAGE_LORA = "add_text_to_image_lora"
+    REMOVE_TEXT_TO_IMAGE_LORA = "remove_text_to_image_lora"
+    UPDATE_TEXT_TO_IMAGE_LORA = "update_text_to_image_lora"
+    MOVE_TEXT_TO_IMAGE_LORA = "move_text_to_image_lora"
     SET_MASK_SIZE = "set_mask_size"
     SET_MASK_HARDNESS = "set_mask_hardness"
     SET_MASK_FLOW = "set_mask_flow"
@@ -165,6 +184,23 @@ class InstructPanelState:
 
 
 @dataclass(frozen=True)
+class TextToImagePanelState:
+    phase: GenerationPhase = GenerationPhase.IDLE
+    message: str = "Not loaded"
+    layer_info: str = "No Text to Image layer selected"
+    output_size: str = ""
+    model_profile_id: str = "qwen-image-2512"
+    model_profiles: tuple[ReferenceChoice, ...] = ()
+    profile_description: str = ""
+    parameters: tuple[TextToImageParameter, ...] = ()
+    parameter_values: dict[str, object] | None = None
+    profile_parameters: dict[str, dict] | None = None
+    lora_adapters: tuple[TextToImageLoraAdapter, ...] = ()
+    profile_lora_adapters: dict[str, list[dict]] | None = None
+    lora_catalog: tuple[ReferenceChoice, ...] = ()
+
+
+@dataclass(frozen=True)
 class GenerationPanelsState:
     active_kind: GenerationPanelKind
     active_layer_id: str | None
@@ -174,6 +210,7 @@ class GenerationPanelsState:
     diffusion: DiffusionPanelState
     lama: LamaPanelState
     instruct: InstructPanelState
+    text_to_image: TextToImagePanelState
 
 
 class GenerationPanelsPresentation(Protocol):
@@ -210,6 +247,8 @@ class GenerationPanelsCoordinator:
             str, tuple[int, DiffusionPanelState]] = {}
         self._instruct_drafts: dict[
             str, tuple[int, InstructPanelState]] = {}
+        self._text_to_image_drafts: dict[
+            str, tuple[int, TextToImagePanelState]] = {}
         self._diffusion_phase = (
             GenerationPhase.READY
             if bool(getattr(application.engines.diffusion, "is_loaded", False))
@@ -233,6 +272,17 @@ class GenerationPanelsCoordinator:
         self._instruct_message = (
             "Loaded: instruct-pix2pix"
             if self._instruct_phase == GenerationPhase.READY
+            else "Not loaded"
+        )
+        self._text_to_image_phase = (
+            GenerationPhase.READY
+            if bool(getattr(
+                application.text_to_image_engine, "is_loaded", False))
+            else GenerationPhase.IDLE
+        )
+        self._text_to_image_message = (
+            "Model loaded"
+            if self._text_to_image_phase == GenerationPhase.READY
             else "Not loaded"
         )
         self._stack_subscription = self._stack.subscribe(self._on_stack_changed)
@@ -328,6 +378,29 @@ class GenerationPanelsCoordinator:
             elif update.state == "inference-error":
                 self._instruct_phase = GenerationPhase.ERROR
                 self._instruct_message = f"Error: {message[:80]}"
+        elif update.panel_id == "text_to_image":
+            if update.state == "model-loading":
+                self._text_to_image_phase = GenerationPhase.LOADING
+                self._text_to_image_message = "Loading..."
+            elif update.state == "model-error":
+                self._text_to_image_phase = GenerationPhase.ERROR
+                self._text_to_image_message = f"Error: {message[:80]}"
+            elif update.state == "model-loaded":
+                self._text_to_image_phase = GenerationPhase.READY
+                profile_id = str(update.payload.get("profile_id", ""))
+                self._text_to_image_message = (
+                    f"Loaded: {text_to_image_profile(profile_id).title}"
+                    if profile_id else "Model loaded")
+            elif update.state == "running":
+                self._text_to_image_phase = GenerationPhase.RUNNING
+                self._text_to_image_message = str(
+                    update.payload.get("status", "Running..."))
+            elif update.state == "result":
+                self._text_to_image_phase = GenerationPhase.RESULT
+                self._text_to_image_message = "Result applied"
+            elif update.state == "inference-error":
+                self._text_to_image_phase = GenerationPhase.ERROR
+                self._text_to_image_message = f"Error: {message[:80]}"
         self.refresh()
 
     def handle_intent(self, intent: GenerationIntent) -> None:
@@ -368,6 +441,14 @@ class GenerationPanelsCoordinator:
                 GenerationAction.UPDATE_IMAGE_EDIT_LORA,
                 GenerationAction.MOVE_IMAGE_EDIT_LORA}:
             self._edit_instruct(layer, action, value)
+        elif action in {
+                GenerationAction.SELECT_TEXT_TO_IMAGE_PROFILE,
+                GenerationAction.SET_TEXT_TO_IMAGE_PARAMETER,
+                GenerationAction.ADD_TEXT_TO_IMAGE_LORA,
+                GenerationAction.REMOVE_TEXT_TO_IMAGE_LORA,
+                GenerationAction.UPDATE_TEXT_TO_IMAGE_LORA,
+                GenerationAction.MOVE_TEXT_TO_IMAGE_LORA}:
+            self._edit_text_to_image(layer, action, value)
         elif action == GenerationAction.RANDOM_SEED:
             self._set_random_seed(layer)
         elif action == GenerationAction.LOAD_MODEL:
@@ -447,6 +528,7 @@ class GenerationPanelsCoordinator:
         self._reference_file_picker = None
         self._diffusion_drafts.clear()
         self._instruct_drafts.clear()
+        self._text_to_image_drafts.clear()
         self._stack_subscription.unsubscribe()
 
     def _build_state(self) -> GenerationPanelsState:
@@ -464,8 +546,15 @@ class GenerationPanelsCoordinator:
             for stable_id, draft in self._instruct_drafts.items()
             if stable_id in live_ids
         }
+        self._text_to_image_drafts = {
+            stable_id: draft
+            for stable_id, draft in self._text_to_image_drafts.items()
+            if stable_id in live_ids
+        }
         kind = GenerationPanelKind.NONE
-        if isinstance(tool, DiffusionTool):
+        if isinstance(tool, TextToImageTool):
+            kind = GenerationPanelKind.TEXT_TO_IMAGE
+        elif isinstance(tool, DiffusionTool):
             kind = GenerationPanelKind.DIFFUSION
         elif isinstance(tool, LamaTool):
             kind = GenerationPanelKind.LAMA
@@ -482,6 +571,7 @@ class GenerationPanelsCoordinator:
         )
         diffusion = self._diffusion_state(layer, tool)
         instruct = self._instruct_state(layer, tool)
+        text_to_image = self._text_to_image_state(layer, tool)
         lama = LamaPanelState(
             phase=self._lama_phase,
             message=self._lama_message,
@@ -498,7 +588,49 @@ class GenerationPanelsCoordinator:
             diffusion=diffusion,
             lama=lama,
             instruct=instruct,
+            text_to_image=text_to_image,
         )
+
+    def _text_to_image_state(
+            self, layer: Layer | None, tool) -> TextToImagePanelState:
+        profiles = tuple(
+            ReferenceChoice(profile.stable_id, profile.title)
+            for profile in text_to_image_profiles())
+        if layer is None or not isinstance(tool, TextToImageTool):
+            return TextToImagePanelState(
+                phase=self._text_to_image_phase,
+                message=self._text_to_image_message,
+                model_profiles=profiles,
+                lora_catalog=self._lora_catalog,
+            )
+        cached = self._text_to_image_drafts.get(layer.id)
+        if cached is None or cached[0] != id(tool):
+            profile = text_to_image_profile(tool.model_profile_id)
+            draft = TextToImagePanelState(
+                model_profile_id=profile.stable_id,
+                model_profiles=profiles,
+                profile_description=profile.description,
+                parameters=profile.parameters,
+                parameter_values=copy.deepcopy(tool.parameters),
+                profile_parameters=copy.deepcopy(tool.profile_parameters),
+                lora_adapters=tool.lora_adapters,
+                profile_lora_adapters=copy.deepcopy(
+                    tool.profile_lora_adapters),
+                lora_catalog=self._lora_catalog,
+            )
+        else:
+            draft = cached[1]
+        draft = replace(
+            draft,
+            phase=self._text_to_image_phase,
+            message=self._text_to_image_message,
+            layer_info=self._layer_info(layer, tool),
+            output_size=f"{layer.width} × {layer.height} px (layer size)",
+            model_profiles=profiles,
+            lora_catalog=self._lora_catalog,
+        )
+        self._text_to_image_drafts[layer.id] = (id(tool), draft)
+        return draft
 
     def _diffusion_state(
             self, layer: Layer | None, tool) -> DiffusionPanelState:
@@ -812,6 +944,118 @@ class GenerationPanelsCoordinator:
             )
         self._instruct_drafts[layer.id] = (id(layer.tool), state)
 
+    def _edit_text_to_image(
+            self, layer: Layer | None, action: GenerationAction, value) -> None:
+        if layer is None or not isinstance(layer.tool, TextToImageTool):
+            return
+        state = self._text_to_image_state(layer, layer.tool)
+        stores = copy.deepcopy(state.profile_parameters or {})
+        lora_stores = copy.deepcopy(state.profile_lora_adapters or {})
+        profile_id = state.model_profile_id
+        values = copy.deepcopy(state.parameter_values or {})
+        if action == GenerationAction.SELECT_TEXT_TO_IMAGE_PROFILE:
+            profile_id = str(value)
+            profile = text_to_image_profile(profile_id)
+            values = profile.normalize(stores.get(profile_id))
+            stores[profile_id] = values
+            adapters = profile.normalize_lora_adapters(
+                lora_stores.get(profile_id))
+            lora_stores[profile_id] = [
+                adapter.to_dict() for adapter in adapters]
+            state = replace(
+                state,
+                model_profile_id=profile_id,
+                profile_description=profile.description,
+                parameters=profile.parameters,
+                parameter_values=values,
+                profile_parameters=stores,
+                lora_adapters=adapters,
+                profile_lora_adapters=lora_stores,
+            )
+        elif action == GenerationAction.SET_TEXT_TO_IMAGE_PARAMETER:
+            if not isinstance(value, (tuple, list)) or len(value) != 2:
+                return
+            parameter_id, raw = str(value[0]), value[1]
+            parameter = text_to_image_profile(
+                profile_id).parameter(parameter_id)
+            values[parameter_id] = parameter.normalize(raw)
+            stores[profile_id] = values
+            state = replace(
+                state,
+                parameter_values=values,
+                profile_parameters=stores,
+            )
+        elif action in {
+                GenerationAction.ADD_TEXT_TO_IMAGE_LORA,
+                GenerationAction.REMOVE_TEXT_TO_IMAGE_LORA,
+                GenerationAction.UPDATE_TEXT_TO_IMAGE_LORA,
+                GenerationAction.MOVE_TEXT_TO_IMAGE_LORA}:
+            profile = text_to_image_profile(profile_id)
+            adapters = [
+                adapter.to_dict()
+                for adapter in profile.normalize_lora_adapters(
+                    lora_stores.get(profile_id))
+            ]
+            if action == GenerationAction.ADD_TEXT_TO_IMAGE_LORA:
+                adapters.append({
+                    "stable_id": f"custom-{uuid4().hex[:12]}",
+                    "label": f"LoRA {len(adapters) + 1}",
+                    "source": "",
+                    "weight": 1.0,
+                    "enabled": True,
+                })
+            elif action == GenerationAction.REMOVE_TEXT_TO_IMAGE_LORA:
+                adapter_id = str(value)
+                adapters = [
+                    adapter for adapter in adapters
+                    if adapter["stable_id"] != adapter_id
+                ]
+            elif action == GenerationAction.UPDATE_TEXT_TO_IMAGE_LORA:
+                if not isinstance(value, (tuple, list)) or len(value) != 3:
+                    return
+                adapter_id, field, raw = str(value[0]), str(value[1]), value[2]
+                if field not in {"label", "source", "weight", "enabled"}:
+                    return
+                for adapter in adapters:
+                    if adapter["stable_id"] != adapter_id:
+                        continue
+                    if field in {"label", "source"}:
+                        adapter[field] = str(raw)
+                        if (
+                                field == "source"
+                                and (
+                                    not str(adapter.get("label", "")).strip()
+                                    or str(adapter["label"]).startswith("LoRA ")
+                                )
+                                and str(raw).strip()):
+                            adapter["label"] = Path(str(raw)).stem
+                    elif field == "weight":
+                        adapter[field] = max(-4.0, min(float(raw), 4.0))
+                    else:
+                        adapter[field] = bool(raw)
+                    break
+            else:
+                if not isinstance(value, (tuple, list)) or len(value) != 2:
+                    return
+                adapter_id, delta = str(value[0]), int(value[1])
+                index = next((
+                    index for index, adapter in enumerate(adapters)
+                    if adapter["stable_id"] == adapter_id
+                ), -1)
+                destination = index + delta
+                if index >= 0 and 0 <= destination < len(adapters):
+                    adapters[index], adapters[destination] = (
+                        adapters[destination], adapters[index])
+            normalized_adapters = profile.normalize_lora_adapters(adapters)
+            lora_stores[profile_id] = [
+                adapter.to_dict() for adapter in normalized_adapters]
+            state = replace(
+                state,
+                lora_adapters=normalized_adapters,
+                profile_lora_adapters=lora_stores,
+            )
+        self._text_to_image_drafts[layer.id] = (id(layer.tool), state)
+
     def _set_random_seed(self, layer: Layer | None) -> None:
         if layer is None:
             return
@@ -829,6 +1073,18 @@ class GenerationPanelsCoordinator:
                 id(layer.tool), replace(
                     state,
                     seed_text=seed,
+                    parameter_values=values,
+                    profile_parameters=stores,
+                ))
+        elif isinstance(layer.tool, TextToImageTool):
+            state = self._text_to_image_state(layer, layer.tool)
+            stores = copy.deepcopy(state.profile_parameters or {})
+            values = copy.deepcopy(state.parameter_values or {})
+            values["seed"] = int(seed)
+            stores[state.model_profile_id] = values
+            self._text_to_image_drafts[layer.id] = (
+                id(layer.tool), replace(
+                    state,
                     parameter_values=values,
                     profile_parameters=stores,
                 ))
@@ -856,6 +1112,17 @@ class GenerationPanelsCoordinator:
             if event.model_loading:
                 self._instruct_phase = GenerationPhase.LOADING
                 self._instruct_message = event.status or "Loading..."
+            self._handle_immediate_status(event.status)
+        elif isinstance(getattr(layer, "tool", None), TextToImageTool):
+            draft = self._text_to_image_state(layer, layer.tool)
+            event = self._application.text_to_image_controller.submit_load_model(
+                draft.model_profile_id,
+                dict(draft.parameter_values or {}),
+                draft.lora_adapters,
+            )
+            if event.model_loading:
+                self._text_to_image_phase = GenerationPhase.LOADING
+                self._text_to_image_message = event.status or "Loading..."
             self._handle_immediate_status(event.status)
 
     def _run(self, layer: Layer | None) -> None:
@@ -943,6 +1210,33 @@ class GenerationPanelsCoordinator:
                 self._instruct_phase = GenerationPhase.RUNNING
             if event.status:
                 self._instruct_message = event.status
+                self._handle_immediate_status(event.status)
+        elif isinstance(layer.tool, TextToImageTool):
+            draft = self._text_to_image_state(layer, layer.tool)
+            stores = copy.deepcopy(draft.profile_parameters or {})
+            values = copy.deepcopy(draft.parameter_values or {})
+            seed = self._parse_seed(str(values.get("seed", -1)))
+            if seed < 0:
+                seed = self._random_seed()
+            values["seed"] = seed
+            stores[draft.model_profile_id] = values
+            self._document.execute(UpdateTextToImageToolCommand(
+                layer=layer,
+                model_profile_id=draft.model_profile_id,
+                profile_parameters=stores,
+                profile_lora_adapters=copy.deepcopy(
+                    draft.profile_lora_adapters or {}),
+            ))
+            current = self._stack.find_layer_by_id(layer.id)
+            if current is None:
+                return
+            event = self._application.text_to_image_controller.start(current)
+            if event.model_loading:
+                self._text_to_image_phase = GenerationPhase.LOADING
+            elif event.status:
+                self._text_to_image_phase = GenerationPhase.RUNNING
+            if event.status:
+                self._text_to_image_message = event.status
                 self._handle_immediate_status(event.status)
 
     def _load_ip_adapter(self) -> None:

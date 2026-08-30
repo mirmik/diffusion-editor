@@ -15,7 +15,13 @@ from ..generation.provenance import (
     ModelIdentityPolicy,
 )
 from .archive_serialization import load_pil_from_zip, save_array_to_zip
-from .tool import DiffusionTool, InstructTool, LamaTool, Tool
+from .tool import (
+    DiffusionTool,
+    InstructTool,
+    LamaTool,
+    TextToImageTool,
+    Tool,
+)
 
 Rect = tuple[int, int, int, int]
 logger = logging.getLogger(__name__)
@@ -28,6 +34,8 @@ class ToolLoadResult:
 
 
 def serialize_tool(tool: Tool, file_key: str) -> dict:
+    if isinstance(tool, TextToImageTool):
+        return _serialize_text_to_image_tool(tool)
     if isinstance(tool, DiffusionTool):
         return _serialize_diffusion_tool(tool, file_key)
     if isinstance(tool, LamaTool):
@@ -61,6 +69,8 @@ def load_tool(d: dict, zf: zipfile.ZipFile) -> ToolLoadResult:
     (`type` = diffusion/lama/instruct).
     """
     tool_type = d.get("tool_type") or d.get("type")
+    if tool_type == "text_to_image":
+        return _load_text_to_image_tool(d)
     if tool_type == "diffusion":
         return _load_diffusion_tool(d, zf)
     if tool_type == "lama":
@@ -105,6 +115,16 @@ def _serialize_diffusion_tool(tool: DiffusionTool, file_key: str) -> dict:
     if tool.model_identity is not None:
         data["model_identity"] = tool.model_identity.to_dict()
     return _with_generation_provenance(data, tool)
+
+
+def _serialize_text_to_image_tool(tool: TextToImageTool) -> dict:
+    return _with_generation_provenance({
+        "tool_type": tool.tool_type,
+        "model_profile_id": tool.model_profile_id,
+        "profile_parameters": tool.profile_parameters,
+        "profile_lora_adapters": tool.profile_lora_adapters,
+        "profile_schema_version": tool.profile_schema_version,
+    }, tool)
 
 
 def _serialize_lama_tool(tool: LamaTool, file_key: str) -> dict:
@@ -210,6 +230,23 @@ def _load_lama_tool(d: dict, zf: zipfile.ZipFile) -> ToolLoadResult:
         patch_y=d["patch_y"],
         patch_w=d["patch_w"],
         patch_h=d["patch_h"],
+    )
+    _load_generation_provenance(tool, d)
+    return ToolLoadResult(tool=tool)
+
+
+def _load_text_to_image_tool(d: dict) -> ToolLoadResult:
+    tool = TextToImageTool(
+        model_profile_id=d.get("model_profile_id", "qwen-image-2512"),
+        profile_parameters=(
+            d.get("profile_parameters")
+            if isinstance(d.get("profile_parameters"), dict) else None
+        ),
+        profile_lora_adapters=(
+            d.get("profile_lora_adapters")
+            if isinstance(d.get("profile_lora_adapters"), dict) else None
+        ),
+        profile_schema_version=int(d.get("profile_schema_version", 1)),
     )
     _load_generation_provenance(tool, d)
     return ToolLoadResult(tool=tool)

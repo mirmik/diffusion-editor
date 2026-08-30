@@ -23,6 +23,8 @@ from .application import (
 from .dialogs import (
     FileDialogKind,
     FileDialogSpec,
+    MAX_NEW_DOCUMENT_DIMENSION,
+    NewDocumentState,
     SettingsState,
     UnsavedDecision,
 )
@@ -44,12 +46,27 @@ class NativeApplicationDialogs:
         self._file_callbacks: dict[
             FileDialogKind, Callable[[str | None], None] | None] = {}
         self._file_dialogs = {}
+        self._new_document_callback = None
         self._settings_callback = None
         self._grounding_callback = None
         self._message_boxes = []
         self._lifecycle_dialogs = []
+        self._build_new_document_dialog()
         self._build_settings_dialog()
         self._build_grounding_dialog()
+
+    def show_new_document_dialog(
+            self,
+            state: NewDocumentState,
+            on_finished: Callable[[NewDocumentState | None], None]) -> None:
+        self._require_open()
+        if self.new_document_dialog.open:
+            self.new_document_dialog.close()
+        self._new_document_callback = on_finished
+        self.new_document_width.value = float(state.width)
+        self.new_document_height.value = float(state.height)
+        self.new_document_dialog.show(self._viewport())
+        self._request_repaint()
 
     def show_file_dialog(
             self,
@@ -73,6 +90,8 @@ class NativeApplicationDialogs:
         self._require_open()
         if self.settings_dialog.open:
             self.settings_dialog.close()
+        if self.new_document_dialog.open:
+            self.new_document_dialog.close()
         self._settings_callback = on_finished
         self.settings_models_dir.text = state.models_dir
         self.settings_history.value = state.history_limit_gib
@@ -175,6 +194,8 @@ class NativeApplicationDialogs:
         for dialog in self._file_dialogs.values():
             if dialog.open:
                 dialog.activate("cancel")
+        if self.new_document_dialog.open:
+            self.new_document_dialog.close()
         if self.settings_dialog.open:
             self.settings_dialog.close()
         if self.grounding_dialog.open:
@@ -186,6 +207,7 @@ class NativeApplicationDialogs:
             if dialog.open:
                 dialog.close()
         self._file_callbacks.clear()
+        self._new_document_callback = None
         self._settings_callback = None
         self._grounding_callback = None
         self._connections.clear()
@@ -299,6 +321,69 @@ class NativeApplicationDialogs:
         self._connections.append(dialog.connect_finished(
             self._finish_settings))
         self.settings_dialog = dialog
+
+    def _build_new_document_dialog(self) -> None:
+        document = self._document
+        dialog = document.create_dialog("New Document")
+        dialog.widget.stable_id = "diffusion-editor.dialog.new-document"
+        dialog.actions = [
+            DialogAction("create", "Create", is_default=True),
+            DialogAction("cancel", "Cancel", is_cancel=True),
+        ]
+        content = document.create_vstack("NativeNewDocumentDialogContent")
+        content.set_layout_spacing(6.0)
+        note = document.create_label(
+            "Create a white raster document at the selected resolution.",
+            "NativeNewDocumentNote",
+        )
+        note.stable_id = "diffusion-editor.new-document.note"
+        content.add_preferred_child(note)
+        row = document.create_hstack("NativeNewDocumentDimensions")
+        row.set_layout_spacing(8.0)
+        self.new_document_width = self._new_document_dimension(
+            row, "Width (px)", "width")
+        self.new_document_height = self._new_document_dimension(
+            row, "Height (px)", "height")
+        content.add_preferred_child(row)
+        content.preferred_size = Size(380.0, 0.0)
+        dialog.set_content(content)
+        self._connections.append(dialog.connect_finished(
+            self._finish_new_document))
+        self.new_document_dialog = dialog
+
+    def _new_document_dimension(
+            self, parent, caption: str, suffix: str):
+        cell = self._document.create_vstack(
+            f"NativeNewDocument{suffix.title()}Cell")
+        cell.set_layout_spacing(3.0)
+        label = self._document.create_label(
+            caption, "NativeNewDocumentDimensionLabel")
+        label.stable_id = (
+            f"diffusion-editor.new-document.{suffix}.caption")
+        field = self._document.create_spin_box(1024.0)
+        field.widget.stable_id = (
+            f"diffusion-editor.new-document.{suffix}")
+        field.set_range(1.0, float(MAX_NEW_DOCUMENT_DIMENSION))
+        field.step = 1.0
+        field.decimals = 0
+        cell.add_preferred_child(label)
+        cell.add_preferred_child(field.widget)
+        parent.add_flex_child(cell, 1.0)
+        return field
+
+    def _finish_new_document(self, result) -> None:
+        callback, self._new_document_callback = (
+            self._new_document_callback, None)
+        if callback is None or self._closed:
+            return
+        if result.action_id != "create":
+            callback(None)
+        else:
+            callback(NewDocumentState(
+                width=int(self.new_document_width.value),
+                height=int(self.new_document_height.value),
+            ))
+        self._request_repaint()
 
     def _browse_models_directory(self) -> None:
         spec = FileDialogSpec(

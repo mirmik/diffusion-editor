@@ -653,6 +653,22 @@ class ImageEditInferenceResult:
 
 
 @dataclass(frozen=True)
+class TextToImageRequest:
+    model_profile_id: str
+    parameters: dict[str, object]
+    width: int
+    height: int
+    lora_adapters: tuple[dict[str, object], ...] | None = None
+
+
+@dataclass(frozen=True)
+class TextToImageInferenceResult:
+    image: Image.Image
+    seed: int
+    provenance: GenerationProvenance | None = None
+
+
+@dataclass(frozen=True)
 class InstructRequest:
     image: Image.Image
     instruction: str

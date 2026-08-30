@@ -13,8 +13,9 @@ from PIL import Image
 from tcbase import log
 
 from ..agent.config import DEFAULT_AGENT_BASE_URL, DEFAULT_AGENT_MODEL
-from ..grounding.types import GroundingParams
+from ..document.layer_stack import LayerStack
 from ..document.session import RecoveryRecord
+from ..grounding.types import GroundingParams
 from .application import (
     MAX_HISTORY_MEMORY_LIMIT_GIB,
     MIN_HISTORY_MEMORY_LIMIT_GIB,
@@ -27,6 +28,11 @@ _IMAGE_FILTER = "Images | *.png *.jpg *.jpeg *.bmp *.tiff *.webp"
 _PROJECT_FILTER = "Diffusion Editor Project | *.deproj"
 _EXPORT_FILTER = "PNG | *.png;;JPEG | *.jpg *.jpeg"
 _EXPORT_EXTENSIONS = {".png", ".jpg", ".jpeg"}
+DEFAULT_NEW_DOCUMENT_WIDTH = 1024
+DEFAULT_NEW_DOCUMENT_HEIGHT = 1024
+MIN_NEW_DOCUMENT_DIMENSION = 1
+MAX_NEW_DOCUMENT_DIMENSION = LayerStack.MAX_PROJECT_CANVAS_DIMENSION
+MAX_NEW_DOCUMENT_PIXELS = LayerStack.MAX_PROJECT_PIXELS
 
 
 class FileDialogKind(str, Enum):
@@ -51,6 +57,12 @@ class FileDialogSpec:
 
 
 @dataclass(frozen=True)
+class NewDocumentState:
+    width: int = DEFAULT_NEW_DOCUMENT_WIDTH
+    height: int = DEFAULT_NEW_DOCUMENT_HEIGHT
+
+
+@dataclass(frozen=True)
 class SettingsState:
     models_dir: str
     history_limit_gib: float
@@ -65,6 +77,11 @@ class SettingsState:
 
 
 class ApplicationDialogPresentation(Protocol):
+    def show_new_document_dialog(
+            self,
+            state: NewDocumentState,
+            on_finished: Callable[[NewDocumentState | None], None]) -> None: ...
+
     def show_file_dialog(
             self,
             spec: FileDialogSpec,
@@ -107,6 +124,7 @@ class ApplicationDialogCoordinator:
         self._on_models_dir_changed = on_models_dir_changed or (lambda: None)
         self._view: ApplicationDialogPresentation | None = None
         self._closed = False
+        self._new_document_state = NewDocumentState()
 
     @property
     def command_handlers(self) -> dict[str, Callable[[], None]]:
@@ -132,21 +150,83 @@ class ApplicationDialogCoordinator:
                 record, restore))
 
     def new_project(self) -> None:
-        self._confirm_destructive(
-            "create a new document", self._new_project_unchecked)
-
-    def _new_project_unchecked(self) -> None:
         self._require_open()
-        white = np.full((1024, 1024, 4), 255, dtype=np.uint8)
+        if self._view is None:
+            self._confirm_destructive(
+                "create a new document",
+                lambda: self._new_project_unchecked(
+                    self._new_document_state),
+            )
+            return
+        self._view.show_new_document_dialog(
+            self._new_document_state,
+            self._select_new_document,
+        )
+
+    def _select_new_document(
+            self, state: NewDocumentState | None) -> None:
+        if state is None or self._closed:
+            return
+        error = self.validate_new_document_state(state)
+        if error is not None:
+            self._show_error("New Document", error)
+            return
+        self._confirm_destructive(
+            "create a new document",
+            lambda: self._new_project_unchecked(state),
+        )
+
+    def _new_project_unchecked(self, state: NewDocumentState) -> None:
+        self._require_open()
+        try:
+            white = np.full(
+                (state.height, state.width, 4), 255, dtype=np.uint8)
+        except (MemoryError, ValueError) as exc:
+            self._show_error(
+                "New Document",
+                f"Could not allocate {state.width}×{state.height} pixels: "
+                f"{exc}",
+            )
+            return
         self._application.document.prepare_mutation()
         self._application.layer_stack.init_from_image(white)
+        self._new_document_state = state
         self._commit_document_reset(None)
         self._present_document_reset(None)
         self._best_effort(
             lambda: self._application.set_status(
-                "New 1024x1024 document"),
+                f"New {state.width}x{state.height} document"),
             "update status after creating a document",
         )
+
+    @staticmethod
+    def validate_new_document_state(
+            state: NewDocumentState) -> str | None:
+        width = state.width
+        height = state.height
+        if (
+                isinstance(width, bool)
+                or isinstance(height, bool)
+                or not isinstance(width, int)
+                or not isinstance(height, int)):
+            return "Width and height must be whole numbers."
+        if (
+                width < MIN_NEW_DOCUMENT_DIMENSION
+                or height < MIN_NEW_DOCUMENT_DIMENSION):
+            return "Width and height must be at least 1 pixel."
+        if (
+                width > MAX_NEW_DOCUMENT_DIMENSION
+                or height > MAX_NEW_DOCUMENT_DIMENSION):
+            return (
+                "Width and height must not exceed "
+                f"{MAX_NEW_DOCUMENT_DIMENSION} pixels."
+            )
+        if width * height > MAX_NEW_DOCUMENT_PIXELS:
+            return (
+                f"The document contains {width * height:,} pixels; "
+                f"the limit is {MAX_NEW_DOCUMENT_PIXELS:,}."
+            )
+        return None
 
     def new_project_from_image(self) -> None:
         self._show_file(

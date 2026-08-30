@@ -10,10 +10,19 @@ import numpy as np
 from PIL import Image
 
 from diffusion_editor.document.layer import Layer
-from diffusion_editor.document.tool import DiffusionTool, InstructTool
+from diffusion_editor.document.tool import (
+    DiffusionTool,
+    InstructTool,
+    TextToImageTool,
+)
 from diffusion_editor.document.layer_stack import LayerStack
 from diffusion_editor.generation.image_edit_profiles import (
     QWEN_IMAGE_EDIT_PROFILE_ID,
+)
+from diffusion_editor.generation.text_to_image_profiles import (
+    QWEN_IMAGE_2512_PROFILE_ID,
+    TEXT_TO_IMAGE_PROFILE_SCHEMA_VERSION,
+    text_to_image_profile,
 )
 
 
@@ -120,6 +129,52 @@ def test_project_file_embeds_ai_edit_external_reference(tmp_path):
     assert tool.reference_image_name_hint == "portable.png"
     assert tool.reference_image.size == (7, 5)
     assert tool.reference_image.getpixel((0, 0)) == (13, 24, 35)
+
+
+def test_project_file_roundtrips_text_to_image_tool_without_patch(tmp_path):
+    stack = LayerStack()
+    stack.init_from_image(_solid_rgba(12, 10, (255, 255, 255, 255)))
+    layer = Layer("Generated region", 7, 5)
+    layer.x = 3
+    layer.y = 4
+    layer.tool = TextToImageTool()
+    layer.tool.set_parameter("prompt", "paper city")
+    layer.tool.set_parameter("steps", 17)
+    stack.insert_layer(layer)
+    path = tmp_path / "text-to-image.deproj"
+
+    stack.save_project(str(path))
+    restored = LayerStack()
+    restored.load_project(str(path))
+
+    restored_layer = restored.active_layer
+    assert restored_layer.bounds == (3, 4, 10, 9)
+    assert isinstance(restored_layer.tool, TextToImageTool)
+    assert restored_layer.tool.parameters["prompt"] == "paper city"
+    assert restored_layer.tool.parameters["steps"] == 17
+    assert restored_layer.tool.profile_schema_version == (
+        TEXT_TO_IMAGE_PROFILE_SCHEMA_VERSION)
+
+
+def test_text_to_image_explicit_empty_lora_stack_survives_roundtrip(tmp_path):
+    stack = LayerStack()
+    stack.init_from_image(_solid_rgba(8, 8, (255, 255, 255, 255)))
+    layer = Layer("Unaccelerated", 8, 8)
+    layer.tool = TextToImageTool()
+    layer.tool.set_lora_adapters([])
+    stack.insert_layer(layer)
+    path = tmp_path / "text-to-image-no-lora.deproj"
+
+    stack.save_project(str(path))
+    restored = LayerStack()
+    restored.load_project(str(path))
+
+    tool = restored.active_layer.tool
+    assert isinstance(tool, TextToImageTool)
+    assert tool.lora_adapters == ()
+    assert tool.profile_lora_adapters[QWEN_IMAGE_2512_PROFILE_ID] == []
+    assert text_to_image_profile(
+        QWEN_IMAGE_2512_PROFILE_ID).default_lora_adapters
 
 
 def test_selection_roundtrip():

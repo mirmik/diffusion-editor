@@ -25,7 +25,8 @@ from .types import Rect
 
 
 GenerationKind = Literal[
-    "diffusion", "instruct", "lama", "segmentation", "depth", "pose"
+    "diffusion", "instruct", "text_to_image", "lama", "segmentation",
+    "depth", "pose"
 ]
 
 
@@ -115,6 +116,7 @@ class FrozenPasteContext:
     canvas_rect: Rect
     layer_local_rect: Rect
     layer_mask: FrozenArray | None
+    geometry_source: Literal["tool_patch", "layer"] = "tool_patch"
 
     @classmethod
     def capture(cls, layer: Layer, tool: Tool) -> "FrozenPasteContext":
@@ -146,6 +148,17 @@ class FrozenPasteContext:
             layer_mask=layer_mask,
         )
 
+    @classmethod
+    def capture_layer(cls, layer: Layer) -> "FrozenPasteContext":
+        """Capture full-layer replacement geometry without a source patch."""
+
+        return cls(
+            canvas_rect=layer.bounds,
+            layer_local_rect=(0, 0, layer.width, layer.height),
+            layer_mask=None,
+            geometry_source="layer",
+        )
+
     @property
     def width(self) -> int:
         return self.canvas_rect[2] - self.canvas_rect[0]
@@ -156,6 +169,11 @@ class FrozenPasteContext:
 
     def matches_layer(self, layer: Layer) -> bool:
         """Check mutable target state without using it for result placement."""
+        if self.geometry_source == "layer":
+            return (
+                self.canvas_rect == layer.bounds
+                and self.layer_local_rect == (0, 0, layer.width, layer.height)
+            )
         tool = layer.tool
         if tool is None:
             return False

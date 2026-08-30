@@ -32,6 +32,7 @@ from ..engines.instruct_engine import InstructEngine
 from ..engines.lama_engine import LamaEngine
 from ..engines.pose_engine import PoseEstimationEngine
 from ..engines.segmentation_engine import SegmentationEngine
+from ..engines.text_to_image_engine import TextToImageEngine
 from ..generation.diffusion_controller import DiffusionGenerationController
 from ..generation.depth_controller import DepthGenerationController
 from ..generation.depth_point_cloud import (
@@ -60,6 +61,9 @@ from ..generation.result_mapper import (
     map_segmentation_result,
 )
 from ..generation.segmentation_controller import SegmentationGenerationController
+from ..generation.text_to_image_controller import (
+    TextToImageGenerationController,
+)
 from ..generation.types import (
     DepthEstimationResult,
     DepthValueKind,
@@ -96,6 +100,7 @@ class EngineSet:
     grounding: Any
     depth: Any | None = None
     pose: Any | None = None
+    text_to_image: Any | None = None
 
     @classmethod
     def create_default(cls) -> "EngineSet":
@@ -107,6 +112,7 @@ class EngineSet:
             grounding=GroundingEngine(),
             depth=DepthEstimationEngine(),
             pose=PoseEstimationEngine(),
+            text_to_image=TextToImageEngine(),
         )
 
 
@@ -146,6 +152,8 @@ class EditorApplication:
         self.engines = engines if engines is not None else EngineSet.create_default()
         self.depth_engine = self.engines.depth or DepthEstimationEngine()
         self.pose_engine = self.engines.pose or PoseEstimationEngine()
+        self.text_to_image_engine = (
+            self.engines.text_to_image or TextToImageEngine())
         self.running = True
         self.closed = False
         self.status_text = "Ready"
@@ -221,6 +229,10 @@ class EditorApplication:
             composite_below=composite_below,
             document_state=document_state,
         )
+        self.text_to_image_controller = TextToImageGenerationController(
+            engine=self.text_to_image_engine,
+            document_state=document_state,
+        )
         self.segmentation_controller = SegmentationGenerationController(
             engine=self.engines.segmentation,
             composite_below=composite_below,
@@ -261,6 +273,7 @@ class EditorApplication:
         for name, engine in (
                 ("diffusion-engine", self.engines.diffusion),
                 ("instruct-engine", self.engines.instruct),
+                ("text-to-image-engine", self.text_to_image_engine),
                 ("lama-engine", self.engines.lama),
                 ("segmentation-engine", self.engines.segmentation),
                 ("grounding-engine", self.engines.grounding),
@@ -474,6 +487,7 @@ class EditorApplication:
         self._poll_segmentation()
         self._poll_lama()
         self._poll_instruct()
+        self._poll_text_to_image()
         self._poll_diffusion()
         self._poll_grounding()
         self._poll_depth()
@@ -607,6 +621,7 @@ class EditorApplication:
         return (
             self.diffusion_controller,
             self.instruct_controller,
+            self.text_to_image_controller,
             self.lama_controller,
             self.segmentation_controller,
             self.depth_controller,
@@ -923,6 +938,61 @@ class EditorApplication:
             if event.status is not None:
                 self.set_status(event.status)
         elif event.status is not None:
+            self.set_status(event.status)
+
+    def _poll_text_to_image(self) -> None:
+        event = self.text_to_image_controller.poll()
+        if event is None:
+            return
+        if event.model_loading:
+            self.update_panel("text_to_image", "model-loading")
+        if event.model_error is not None:
+            self.update_panel(
+                "text_to_image", "model-error", error=event.model_error)
+        elif event.model_loaded:
+            info = getattr(self.text_to_image_engine, "model_info", {})
+            self.update_panel(
+                "text_to_image",
+                "model-loaded",
+                profile_id=(
+                    str(info.get("profile_id", ""))
+                    if isinstance(info, dict) else ""),
+            )
+        if (
+                event.status
+                and event.inference_result is None
+                and event.inference_error is None
+                and self.text_to_image_controller.pending_context is not None):
+            self.update_panel(
+                "text_to_image", "running", status=event.status)
+        if event.inference_result is not None:
+            context, result_image, used_seed = event.inference_result
+            layer, rejection = self._resolve_generation_target(context)
+            if rejection is not None or layer is None or context.paste is None:
+                status = (
+                    rejection
+                    or "Text to Image result rejected: invalid job context")
+                self.update_panel(
+                    "text_to_image", "inference-error", error=status)
+                self.set_status(status)
+                return
+            self.document.execute(ApplyFrozenGeneratedResultCommand(
+                layer=layer,
+                result_image=result_image,
+                paste=context.paste,
+                label="Apply Text to Image Result",
+                provenance=context.result_provenance,
+            ))
+            self.update_panel("text_to_image", "result")
+            self.set_status(self._generation_success_status(
+                f"Image generated (seed={used_seed})", context))
+        elif event.inference_error is not None:
+            self.update_panel(
+                "text_to_image", "inference-error",
+                error=event.inference_error)
+            if event.status:
+                self.set_status(event.status)
+        elif event.status:
             self.set_status(event.status)
 
     def _poll_grounding(self) -> None:

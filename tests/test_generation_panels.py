@@ -32,10 +32,12 @@ from diffusion_editor.document.tool import (
     DiffusionTool,
     InstructTool,
     LamaTool,
+    TextToImageTool,
 )
 from diffusion_editor.generation.types import (
     DiffusionInferenceResult,
     EnginePollEvent,
+    TextToImageInferenceResult,
 )
 from diffusion_editor.generation.image_edit_profiles import (
     FLUX2_KLEIN_PROFILE_ID,
@@ -159,6 +161,7 @@ def _application(tmp_path):
     lama = _Engine()
     segmentation = _Engine()
     grounding = _Engine()
+    text_to_image = _Engine()
     application = EditorApplication(
         settings=_Settings(tmp_path),
         engines=EngineSet(
@@ -167,6 +170,7 @@ def _application(tmp_path):
             lama,
             instruct,
             grounding,
+            text_to_image=text_to_image,
         ),
     )
     application.layer_stack.init_from_image(_rgba())
@@ -357,6 +361,102 @@ def test_generation_switches_lama_and_instruct_and_clears_mask(tmp_path):
     assert tool.steps == 27
     assert tool.seed == 44
     assert coordinator.state.active_kind == GenerationPanelKind.INSTRUCT
+
+
+def test_text_to_image_panel_generates_at_layer_size_without_mask(tmp_path):
+    application, _diffusion, _instruct, _lama = _application(tmp_path)
+    # Layer accepts an explicit array with its own dimensions, independent of
+    # the document canvas.
+    layer = Layer(
+        "Generated region",
+        23,
+        11,
+        np.zeros((11, 23, 4), dtype=np.uint8),
+    )
+    layer.x = 5
+    layer.y = 7
+    layer.tool = TextToImageTool()
+    application.layer_stack.insert_layer(layer)
+    coordinator = GenerationPanelsCoordinator(
+        application, _Canvas(), random_seed=lambda: 987)
+
+    assert coordinator.state.active_kind == GenerationPanelKind.TEXT_TO_IMAGE
+    assert coordinator.state.text_to_image.output_size == (
+        "23 × 11 px (layer size)")
+    coordinator.handle_intent(GenerationIntent(
+        GenerationAction.SET_TEXT_TO_IMAGE_PARAMETER,
+        ("prompt", "ink drawing of a lighthouse"),
+    ))
+    lightning = coordinator.state.text_to_image.lora_adapters[0]
+    assert lightning.stable_id == "lightning"
+    coordinator.handle_intent(GenerationIntent(
+        GenerationAction.UPDATE_TEXT_TO_IMAGE_LORA,
+        ("lightning", "weight", 0.8),
+    ))
+    coordinator.handle_intent(GenerationIntent(GenerationAction.RUN))
+
+    assert layer.tool.parameters["prompt"] == (
+        "ink drawing of a lighthouse")
+    assert layer.tool.parameters["seed"] == 987
+    assert layer.tool.lora_adapters[0].weight == 0.8
+    request = application.text_to_image_engine.calls[-1][1]
+    assert request.width == 23
+    assert request.height == 11
+    assert not hasattr(request, "image")
+    assert coordinator.state.text_to_image.phase == GenerationPhase.RUNNING
+
+    document = tc_ui_document_create()
+    panel = NativeGenerationPanels(
+        document,
+        coordinator.state,
+        coordinator.handle_intent,
+        lambda: None,
+    )
+    coordinator.bind_view(panel)
+    assert document.add_root(panel.widget.handle)
+    try:
+        assert panel.text_to_image_group.widget.visible
+        assert not panel.mask_group.widget.visible
+        assert panel.text_to_image_output_size.text == (
+            "23 × 11 px (layer size)")
+        assert panel._text_to_image_widgets["prompt"].text == (
+            "ink drawing of a lighthouse")
+        assert [
+            row["stable_id"] for row in panel._text_to_image_lora_rows
+        ] == ["lightning"]
+    finally:
+        panel.close()
+        coordinator.close()
+        tc_ui_document_destroy(document)
+
+
+def test_text_to_image_result_replaces_layer_and_is_undoable(tmp_path):
+    application, _diffusion, _instruct, _lama = _application(tmp_path)
+    layer = Layer(
+        "Generated region",
+        9,
+        6,
+        np.zeros((6, 9, 4), dtype=np.uint8),
+    )
+    layer.tool = TextToImageTool()
+    layer.tool.set_parameter("prompt", "crystal garden")
+    application.layer_stack.insert_layer(layer)
+
+    event = application.text_to_image_controller.start(layer)
+    assert event.status == "Generating 9x6..."
+    application.text_to_image_engine.poll_result = EnginePollEvent(
+        task_type="inference",
+        result=TextToImageInferenceResult(
+            Image.new("RGBA", (9, 6), (12, 34, 56, 255)),
+            41,
+        ),
+    )
+    application.poll()
+
+    assert tuple(layer.image[0, 0]) == (12, 34, 56, 255)
+    assert application.status_text == "Image generated (seed=41)"
+    assert application.document.undo() == "Apply Text to Image Result"
+    assert tuple(layer.image[0, 0]) == (0, 0, 0, 0)
 
 
 def test_generation_panel_state_machine_accepts_async_updates(tmp_path):

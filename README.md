@@ -73,7 +73,7 @@ process and will be hosted by isolated workers. The current compatibility
 matrix and ownership boundary are documented in
 [CPython 3.14t dependency contract](docs/cpython-314t-dependencies.md).
 Install the single shared regular-CPython environment for LaMa, segmentation,
-Diffusion, InstructPix2Pix, Grounding DINO, and SAM with:
+Diffusion, Qwen Text to Image, AI Edit, Grounding DINO, and SAM with:
 
 ```bash
 ./setup-workers.sh
@@ -81,6 +81,8 @@ Diffusion, InstructPix2Pix, Grounding DINO, and SAM with:
 
 Installation, accelerator selection, and feature-specific smoke tests are
 documented in the [model-worker guide](docs/model-workers.md).
+The source-free generation contract is documented separately in
+[Text to Image](docs/text-to-image.md).
 
 Termin wheels are force-refreshed from that SDK even when their version string
 has not changed. This prevents an SDK rebuild from leaving old Python payloads

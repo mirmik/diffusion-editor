@@ -37,7 +37,12 @@ from ..document.commands import (
     SetReconstructionRefinePlacementCommand,
 )
 from ..document.reconstruction import ReconstructionLayer, ReconstructionStatus
-from ..document.tool import DiffusionTool, InstructTool, LamaTool
+from ..document.tool import (
+    DiffusionTool,
+    InstructTool,
+    LamaTool,
+    TextToImageTool,
+)
 from ..generation.patch_resolver import (
     source_patch_at_center,
     source_patch_from_full_composite,
@@ -706,6 +711,8 @@ class NativeEditorRoot:
             self, layer: Layer, tool_type: str):
         if self.canvas is None or not layer.accepts_pixel_edits:
             return None
+        if tool_type == "text_to_image":
+            return TextToImageTool()
         composite = self.canvas.get_composite_below(layer)
         if composite is None:
             composite = self.canvas.controller.get_composite()
@@ -755,6 +762,7 @@ class NativeEditorRoot:
                 self.application.diffusion_controller,
                 self.application.lama_controller,
                 self.application.instruct_controller,
+                self.application.text_to_image_controller,
                 self.application.segmentation_controller,
                 self.application.depth_controller,
                 self.application.grounding_controller):

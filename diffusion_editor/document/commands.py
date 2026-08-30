@@ -24,7 +24,7 @@ from ..generation.types import (
     ReconstructionStageStatus,
 )
 from .change_event import DocumentChangeKind
-from .tool import DiffusionTool, InstructTool, Tool
+from .tool import DiffusionTool, InstructTool, TextToImageTool, Tool
 from .layer_stack import LayerStack
 from .result_paste import paste_result
 from .mask import Selection, coerce_mask_data
@@ -1213,6 +1213,61 @@ class UpdateImageEditToolCommand:
                 self.model_profile_id, new_parameters, new_adapters),
             size,
             coalesce_key=("image-edit-tool", self.layer.id),
+        )
+
+
+@dataclass(frozen=True)
+class UpdateTextToImageToolCommand:
+    layer: Layer
+    model_profile_id: str
+    profile_parameters: dict[str, dict]
+    profile_lora_adapters: dict[str, list[dict]]
+    label: str = "Update Text to Image Settings"
+
+    def apply(self, layer_stack: LayerStack) -> None:
+        tool = self.layer.tool
+        if not isinstance(tool, TextToImageTool):
+            return
+        tool.model_profile_id = self.model_profile_id
+        tool.profile_parameters = copy.deepcopy(self.profile_parameters)
+        tool.profile_lora_adapters = copy.deepcopy(
+            self.profile_lora_adapters)
+        layer_stack.publish_change(
+            DocumentChangeKind.METADATA, layers=(self.layer,))
+
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
+        tool = self.layer.tool
+        if not isinstance(tool, TextToImageTool):
+            return None
+        old_profile = tool.model_profile_id
+        old_parameters = copy.deepcopy(tool.profile_parameters)
+        old_adapters = copy.deepcopy(tool.profile_lora_adapters)
+        new_parameters = copy.deepcopy(self.profile_parameters)
+        new_adapters = copy.deepcopy(self.profile_lora_adapters)
+        if (
+                old_profile == self.model_profile_id
+                and old_parameters == new_parameters
+                and old_adapters == new_adapters):
+            return None
+
+        def assign(profile_id, parameters, adapters) -> None:
+            tool.model_profile_id = profile_id
+            tool.profile_parameters = copy.deepcopy(parameters)
+            tool.profile_lora_adapters = copy.deepcopy(adapters)
+            layer_stack.publish_change(
+                DocumentChangeKind.METADATA, layers=(self.layer,))
+
+        assign(self.model_profile_id, new_parameters, new_adapters)
+        size = len(repr((
+            old_profile, old_parameters, old_adapters,
+            self.model_profile_id, new_parameters, new_adapters,
+        )).encode("utf-8"))
+        return CommandDelta(
+            lambda: assign(old_profile, old_parameters, old_adapters),
+            lambda: assign(
+                self.model_profile_id, new_parameters, new_adapters),
+            size,
+            coalesce_key=("text-to-image-tool", self.layer.id),
         )
 
 

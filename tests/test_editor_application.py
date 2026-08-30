@@ -131,6 +131,7 @@ def test_shutdown_orders_view_workers_engines_and_gpu_resources():
         "chat",
         "diffusion-engine",
         "instruct-engine",
+        "text-to-image-engine",
         "lama-engine",
         "segmentation-engine",
         "grounding-engine",

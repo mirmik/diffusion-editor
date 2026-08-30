@@ -11,18 +11,25 @@ import pytest
 from diffusion_editor.engines.diffusion_engine import DiffusionEngine
 from diffusion_editor.engines.grounding_engine import GroundingEngine
 from diffusion_editor.engines.instruct_engine import InstructEngine
+from diffusion_editor.engines.text_to_image_engine import TextToImageEngine
 from diffusion_editor.generation.types import (
     DiffusionInferenceResult,
     DiffusionRequest,
     InstructInferenceResult,
     InstructRequest,
     ImageEditRequest,
+    TextToImageInferenceResult,
+    TextToImageRequest,
 )
 from diffusion_editor.generation.image_edit_profiles import (
     FLUX2_KLEIN_PROFILE_ID,
     QWEN_IMAGE_EDIT_PROFILE_ID,
     SENSENOVA_U15_PROFILE_ID,
     image_edit_profile,
+)
+from diffusion_editor.generation.text_to_image_profiles import (
+    QWEN_IMAGE_2512_PROFILE_ID,
+    text_to_image_profile,
 )
 from diffusion_editor.grounding.types import GroundingParams, GroundingRequest
 from diffusion_editor.workers.ml_process import MlProcessClient
@@ -304,6 +311,39 @@ def test_image_edit_engine_reloads_only_for_load_time_parameters():
         assert engine.submit_request(ImageEditRequest(
             _image(), QWEN_IMAGE_EDIT_PROFILE_ID, changed_prompt, adapters))
         assert _poll(engine).result.seed == 4343
+    finally:
+        engine.shutdown()
+
+
+def test_text_to_image_engine_roundtrips_exact_dimensions_through_worker():
+    engine = TextToImageEngine(client=_client())
+    profile = text_to_image_profile(QWEN_IMAGE_2512_PROFILE_ID)
+    parameters = profile.defaults()
+    parameters.update({"prompt": "miniature railway", "seed": 909})
+    try:
+        assert engine.submit_load(profile.stable_id, parameters)
+        assert _poll(engine).error is None
+        assert engine.loaded_configuration_matches(
+            profile.stable_id, parameters)
+
+        changed_prompt = {**parameters, "prompt": "night railway"}
+        assert engine.loaded_configuration_matches(
+            profile.stable_id, changed_prompt)
+        assert engine.submit_request(TextToImageRequest(
+            model_profile_id=profile.stable_id,
+            parameters=changed_prompt,
+            width=13,
+            height=7,
+        ))
+        event = _poll(engine)
+
+        assert isinstance(event.result, TextToImageInferenceResult)
+        assert event.result.image.size == (13, 7)
+        assert event.result.seed == 909
+        assert event.result.provenance.operation == "text_to_image"
+        request = event.result.provenance.request.parameters.to_dict()
+        assert request["width"] == 13
+        assert request["height"] == 7
     finally:
         engine.shutdown()
 

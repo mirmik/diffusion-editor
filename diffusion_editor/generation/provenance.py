@@ -478,6 +478,15 @@ def capture_tool_state(tool: object | None) -> RequestProvenance:
                 else str(identity_policy)
             ),
         })
+    elif kind == "text_to_image":
+        parameters.update({
+            "model_profile_id": str(getattr(
+                tool, "model_profile_id", "qwen-image-2512")),
+            "profile_parameters": getattr(
+                tool, "profile_parameters", {}),
+            "profile_lora_adapters": getattr(
+                tool, "profile_lora_adapters", {}),
+        })
     elif kind == "instruct":
         profile_parameters = getattr(tool, "profile_parameters", None)
         if isinstance(profile_parameters, dict):

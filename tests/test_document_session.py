@@ -50,9 +50,13 @@ class _Canvas:
 class _Dialogs:
     def __init__(self):
         self.unsaved = []
+        self.new_documents = []
         self.files = []
         self.errors = []
         self.recoveries = []
+
+    def show_new_document_dialog(self, state, callback):
+        self.new_documents.append((state, callback))
 
     def show_unsaved_changes(self, action, callback):
         self.unsaved.append((action, callback))
@@ -115,12 +119,16 @@ def test_unsaved_cancel_discard_and_save_failure_are_non_destructive(tmp_path):
     original_session = application.document_session_id
 
     coordinator.new_project()
+    _state, choose = dialogs.new_documents.pop()
+    choose(_state)
     _action, finish = dialogs.unsaved.pop()
     finish(UnsavedDecision.CANCEL)
     assert application.document_session_id == original_session
     assert len(application.layer_stack.layers) == 2
 
     coordinator.new_project()
+    _state, choose = dialogs.new_documents.pop()
+    choose(_state)
     _action, finish = dialogs.unsaved.pop()
     finish(UnsavedDecision.DISCARD)
     assert application.document_session_id != original_session

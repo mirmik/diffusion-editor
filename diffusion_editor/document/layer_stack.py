@@ -860,7 +860,8 @@ class LayerStack:
                 if (
                         version >= self.FORMAT_VERSION
                         and tool_type not in {
-                            "diffusion", "lama", "instruct"}):
+                            "diffusion", "lama", "instruct",
+                            "text_to_image"}):
                     raise ValueError(
                         "current project layer tool type is unsupported")
                 source_file = tool_dict.get("source_file")
@@ -1023,39 +1024,46 @@ class LayerStack:
     def _validate_tool(self, tool) -> int:
         if tool is None:
             return 0
-        from .tool import DiffusionTool, InstructTool, LamaTool
+        from .tool import (
+            DiffusionTool,
+            InstructTool,
+            LamaTool,
+            TextToImageTool,
+        )
         from .tool_serialization import serialize_tool
 
-        if not isinstance(tool, (DiffusionTool, InstructTool, LamaTool)):
+        if not isinstance(tool, (
+                DiffusionTool, InstructTool, LamaTool, TextToImageTool)):
             raise ValueError("project contains an unsupported layer tool")
-        patch_x = self._required_int(
-            tool.patch_x,
-            "tool patch_x",
-            minimum=-self.MAX_PROJECT_CANVAS_DIMENSION,
-            maximum=self.MAX_PROJECT_CANVAS_DIMENSION,
-        )
-        patch_y = self._required_int(
-            tool.patch_y,
-            "tool patch_y",
-            minimum=-self.MAX_PROJECT_CANVAS_DIMENSION,
-            maximum=self.MAX_PROJECT_CANVAS_DIMENSION,
-        )
-        patch_w = self._required_int(
-            tool.patch_w,
-            "tool patch_w",
-            minimum=1,
-            maximum=self.MAX_PROJECT_CANVAS_DIMENSION,
-        )
-        patch_h = self._required_int(
-            tool.patch_h,
-            "tool patch_h",
-            minimum=1,
-            maximum=self.MAX_PROJECT_CANVAS_DIMENSION,
-        )
-        if patch_w * patch_h > self.MAX_PROJECT_PIXELS:
-            raise ValueError("tool patch exceeds the pixel budget")
-        # Normalize validation only; the aggregate is not mutated.
-        del patch_x, patch_y
+        if not isinstance(tool, TextToImageTool):
+            patch_x = self._required_int(
+                tool.patch_x,
+                "tool patch_x",
+                minimum=-self.MAX_PROJECT_CANVAS_DIMENSION,
+                maximum=self.MAX_PROJECT_CANVAS_DIMENSION,
+            )
+            patch_y = self._required_int(
+                tool.patch_y,
+                "tool patch_y",
+                minimum=-self.MAX_PROJECT_CANVAS_DIMENSION,
+                maximum=self.MAX_PROJECT_CANVAS_DIMENSION,
+            )
+            patch_w = self._required_int(
+                tool.patch_w,
+                "tool patch_w",
+                minimum=1,
+                maximum=self.MAX_PROJECT_CANVAS_DIMENSION,
+            )
+            patch_h = self._required_int(
+                tool.patch_h,
+                "tool patch_h",
+                minimum=1,
+                maximum=self.MAX_PROJECT_CANVAS_DIMENSION,
+            )
+            if patch_w * patch_h > self.MAX_PROJECT_PIXELS:
+                raise ValueError("tool patch exceeds the pixel budget")
+            # Normalize validation only; the aggregate is not mutated.
+            del patch_x, patch_y
 
         if isinstance(tool, DiffusionTool):
             self._validate_string_fields(
@@ -1113,8 +1121,9 @@ class LayerStack:
                 tool.seed, "tool seed", minimum=-1, maximum=2**32 - 1)
 
         payload_bytes = 0
-        if tool.source_patch is not None:
-            source = np.asarray(tool.source_patch)
+        source_patch = getattr(tool, "source_patch", None)
+        if source_patch is not None:
+            source = np.asarray(source_patch)
             if (
                     source.dtype != np.uint8
                     or source.ndim not in (2, 3)

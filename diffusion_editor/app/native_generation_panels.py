@@ -18,6 +18,10 @@ from ..generation.image_edit_profiles import (
     ParameterKind,
     all_image_edit_parameters,
 )
+from ..generation.text_to_image_profiles import (
+    TextToImageLoraAdapter,
+    all_text_to_image_parameters,
+)
 
 
 _PREDICTIONS = ("Auto", "epsilon", "v_prediction")
@@ -57,12 +61,27 @@ class NativeGenerationPanels:
             parameter.stable_id: parameter
             for parameter in all_image_edit_parameters()
         }
+        self._text_to_image_profile_ids: list[str] = []
+        self._text_to_image_widgets: dict[str, object] = {}
+        self._text_to_image_lora_rows: list[dict[str, object]] = []
+        self._text_to_image_lora_catalog_paths: list[str] = []
+        self._text_to_image_lora_catalog_labels: list[str] = []
+        self._text_to_image_choice_values: dict[str, list[str]] = {}
+        self._text_to_image_specs = {
+            parameter.stable_id: parameter
+            for parameter in all_text_to_image_parameters()
+        }
 
         self.content = document.create_vstack(
             "NativeGenerationPanelsContent")
         self.content.stable_id = "diffusion-editor.generation-panels"
         self.content.set_layout_spacing(6.0)
         self.widget = self.content
+
+        self.text_to_image_group, text_to_image = self._group(
+            "Text to Image", "text-to-image")
+        self._build_text_to_image(text_to_image)
+        self.content.add_preferred_child(self.text_to_image_group.widget)
 
         self.diffusion_group, diffusion = self._group(
             "Diffusion", "diffusion")
@@ -83,7 +102,8 @@ class NativeGenerationPanels:
         self.content.add_preferred_child(self.mask_group.widget)
 
         self.empty_label = document.create_label(
-            "Attach a Diffusion, LaMa or AI Edit tool to the active layer.",
+            "Attach a Text to Image, Diffusion, LaMa or AI Edit tool to the "
+            "active layer.",
             "NativeGenerationEmptyLabel",
         )
         self.empty_label.stable_id = "diffusion-editor.generation.empty"
@@ -97,6 +117,8 @@ class NativeGenerationPanels:
         self._syncing = True
         try:
             kind = state.active_kind
+            self.text_to_image_group.widget.visible = (
+                kind == GenerationPanelKind.TEXT_TO_IMAGE)
             self.diffusion_group.widget.visible = (
                 kind == GenerationPanelKind.DIFFUSION)
             self.lama_group.widget.visible = (
@@ -104,8 +126,71 @@ class NativeGenerationPanels:
             self.instruct_group.widget.visible = (
                 kind == GenerationPanelKind.INSTRUCT)
             self.mask_group.widget.visible = (
-                kind != GenerationPanelKind.NONE)
+                kind in {
+                    GenerationPanelKind.DIFFUSION,
+                    GenerationPanelKind.LAMA,
+                    GenerationPanelKind.INSTRUCT,
+                })
             self.empty_label.visible = kind == GenerationPanelKind.NONE
+
+            text_to_image = state.text_to_image
+            self._sync_combo(
+                self.text_to_image_profile_combo,
+                [choice.name for choice in text_to_image.model_profiles],
+                [choice.stable_id for choice in text_to_image.model_profiles],
+                text_to_image.model_profile_id,
+                self._set_text_to_image_profile_ids,
+            )
+            self.text_to_image_description.text = (
+                text_to_image.profile_description)
+            self.text_to_image_output_size.text = text_to_image.output_size
+            active_parameters = {
+                parameter.stable_id
+                for parameter in text_to_image.parameters
+            }
+            values = text_to_image.parameter_values or {}
+            for parameter_id, widget in self._text_to_image_widgets.items():
+                supported = parameter_id in active_parameters
+                widget.widget.visible = True
+                widget.widget.enabled = supported
+                if not supported:
+                    continue
+                spec = self._text_to_image_specs[parameter_id]
+                value = values.get(parameter_id, spec.default)
+                if parameter_id == "seed":
+                    widget.text = str(value)
+                elif spec.kind in {ParameterKind.TEXT, ParameterKind.STRING}:
+                    widget.text = str(value)
+                elif spec.kind in {ParameterKind.INTEGER, ParameterKind.FLOAT}:
+                    widget.value = float(value)
+                elif spec.kind == ParameterKind.BOOLEAN:
+                    widget.checked = bool(value)
+                elif spec.kind == ParameterKind.CHOICE:
+                    self._set_combo_value(
+                        widget,
+                        self._text_to_image_choice_values[parameter_id],
+                        str(value),
+                    )
+            self.text_to_image_status.text = (
+                f"{text_to_image.phase.value}: {text_to_image.message}")
+            self.text_to_image_info.text = text_to_image.layer_info
+            text_to_image_busy = text_to_image.phase in {
+                GenerationPhase.LOADING,
+                GenerationPhase.RUNNING,
+            }
+            self.text_to_image_add_lora_button.widget.enabled = (
+                not text_to_image_busy)
+            self._sync_text_to_image_lora_rows(
+                text_to_image.lora_adapters,
+                text_to_image.lora_catalog,
+                enabled=not text_to_image_busy,
+            )
+            self.text_to_image_load_button.widget.enabled = (
+                not text_to_image_busy)
+            self.text_to_image_run_button.widget.enabled = (
+                not text_to_image_busy)
+            self.text_to_image_new_seed_button.widget.enabled = (
+                not text_to_image_busy)
 
             diffusion = state.diffusion
             self._sync_combo(
@@ -259,7 +344,126 @@ class NativeGenerationPanels:
         self._closed = True
         self._on_intent = lambda _intent: None
         self._image_edit_lora_rows.clear()
+        self._text_to_image_lora_rows.clear()
         self._connections.clear()
+
+    def _build_text_to_image(self, content) -> None:
+        self._caption(
+            content, "Profile", "text-to-image.profile.caption")
+        self.text_to_image_profile_combo = self._combo(
+            content,
+            "text-to-image.profile",
+            lambda index: self._emit(
+                GenerationAction.SELECT_TEXT_TO_IMAGE_PROFILE,
+                self._item(self._text_to_image_profile_ids, index, ""),
+            ),
+        )
+        self.text_to_image_description = self._label(
+            content, "", "text-to-image.profile.description")
+        self.text_to_image_output_size = self._label(
+            content, "", "text-to-image.output-size")
+        self.text_to_image_status = self._label(
+            content, "", "text-to-image.status")
+        self.text_to_image_load_button = self._button(
+            content,
+            "Load Model",
+            "text-to-image.load-model",
+            lambda: self._emit(GenerationAction.LOAD_MODEL),
+        )
+        self._caption(
+            content, "LoRA adapters", "text-to-image.lora-adapters.caption")
+        self.text_to_image_lora_container = self._document.create_vstack(
+            "NativeTextToImageLoraStack")
+        self.text_to_image_lora_container.stable_id = (
+            "diffusion-editor.generation.text-to-image.lora-adapters")
+        self.text_to_image_lora_container.set_layout_spacing(4.0)
+        content.add_preferred_child(self.text_to_image_lora_container)
+        self.text_to_image_add_lora_button = self._button(
+            content,
+            "+ Add LoRA",
+            "text-to-image.lora-adapters.add",
+            lambda: self._emit(GenerationAction.ADD_TEXT_TO_IMAGE_LORA),
+        )
+        for parameter in all_text_to_image_parameters():
+            parameter_id = parameter.stable_id
+            suffix = (
+                f"text-to-image.parameter."
+                f"{parameter_id.replace('_', '-')}")
+            emit = lambda changed, key=parameter_id: self._emit(
+                GenerationAction.SET_TEXT_TO_IMAGE_PARAMETER,
+                (key, changed),
+            )
+            if parameter.kind == ParameterKind.TEXT:
+                self._caption(content, parameter.label, f"{suffix}.caption")
+                widget = self._text_area_callback(
+                    content, suffix, parameter.placeholder, emit)
+            elif parameter.kind == ParameterKind.STRING:
+                widget = self._text_input_parameter(
+                    content, parameter.label, suffix,
+                    parameter.placeholder, emit)
+            elif parameter_id == "seed":
+                widget = self._seed_parameter_row(content, suffix, emit)
+            elif parameter.kind in {
+                    ParameterKind.INTEGER, ParameterKind.FLOAT}:
+                widget = self._slider_callback(
+                    content,
+                    parameter.label,
+                    suffix,
+                    parameter.default,
+                    parameter.minimum,
+                    parameter.maximum,
+                    parameter.step,
+                    parameter.decimals,
+                    emit,
+                )
+            elif parameter.kind == ParameterKind.BOOLEAN:
+                widget = self._checkbox_callback(
+                    content, parameter.label, suffix, emit)
+            else:
+                self._caption(content, parameter.label, f"{suffix}.caption")
+                values = [choice.value for choice in parameter.choices]
+                widget = self._combo(
+                    content,
+                    suffix,
+                    lambda index, key=parameter_id: self._emit(
+                        GenerationAction.SET_TEXT_TO_IMAGE_PARAMETER,
+                        (key, self._item(
+                            self._text_to_image_choice_values[key],
+                            index,
+                            "",
+                        )),
+                    ),
+                )
+                self._fill_combo(
+                    widget,
+                    [choice.label for choice in parameter.choices],
+                )
+                self._text_to_image_choice_values[parameter_id] = values
+            self._text_to_image_widgets[parameter_id] = widget
+
+        self.text_to_image_info = self._label(
+            content, "", "text-to-image.layer-info")
+        actions = self._document.create_hstack(
+            "NativeTextToImageActions")
+        actions.set_layout_spacing(4.0)
+        self.text_to_image_run_button = self._button(
+            actions,
+            "Generate",
+            "text-to-image.run",
+            lambda: self._emit(GenerationAction.RUN),
+            add=False,
+        )
+        self.text_to_image_new_seed_button = self._button(
+            actions,
+            "New Seed",
+            "text-to-image.new-seed",
+            self._new_seed_and_run,
+            add=False,
+        )
+        actions.add_flex_child(self.text_to_image_run_button.widget, 1.0)
+        actions.add_flex_child(
+            self.text_to_image_new_seed_button.widget, 1.0)
+        content.add_preferred_child(actions)
 
     def _build_diffusion(self, content) -> None:
         self._caption(content, "Model", "diffusion.model.caption")
@@ -700,6 +904,167 @@ class NativeGenerationPanels:
             ),
         )
 
+    def _sync_text_to_image_lora_rows(
+            self,
+            adapters: tuple[TextToImageLoraAdapter, ...],
+            catalog,
+            *,
+            enabled: bool) -> None:
+        current_ids = [
+            str(row["stable_id"])
+            for row in self._text_to_image_lora_rows]
+        next_ids = [adapter.stable_id for adapter in adapters]
+        catalog_paths = ["", *(item.stable_id for item in catalog)]
+        catalog_labels = [
+            "Custom / Hugging Face…", *(item.name for item in catalog)]
+        catalog_changed = (
+            catalog_paths != self._text_to_image_lora_catalog_paths
+            or catalog_labels != self._text_to_image_lora_catalog_labels
+        )
+        if current_ids != next_ids or catalog_changed:
+            for row in self._text_to_image_lora_rows:
+                row["connections"].clear()
+                self._document.destroy_widget_recursive(
+                    row["root"].handle)
+            self._text_to_image_lora_catalog_paths = catalog_paths
+            self._text_to_image_lora_catalog_labels = catalog_labels
+            self._text_to_image_lora_rows = [
+                self._create_text_to_image_lora_row(
+                    adapter, catalog_labels)
+                for adapter in adapters
+            ]
+        for index, (row, adapter) in enumerate(zip(
+                self._text_to_image_lora_rows, adapters)):
+            row["enabled"].checked = adapter.enabled
+            row["label"].text = adapter.label
+            row["source"].text = adapter.source
+            row["weight"].value = adapter.weight
+            try:
+                row["catalog"].selected_index = catalog_paths.index(
+                    adapter.source)
+            except ValueError:
+                row["catalog"].selected_index = 0
+            row["enabled"].widget.enabled = enabled
+            row["label"].widget.enabled = enabled
+            row["source"].widget.enabled = enabled
+            row["catalog"].widget.enabled = enabled
+            row["weight"].widget.enabled = enabled
+            row["up"].widget.enabled = enabled and index > 0
+            row["down"].widget.enabled = (
+                enabled and index + 1 < len(adapters))
+            row["remove"].widget.enabled = enabled
+
+    def _create_text_to_image_lora_row(
+            self,
+            adapter: TextToImageLoraAdapter,
+            catalog_labels: list[str]) -> dict[str, object]:
+        adapter_id = adapter.stable_id
+        suffix = f"text-to-image.lora-adapter.{adapter_id}"
+        root = self._document.create_vstack("NativeTextToImageLoraRow")
+        root.stable_id = f"diffusion-editor.generation.{suffix}"
+        root.set_layout_spacing(2.0)
+        header = self._document.create_hstack(
+            "NativeTextToImageLoraHeader")
+        header.set_layout_spacing(2.0)
+        enabled = self._document.create_checkbox(adapter.enabled)
+        enabled.widget.stable_id = (
+            f"diffusion-editor.generation.{suffix}.enabled")
+        label = self._document.create_text_input(adapter.label)
+        label.widget.stable_id = (
+            f"diffusion-editor.generation.{suffix}.label")
+        label.placeholder = "Adapter name"
+        weight = self._document.create_slider_edit(adapter.weight)
+        weight.widget.stable_id = (
+            f"diffusion-editor.generation.{suffix}.weight")
+        weight.label = "Weight"
+        weight.set_range(-4.0, 4.0)
+        weight.set_step(0.05)
+        weight.set_decimals(2)
+        up = self._document.create_button("↑")
+        down = self._document.create_button("↓")
+        remove = self._document.create_button("×")
+        up.widget.stable_id = f"diffusion-editor.generation.{suffix}.up"
+        down.widget.stable_id = f"diffusion-editor.generation.{suffix}.down"
+        remove.widget.stable_id = (
+            f"diffusion-editor.generation.{suffix}.remove")
+        header.add_preferred_child(enabled.widget)
+        header.add_flex_child(label.widget, 1.0)
+        header.add_fixed_child(weight.widget, 112.0)
+        header.add_fixed_child(up.widget, 28.0)
+        header.add_fixed_child(down.widget, 28.0)
+        header.add_fixed_child(remove.widget, 28.0)
+        catalog = self._document.create_combo_box()
+        catalog.widget.stable_id = (
+            f"diffusion-editor.generation.{suffix}.catalog")
+        self._fill_combo(catalog, catalog_labels)
+        source = self._document.create_text_input(adapter.source)
+        source.widget.stable_id = (
+            f"diffusion-editor.generation.{suffix}.source")
+        source.placeholder = "Local path or Hugging Face repository"
+        root.add_preferred_child(header)
+        root.add_preferred_child(catalog.widget)
+        root.add_preferred_child(source.widget)
+        self.text_to_image_lora_container.add_preferred_child(root)
+        update = lambda field, value: self._emit(
+            GenerationAction.UPDATE_TEXT_TO_IMAGE_LORA,
+            (adapter_id, field, value),
+        )
+        connections = [
+            enabled.connect_changed(
+                lambda changed: update("enabled", changed)),
+            label.connect_changed(
+                lambda changed: update("label", changed)),
+            source.connect_changed(
+                lambda changed: update("source", changed)),
+            weight.connect_changed(
+                lambda changed: update("weight", changed)),
+            catalog.connect_changed(
+                lambda index, *_rest:
+                self._select_text_to_image_lora_catalog(
+                    adapter_id, index)),
+            up.connect_clicked(lambda: self._emit(
+                GenerationAction.MOVE_TEXT_TO_IMAGE_LORA,
+                (adapter_id, -1),
+            )),
+            down.connect_clicked(lambda: self._emit(
+                GenerationAction.MOVE_TEXT_TO_IMAGE_LORA,
+                (adapter_id, 1),
+            )),
+            remove.connect_clicked(lambda: self._emit(
+                GenerationAction.REMOVE_TEXT_TO_IMAGE_LORA,
+                adapter_id,
+            )),
+        ]
+        return {
+            "stable_id": adapter_id,
+            "root": root,
+            "enabled": enabled,
+            "label": label,
+            "source": source,
+            "catalog": catalog,
+            "weight": weight,
+            "up": up,
+            "down": down,
+            "remove": remove,
+            "connections": connections,
+        }
+
+    def _select_text_to_image_lora_catalog(
+            self, adapter_id: str, index: int) -> None:
+        if self._syncing or self._closed:
+            return
+        if not 0 < index < len(
+                self._text_to_image_lora_catalog_paths):
+            return
+        self._emit(
+            GenerationAction.UPDATE_TEXT_TO_IMAGE_LORA,
+            (
+                adapter_id,
+                "source",
+                self._text_to_image_lora_catalog_paths[index],
+            ),
+        )
+
     def _build_mask(self, content) -> None:
         self.mask_size = self._slider(
             content, "Size", "mask.size",
@@ -969,6 +1334,9 @@ class NativeGenerationPanels:
 
     def _set_image_edit_profile_ids(self, values) -> None:
         self._image_edit_profile_ids = values
+
+    def _set_text_to_image_profile_ids(self, values) -> None:
+        self._text_to_image_profile_ids = values
 
     def _set_image_edit_reference_ids(self, values) -> None:
         self._image_edit_reference_ids = values

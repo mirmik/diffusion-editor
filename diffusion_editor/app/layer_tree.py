@@ -342,6 +342,7 @@ class LayerTreeCoordinator:
             self.refresh()
             return
         label = {
+            "text_to_image": "Attach Text to Image Tool",
             "diffusion": "Attach Diffusion Tool",
             "lama": "Attach LaMa Tool",
             "instruct": "Attach AI Edit Tool",

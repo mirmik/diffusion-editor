@@ -266,6 +266,7 @@ def test_native_layer_panel_context_commands_follow_tool_state():
         for command in panel.context_model.commands
     }
     assert enabled["rename"]
+    assert enabled["attach.text_to_image"]
     assert enabled["attach.diffusion"]
     assert enabled["attach.lama"]
     assert enabled["attach.instruct"]
@@ -279,6 +280,7 @@ def test_native_layer_panel_context_commands_follow_tool_state():
         command.data.stable_id: command.data.enabled
         for command in panel.context_model.commands
     }
+    assert not enabled["attach.text_to_image"]
     assert not enabled["attach.diffusion"]
     assert not enabled["attach.lama"]
     assert not enabled["attach.instruct"]

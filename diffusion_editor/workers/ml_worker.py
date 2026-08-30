@@ -30,6 +30,7 @@ from ..generation.image_edit_profiles import (
     LEGACY_INSTRUCT_PROFILE_ID,
     image_edit_profile,
 )
+from ..generation.text_to_image_profiles import text_to_image_profile
 from .ml_protocol import MAX_MESSAGE_BYTES, PROTOCOL_VERSION, encode_message
 
 
@@ -51,6 +52,11 @@ class _Backend:
         self.instruct_warnings: tuple[str, ...] = ()
         self.image_edit_profile_id: str | None = None
         self.image_edit_lora_adapters: tuple[dict[str, Any], ...] = ()
+        self.text_to_image_loaded = False
+        self.text_to_image_identity: ModelIdentity | None = None
+        self.text_to_image_warnings: tuple[str, ...] = ()
+        self.text_to_image_profile_id: str | None = None
+        self.text_to_image_lora_adapters: tuple[dict[str, Any], ...] = ()
 
     def execute(
         self,
@@ -130,6 +136,21 @@ class _Backend:
                 if data.get("reference_image_path") else None)
             result, seed, provenance = self._real.image_edit(
                 data, image, reference_image)
+            output = output_dir / "result.png"
+            result.save(output, format="PNG")
+            return {
+                "output_path": str(output),
+                "seed": seed,
+                "provenance": provenance,
+            }
+        if operation == "load_text_to_image":
+            profile = text_to_image_profile(str(data["profile_id"]))
+            progress(f"Loading {profile.title}...")
+            return self._real.load_text_to_image(data)
+        if operation == "text_to_image":
+            profile = text_to_image_profile(str(data["profile_id"]))
+            progress(f"Running {profile.title}...")
+            result, seed, provenance = self._real.text_to_image(data)
             output = output_dir / "result.png"
             result.save(output, format="PNG")
             return {
@@ -412,6 +433,86 @@ class _Backend:
                     "dtype": "float32",
                 }),
                 warnings=self.instruct_warnings,
+            )
+            return {
+                "output_path": str(output),
+                "seed": seed,
+                "provenance": provenance.to_dict(),
+            }
+        if operation == "load_text_to_image":
+            profile = text_to_image_profile(str(data["profile_id"]))
+            parameters = profile.normalize(data.get("parameters"))
+            adapters = tuple(
+                adapter.to_dict()
+                for adapter in profile.normalize_lora_adapters(
+                    data.get("lora_adapters")))
+            self.text_to_image_loaded = True
+            self.text_to_image_profile_id = profile.stable_id
+            self.text_to_image_lora_adapters = adapters
+            identity = floating_model_identity(
+                "huggingface", str(parameters["model"]))
+            self.text_to_image_identity = identity
+            self.text_to_image_warnings = (
+                (identity.warning,) if identity.warning else ())
+            progress(f"Loading {profile.title}...")
+            return {
+                "loaded": True,
+                "profile_id": profile.stable_id,
+                "profile_title": profile.title,
+                "device": "cpu",
+                "dtype": "float32",
+                "pipeline": f"Fake{profile.provider}",
+                "model_identity": identity.to_dict(),
+                "warnings": list(self.text_to_image_warnings),
+            }
+        if operation == "text_to_image":
+            profile = text_to_image_profile(str(data["profile_id"]))
+            if (
+                    not self.text_to_image_loaded
+                    or self.text_to_image_profile_id != profile.stable_id):
+                raise RuntimeError(
+                    f"Text-to-image profile is not loaded: "
+                    f"{profile.stable_id}")
+            parameters = profile.normalize(data.get("parameters"))
+            adapters = tuple(
+                adapter.to_dict()
+                for adapter in profile.normalize_lora_adapters(
+                    data.get("lora_adapters")))
+            if adapters != self.text_to_image_lora_adapters:
+                raise RuntimeError(
+                    "Text-to-image LoRA configuration is not loaded")
+            width = int(data["width"])
+            height = int(data["height"])
+            result = Image.new("RGB", (width, height), "teal")
+            output = output_dir / "result.png"
+            result.save(output, format="PNG")
+            requested_seed = int(parameters["seed"])
+            seed = 4545 if requested_seed == -1 else requested_seed
+            identity = (
+                self.text_to_image_identity
+                or floating_model_identity(
+                    "huggingface", str(parameters["model"])))
+            provenance = GenerationProvenance(
+                operation="text_to_image",
+                model=identity,
+                request=RequestProvenance.capture("text_to_image", {
+                    "model_profile_id": profile.stable_id,
+                    "parameters": parameters,
+                    "lora_adapters": list(adapters),
+                    "width": width,
+                    "height": height,
+                }),
+                seed=seed,
+                width=width,
+                height=height,
+                runtime=FrozenJsonObject.capture({
+                    "backend": "fake",
+                    "pipeline": f"Fake{profile.provider}",
+                    "model_profile_id": profile.stable_id,
+                    "device": "cpu",
+                    "dtype": "float32",
+                }),
+                warnings=self.text_to_image_warnings,
             )
             return {
                 "output_path": str(output),

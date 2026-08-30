@@ -1,6 +1,7 @@
 # Diffusers/Transformers worker
 
-Diffusion, image editing, Grounding DINO, SAM 2.1, and the depth models run in
+Diffusion, text-to-image generation, image editing, Grounding DINO, SAM 2.1,
+and the depth models run in
 a persistent subprocess using the shared
 [model-worker environment](model-workers.md).
 

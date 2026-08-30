@@ -20,6 +20,13 @@ from ..generation.image_edit_profiles import (
     normalize_profile_lora_store,
     normalize_profile_store,
 )
+from ..generation.text_to_image_profiles import (
+    DEFAULT_TEXT_TO_IMAGE_PROFILE_ID,
+    TEXT_TO_IMAGE_PROFILE_SCHEMA_VERSION,
+    normalize_text_to_image_lora_store,
+    normalize_text_to_image_profile_store,
+    text_to_image_profile,
+)
 
 
 class Tool:
@@ -62,6 +69,58 @@ class DiffusionTool(Tool):
         self.model_identity: ModelIdentity | None = None
         self.model_identity_policy = ModelIdentityPolicy.WARN
         self.generation_provenance = None
+
+
+class TextToImageTool(Tool):
+    """Persistent settings for generation that has no source image."""
+
+    tool_type = "text_to_image"
+
+    def __init__(
+            self,
+            model_profile_id: str = DEFAULT_TEXT_TO_IMAGE_PROFILE_ID,
+            profile_parameters: dict[str, dict] | None = None,
+            profile_lora_adapters: dict[str, list[dict]] | None = None,
+            *,
+            profile_schema_version: int = TEXT_TO_IMAGE_PROFILE_SCHEMA_VERSION):
+        adopt_lightning_defaults = (
+            int(profile_schema_version) < TEXT_TO_IMAGE_PROFILE_SCHEMA_VERSION)
+        self.profile_parameters = normalize_text_to_image_profile_store(
+            profile_parameters,
+            adopt_lightning_defaults=adopt_lightning_defaults)
+        self.profile_lora_adapters = normalize_text_to_image_lora_store(
+            profile_lora_adapters,
+            adopt_lightning_defaults=adopt_lightning_defaults)
+        self.profile_schema_version = TEXT_TO_IMAGE_PROFILE_SCHEMA_VERSION
+        self.model_profile_id = model_profile_id
+        text_to_image_profile(model_profile_id)
+        self.generation_provenance = None
+
+    @property
+    def parameters(self) -> dict:
+        return self.profile_parameters[self.model_profile_id]
+
+    @property
+    def lora_adapters(self):
+        profile = text_to_image_profile(self.model_profile_id)
+        return profile.normalize_lora_adapters(
+            self.profile_lora_adapters[self.model_profile_id])
+
+    def set_profile(self, profile_id: str) -> None:
+        text_to_image_profile(profile_id)
+        self.model_profile_id = profile_id
+
+    def set_parameter(self, stable_id: str, value) -> None:
+        parameter = text_to_image_profile(
+            self.model_profile_id).parameter(stable_id)
+        self.parameters[stable_id] = parameter.normalize(value)
+
+    def set_lora_adapters(self, values) -> None:
+        profile = text_to_image_profile(self.model_profile_id)
+        self.profile_lora_adapters[self.model_profile_id] = [
+            adapter.to_dict()
+            for adapter in profile.normalize_lora_adapters(values)
+        ]
 
 
 class LamaTool(Tool):

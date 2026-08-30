@@ -21,6 +21,7 @@ from diffusion_editor.app.application import EditorApplication, EngineSet
 from diffusion_editor.app.dialogs import (
     ApplicationDialogCoordinator,
     FileDialogKind,
+    NewDocumentState,
     SettingsState,
     UnsavedDecision,
 )
@@ -75,11 +76,15 @@ class _Canvas:
 class _Dialogs:
     def __init__(self):
         self.files = []
+        self.new_documents = []
         self.settings = []
         self.grounding = []
         self.errors = []
         self.unsaved = []
         self.recoveries = []
+
+    def show_new_document_dialog(self, state, callback):
+        self.new_documents.append((state, callback))
 
     def show_file_dialog(self, spec, callback):
         self.files.append((spec, callback))
@@ -153,6 +158,44 @@ def test_dialog_coordinator_file_specs_cancel_and_last_directory(tmp_path):
     assert app.settings.values["last_dir"] == str(image_path.parent)
     assert canvas.fit_calls == 1
     assert app.status_text == "Imported: source.png"
+    coordinator.close()
+    app.close()
+
+
+def test_new_document_selects_resolution_and_validates_pixel_budget(tmp_path):
+    app, _grounding = _application(tmp_path)
+    canvas = _Canvas()
+    view = _Dialogs()
+    coordinator = ApplicationDialogCoordinator(app, canvas)
+    coordinator.bind_view(view)
+    original_session = app.document_session_id
+    original_image = app.layer_stack.active_layer.image.copy()
+
+    coordinator.new_project()
+    state, callback = view.new_documents[-1]
+    assert state == NewDocumentState(1024, 1024)
+    callback(None)
+    assert app.document_session_id == original_session
+    assert np.array_equal(app.layer_stack.active_layer.image, original_image)
+
+    coordinator.new_project()
+    _state, callback = view.new_documents[-1]
+    callback(NewDocumentState(640, 480))
+    assert (app.layer_stack.width, app.layer_stack.height) == (640, 480)
+    assert tuple(app.layer_stack.active_layer.image[0, 0]) == (
+        255, 255, 255, 255)
+    assert app.status_text == "New 640x480 document"
+    assert canvas.fit_calls == 1
+
+    current_session = app.document_session_id
+    coordinator.new_project()
+    _state, callback = view.new_documents[-1]
+    callback(NewDocumentState(65536, 65536))
+    assert app.document_session_id == current_session
+    assert (app.layer_stack.width, app.layer_stack.height) == (640, 480)
+    assert view.errors[-1][0] == "New Document"
+    assert "pixel" in view.errors[-1][1]
+
     coordinator.close()
     app.close()
 
@@ -329,6 +372,35 @@ def test_native_settings_accept_cancel_reopen_and_destroy(tmp_path):
         assert not service.settings_dialog.open
         assert document.overlay_count == 0
     finally:
+        tc_ui_document_destroy(document)
+
+
+def test_native_new_document_accept_cancel_and_reopen():
+    document = tc_ui_document_create()
+    service = NativeApplicationDialogs(
+        document,
+        lambda: Rect(0.0, 0.0, 800.0, 600.0),
+        lambda: None,
+    )
+    results = []
+    try:
+        service.show_new_document_dialog(
+            NewDocumentState(1024, 768), results.append)
+        assert service.new_document_dialog.open
+        assert service.new_document_width.value == 1024
+        assert service.new_document_height.value == 768
+        assert service.new_document_dialog.activate("cancel")
+        assert results == [None]
+
+        service.show_new_document_dialog(
+            NewDocumentState(800, 600), results.append)
+        service.new_document_width.value = 640
+        service.new_document_height.value = 480
+        assert service.new_document_dialog.activate("create")
+        assert results[-1] == NewDocumentState(640, 480)
+        assert document.overlay_count == 0
+    finally:
+        service.close()
         tc_ui_document_destroy(document)
 
 
