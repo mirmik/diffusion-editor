@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import os
 from pathlib import Path
 from typing import Any, Iterable
@@ -12,14 +12,17 @@ from .image_edit_profiles import (
     ImageEditParameter as TextToImageParameter,
     ParameterChoice,
     ParameterKind,
+    infer_qwen_text_encoder_variant,
     normalize_lora_adapters,
+    qwen_text_encoder_parameters,
 )
 
 
+QWEN_IMAGE_PROFILE_ID = "qwen-image"
 QWEN_IMAGE_2512_PROFILE_ID = "qwen-image-2512"
 DEFAULT_TEXT_TO_IMAGE_PROFILE_ID = QWEN_IMAGE_2512_PROFILE_ID
 DEFAULT_QWEN_IMAGE_OFFLOAD_MODE = "model"
-TEXT_TO_IMAGE_PROFILE_SCHEMA_VERSION = 2
+TEXT_TO_IMAGE_PROFILE_SCHEMA_VERSION = 4
 
 
 def _choice(value: str, label: str | None = None) -> ParameterChoice:
@@ -89,9 +92,17 @@ _QWEN_IMAGE_MODEL = os.environ.get(
     "DIFFUSION_EDITOR_QWEN_IMAGE_MODEL",
     "Qwen/Qwen-Image-2512",
 )
+_QWEN_IMAGE_BASE_MODEL = os.environ.get(
+    "DIFFUSION_EDITOR_QWEN_IMAGE_BASE_MODEL",
+    "Qwen/Qwen-Image",
+)
 _DEFAULT_QWEN_IMAGE_TRANSFORMER = Path(
     "~/soft/ComfyUI/models/diffusion_models/"
     "qwen_image_2512_fp8_e4m3fn_scaled_comfyui.safetensors"
+).expanduser()
+_DEFAULT_QWEN_IMAGE_BASE_TRANSFORMER = Path(
+    "~/soft/ComfyUI/models/diffusion_models/"
+    "qwen_image_fp8mixed.safetensors"
 ).expanduser()
 _DEFAULT_QWEN_TEXT_ENCODER = Path(
     "~/soft/ComfyUI/models/text_encoders/"
@@ -101,19 +112,20 @@ _DEFAULT_QWEN_IMAGE_LORA = Path(
     "~/soft/ComfyUI/models/loras/"
     "Qwen-Image-2512-Lightning-4steps-V1.0-bf16.safetensors"
 ).expanduser()
-_QWEN_LOCAL_FP8 = (
-    _DEFAULT_QWEN_IMAGE_TRANSFORMER.is_file()
-    and _DEFAULT_QWEN_TEXT_ENCODER.is_file()
-)
 _QWEN_IMAGE_TRANSFORMER = os.environ.get(
     "DIFFUSION_EDITOR_QWEN_IMAGE_TRANSFORMER",
     str(_DEFAULT_QWEN_IMAGE_TRANSFORMER)
-    if _QWEN_LOCAL_FP8 else "",
+    if _DEFAULT_QWEN_IMAGE_TRANSFORMER.is_file() else "",
+)
+_QWEN_IMAGE_BASE_TRANSFORMER = os.environ.get(
+    "DIFFUSION_EDITOR_QWEN_IMAGE_BASE_TRANSFORMER",
+    str(_DEFAULT_QWEN_IMAGE_BASE_TRANSFORMER)
+    if _DEFAULT_QWEN_IMAGE_BASE_TRANSFORMER.is_file() else "",
 )
 _QWEN_IMAGE_TEXT_ENCODER = os.environ.get(
     "DIFFUSION_EDITOR_QWEN_IMAGE_TEXT_ENCODER",
     str(_DEFAULT_QWEN_TEXT_ENCODER)
-    if _QWEN_LOCAL_FP8 else "",
+    if _DEFAULT_QWEN_TEXT_ENCODER.is_file() else "",
 )
 _QWEN_IMAGE_LORA = os.environ.get(
     "DIFFUSION_EDITOR_QWEN_IMAGE_LORA",
@@ -181,12 +193,9 @@ _PROFILES = (
                 placeholder="Comfy-style scaled FP8 safetensors",
                 load_time=True,
             ),
-            TextToImageParameter(
-                "text_encoder_checkpoint", "Scaled FP8 text encoder",
-                ParameterKind.STRING, _QWEN_IMAGE_TEXT_ENCODER, "Model",
-                placeholder="Comfy-style scaled FP8 safetensors",
-                load_time=True,
-            ),
+        ) + qwen_text_encoder_parameters(
+            custom_source_default=_QWEN_IMAGE_TEXT_ENCODER,
+        ) + (
             TextToImageParameter(
                 "dtype", "Dtype", ParameterKind.CHOICE,
                 "bfloat16", "Runtime",
@@ -234,6 +243,42 @@ _PROFILES = (
     ),
 )
 
+
+def _with_defaults(
+        parameters: tuple[TextToImageParameter, ...],
+        **defaults: Any) -> tuple[TextToImageParameter, ...]:
+    """Clone a shared provider contract with profile-specific defaults."""
+
+    return tuple(
+        replace(parameter, default=defaults[parameter.stable_id])
+        if parameter.stable_id in defaults else parameter
+        for parameter in parameters
+    )
+
+
+_PROFILES += (
+    TextToImageProfile(
+        stable_id=QWEN_IMAGE_PROFILE_ID,
+        title="Qwen Image (August 2025)",
+        provider="diffusers.qwen_image",
+        model_id=_QWEN_IMAGE_BASE_MODEL,
+        description=(
+            "Original Qwen Image text-to-image model from August 2025. "
+            "Output dimensions always follow the pixel size of the target "
+            "layer."
+        ),
+        dimension_multiple=16,
+        parameters=_with_defaults(
+            _PROFILES[0].parameters,
+            model=_QWEN_IMAGE_BASE_MODEL,
+            transformer_checkpoint=_QWEN_IMAGE_BASE_TRANSFORMER,
+            steps=25,
+            true_cfg_scale=3.0,
+        ),
+        default_lora_adapters=(),
+    ),
+)
+
 _PROFILE_BY_ID = {profile.stable_id: profile for profile in _PROFILES}
 
 
@@ -270,6 +315,10 @@ def normalize_text_to_image_profile_store(
         stored = source.get(profile.stable_id)
         if isinstance(stored, dict):
             stored = dict(stored)
+            if "text_encoder_variant" not in stored:
+                stored["text_encoder_variant"] = (
+                    infer_qwen_text_encoder_variant(stored)
+                )
             if (
                     adopt_lightning_defaults
                     and profile.stable_id == QWEN_IMAGE_2512_PROFILE_ID

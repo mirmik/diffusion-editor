@@ -13,6 +13,20 @@ from typing import Any, Iterable
 
 LEGACY_INSTRUCT_PROFILE_ID = "instruct-pix2pix"
 QWEN_IMAGE_EDIT_PROFILE_ID = "qwen-image-edit-2511"
+QWEN_IMAGE_EDIT_RAPID_AIO_V23_PROFILE_ID = (
+    "qwen-image-edit-rapid-aio-v23"
+)
+QWEN_TEXT_ENCODER_UPSTREAM_ID = "upstream"
+QWEN_TEXT_ENCODER_STANDARD_FP8_ID = "standard-scaled-fp8"
+QWEN_TEXT_ENCODER_HERETIC_BF16_ID = "heretic-bfloat16"
+QWEN_TEXT_ENCODER_HUIHUI_BF16_ID = "huihui-abliterated-bfloat16"
+QWEN_TEXT_ENCODER_CUSTOM_ID = "custom"
+QWEN_HERETIC_TEXT_ENCODER_REPO_ID = (
+    "catplusplus/Qwen-Image-2512-Heretic"
+)
+QWEN_HUIHUI_TEXT_ENCODER_REPO_ID = (
+    "huihui-ai/Qwen2.5-VL-7B-Instruct-abliterated"
+)
 FLUX2_KLEIN_PROFILE_ID = "flux2-klein-4b"
 SENSENOVA_U15_PROFILE_ID = "sensenova-u1.5-8b-mot-preview"
 DEFAULT_IMAGE_EDIT_PROFILE_ID = QWEN_IMAGE_EDIT_PROFILE_ID
@@ -286,9 +300,20 @@ _DEFAULT_QWEN_TRANSFORMER = Path(
     "~/soft/ComfyUI/models/diffusion_models/"
     "qwen_image_edit_2511_fp8mixed.safetensors"
 ).expanduser()
+_DEFAULT_QWEN_RAPID_AIO_V23_TRANSFORMER = Path(
+    "~/soft/ComfyUI/models/diffusion_models/"
+    "qwen-image-edit-rapid-aio-v23"
+).expanduser()
 _DEFAULT_QWEN_TEXT_ENCODER = Path(
     "~/soft/ComfyUI/models/text_encoders/"
     "qwen_2.5_vl_7b_fp8_scaled.safetensors"
+).expanduser()
+_DEFAULT_QWEN_HERETIC_TEXT_ENCODER = Path(
+    "~/soft/ComfyUI/models/text_encoders/qwen-image-2512-heretic"
+).expanduser()
+_DEFAULT_QWEN_HUIHUI_TEXT_ENCODER = Path(
+    "~/soft/ComfyUI/models/text_encoders/"
+    "qwen2.5-vl-7b-huihui-abliterated"
 ).expanduser()
 _QWEN_LORA = os.environ.get(
     "DIFFUSION_EDITOR_QWEN_IMAGE_EDIT_LORA",
@@ -304,12 +329,176 @@ _QWEN_TRANSFORMER = os.environ.get(
     str(_DEFAULT_QWEN_TRANSFORMER)
     if _DEFAULT_QWEN_TRANSFORMER.is_file() else "",
 )
+_QWEN_RAPID_AIO_V23_TRANSFORMER = os.environ.get(
+    "DIFFUSION_EDITOR_QWEN_IMAGE_EDIT_RAPID_AIO_V23_TRANSFORMER",
+    str(_DEFAULT_QWEN_RAPID_AIO_V23_TRANSFORMER)
+    if all(
+        (_DEFAULT_QWEN_RAPID_AIO_V23_TRANSFORMER / name).is_file()
+        for name in (
+            "config.json",
+            "diffusion_pytorch_model.safetensors.index.json",
+            "diffusion_pytorch_model-00001-of-00003.safetensors",
+            "diffusion_pytorch_model-00002-of-00003.safetensors",
+            "diffusion_pytorch_model-00003-of-00003.safetensors",
+        )
+    ) else "",
+)
 _QWEN_TEXT_ENCODER = os.environ.get(
     "DIFFUSION_EDITOR_QWEN_IMAGE_EDIT_TEXT_ENCODER",
     str(_DEFAULT_QWEN_TEXT_ENCODER)
     if _DEFAULT_QWEN_TEXT_ENCODER.is_file() else "",
 )
-_QWEN_LOCAL_FP8 = bool(_QWEN_TRANSFORMER and _QWEN_TEXT_ENCODER)
+_QWEN_HERETIC_TEXT_ENCODER = os.environ.get(
+    "DIFFUSION_EDITOR_QWEN_HERETIC_TEXT_ENCODER",
+    str(_DEFAULT_QWEN_HERETIC_TEXT_ENCODER)
+    if all(
+        (_DEFAULT_QWEN_HERETIC_TEXT_ENCODER / name).is_file()
+        for name in (
+            "config.json",
+            "model.safetensors.index.json",
+            "model-00001-of-00004.safetensors",
+            "model-00002-of-00004.safetensors",
+            "model-00003-of-00004.safetensors",
+            "model-00004-of-00004.safetensors",
+        )
+    ) else "",
+)
+_QWEN_HUIHUI_TEXT_ENCODER = os.environ.get(
+    "DIFFUSION_EDITOR_QWEN_HUIHUI_TEXT_ENCODER",
+    str(_DEFAULT_QWEN_HUIHUI_TEXT_ENCODER)
+    if all(
+        (_DEFAULT_QWEN_HUIHUI_TEXT_ENCODER / name).is_file()
+        for name in (
+            "config.json",
+            "model.safetensors.index.json",
+            "model-00001-of-00004.safetensors",
+            "model-00002-of-00004.safetensors",
+            "model-00003-of-00004.safetensors",
+            "model-00004-of-00004.safetensors",
+        )
+    ) else "",
+)
+
+
+def qwen_text_encoder_parameters(
+    *,
+    custom_source_default: str = _QWEN_TEXT_ENCODER,
+) -> tuple[ImageEditParameter, ...]:
+    """Common independent text-encoder selector for Qwen pipelines."""
+
+    default_variant = (
+        QWEN_TEXT_ENCODER_STANDARD_FP8_ID
+        if custom_source_default
+        else QWEN_TEXT_ENCODER_UPSTREAM_ID
+    )
+    return (
+        ImageEditParameter(
+            "text_encoder_variant", "Text encoder",
+            ParameterKind.CHOICE, default_variant, "Model",
+            choices=(
+                _choice(
+                    QWEN_TEXT_ENCODER_UPSTREAM_ID,
+                    "Upstream from Model",
+                ),
+                _choice(
+                    QWEN_TEXT_ENCODER_STANDARD_FP8_ID,
+                    "Standard scaled FP8",
+                ),
+                _choice(
+                    QWEN_TEXT_ENCODER_HERETIC_BF16_ID,
+                    "Heretic BF16",
+                ),
+                _choice(
+                    QWEN_TEXT_ENCODER_HUIHUI_BF16_ID,
+                    "Huihui Abliterated BF16",
+                ),
+                _choice(
+                    QWEN_TEXT_ENCODER_CUSTOM_ID,
+                    "Custom file / directory",
+                ),
+            ),
+            description=(
+                "Independent Qwen2.5-VL encoder used to condition the "
+                "selected transformer."
+            ),
+            load_time=True,
+        ),
+        ImageEditParameter(
+            "text_encoder_checkpoint", "Text encoder source",
+            ParameterKind.STRING, custom_source_default, "Model",
+            placeholder="Scaled-FP8 file, Transformers directory or repo ID",
+            description=(
+                "Used by Standard scaled FP8 and Custom; named BF16 "
+                "encoders and Upstream ignore it."
+            ),
+            load_time=True,
+        ),
+    )
+
+
+def resolve_qwen_text_encoder_source(parameters: dict[str, Any]) -> str:
+    """Resolve a stable selector value to its concrete local/remote source."""
+
+    variant = str(parameters.get(
+        "text_encoder_variant",
+        QWEN_TEXT_ENCODER_STANDARD_FP8_ID,
+    ))
+    if variant == QWEN_TEXT_ENCODER_UPSTREAM_ID:
+        return ""
+    if variant == QWEN_TEXT_ENCODER_STANDARD_FP8_ID:
+        source = str(parameters.get("text_encoder_checkpoint", "")).strip()
+        label = "Standard scaled FP8"
+    elif variant == QWEN_TEXT_ENCODER_HERETIC_BF16_ID:
+        source = _QWEN_HERETIC_TEXT_ENCODER
+        label = "Heretic BF16"
+    elif variant == QWEN_TEXT_ENCODER_HUIHUI_BF16_ID:
+        source = _QWEN_HUIHUI_TEXT_ENCODER
+        label = "Huihui Abliterated BF16"
+    elif variant == QWEN_TEXT_ENCODER_CUSTOM_ID:
+        source = str(parameters.get("text_encoder_checkpoint", "")).strip()
+        label = "Custom"
+    else:
+        raise ValueError(f"Unsupported Qwen text encoder: {variant}")
+    if not source:
+        raise ValueError(f"{label} text encoder is not installed/configured")
+    candidate = Path(source).expanduser()
+    return str(candidate.absolute()) if candidate.exists() else source
+
+
+def infer_qwen_text_encoder_variant(
+    values: dict[str, Any],
+) -> str:
+    """Migrate the former path-only encoder setting without changing it."""
+
+    source = str(values.get("text_encoder_checkpoint", "")).strip()
+    if not source:
+        return QWEN_TEXT_ENCODER_UPSTREAM_ID
+    expanded = Path(source).expanduser()
+    if (
+        source.endswith("qwen_2.5_vl_7b_fp8_scaled.safetensors")
+        or (
+            _QWEN_TEXT_ENCODER
+            and expanded == Path(_QWEN_TEXT_ENCODER).expanduser()
+        )
+    ):
+        return QWEN_TEXT_ENCODER_STANDARD_FP8_ID
+    if (
+        source == QWEN_HERETIC_TEXT_ENCODER_REPO_ID
+        or (
+            _QWEN_HERETIC_TEXT_ENCODER
+            and expanded == Path(_QWEN_HERETIC_TEXT_ENCODER).expanduser()
+        )
+    ):
+        return QWEN_TEXT_ENCODER_HERETIC_BF16_ID
+    if (
+        source == QWEN_HUIHUI_TEXT_ENCODER_REPO_ID
+        or (
+            _QWEN_HUIHUI_TEXT_ENCODER
+            and expanded == Path(_QWEN_HUIHUI_TEXT_ENCODER).expanduser()
+        )
+    ):
+        return QWEN_TEXT_ENCODER_HUIHUI_BF16_ID
+    return QWEN_TEXT_ENCODER_CUSTOM_ID
 
 
 def qwen_multiple_angles_lora_adapter(
@@ -331,7 +520,15 @@ def qwen_multiple_angles_lora_adapter(
 def _qwen_parameters(
     *,
     prompt_placeholder: str = "Describe the requested edit",
+    transformer_checkpoint: str = _QWEN_TRANSFORMER,
+    text_encoder_checkpoint: str = _QWEN_TEXT_ENCODER,
+    steps: int | None = None,
+    cpu_offload: bool | None = None,
 ) -> tuple[ImageEditParameter, ...]:
+    if steps is None:
+        steps = 4 if _QWEN_LORA else 40
+    if cpu_offload is None:
+        cpu_offload = bool(transformer_checkpoint and text_encoder_checkpoint)
     parameters = (
         ImageEditParameter(
             "prompt", "Prompt", ParameterKind.TEXT, "", "Conditioning",
@@ -351,7 +548,7 @@ def _qwen_parameters(
         ),
         ImageEditParameter(
             "steps", "Steps", ParameterKind.INTEGER,
-            4 if _QWEN_LORA else 40, "Sampling", 1, 100, 1,
+            steps, "Sampling", 1, 100, 1,
         ),
         ImageEditParameter(
             "seed", "Seed", ParameterKind.INTEGER, -1, "Sampling",
@@ -377,20 +574,17 @@ def _qwen_parameters(
     return parameters + (
         ImageEditParameter(
             "transformer_checkpoint", "Transformer checkpoint",
-            ParameterKind.STRING, _QWEN_TRANSFORMER, "Model",
+            ParameterKind.STRING, transformer_checkpoint, "Model",
             placeholder="Empty = transformer from Model",
-            description="Standalone scaled-FP8 safetensors override.",
+            description=(
+                "Standalone scaled-FP8 safetensors or sharded Diffusers "
+                "FP8 transformer directory."
+            ),
             load_time=True,
         ),
-        ImageEditParameter(
-            "text_encoder_checkpoint", "Text encoder checkpoint",
-            ParameterKind.STRING, _QWEN_TEXT_ENCODER, "Model",
-            placeholder="Empty = text encoder from Model",
-            description="Standalone scaled-FP8 safetensors override.",
-            load_time=True,
-        ),
-    ) + _runtime_parameters(
-        _QWEN_MODEL, cpu_offload=_QWEN_LOCAL_FP8)
+    ) + qwen_text_encoder_parameters(
+        custom_source_default=text_encoder_checkpoint,
+    ) + _runtime_parameters(_QWEN_MODEL, cpu_offload=cpu_offload)
 
 
 _PROFILES = (
@@ -410,6 +604,26 @@ _PROFILES = (
                 _QWEN_LORA,
                 1.0,
                 bool(_QWEN_LORA),
+            ),
+        ),
+    ),
+    ImageEditProfile(
+        stable_id=QWEN_IMAGE_EDIT_RAPID_AIO_V23_PROFILE_ID,
+        title="Qwen Image Edit Rapid AIO NSFW v23",
+        provider="diffusers.qwen_image_edit_plus",
+        model_id="prithivMLmods/Qwen-Image-Edit-Rapid-AIO-V23",
+        description=(
+            "Rapid AIO NSFW v23; embedded four-step acceleration and "
+            "prompt-adherence merge."
+        ),
+        fast=True,
+        max_input_images=2,
+        parameters=_qwen_parameters(
+            transformer_checkpoint=_QWEN_RAPID_AIO_V23_TRANSFORMER,
+            text_encoder_checkpoint=_QWEN_TEXT_ENCODER,
+            steps=4,
+            cpu_offload=bool(
+                _QWEN_RAPID_AIO_V23_TRANSFORMER and _QWEN_TEXT_ENCODER
             ),
         ),
     ),
@@ -654,6 +868,13 @@ def normalize_profile_store(
         stored = source.get(profile.stable_id)
         if isinstance(stored, dict):
             stored = dict(stored)
+            if (
+                profile.provider == "diffusers.qwen_image_edit_plus"
+                and "text_encoder_variant" not in stored
+            ):
+                stored["text_encoder_variant"] = (
+                    infer_qwen_text_encoder_variant(stored)
+                )
             if (
                 profile.stable_id == QWEN_IMAGE_EDIT_PROFILE_ID
                 and "transformer_checkpoint" not in stored

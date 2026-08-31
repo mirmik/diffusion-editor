@@ -10,6 +10,9 @@ from diffusion_editor.generation.image_edit_profiles import (
     FLUX2_KLEIN_PROFILE_ID,
     LEGACY_INSTRUCT_PROFILE_ID,
     QWEN_IMAGE_EDIT_PROFILE_ID,
+    QWEN_IMAGE_EDIT_RAPID_AIO_V23_PROFILE_ID,
+    QWEN_TEXT_ENCODER_HERETIC_BF16_ID,
+    QWEN_TEXT_ENCODER_UPSTREAM_ID,
     SENSENOVA_U15_PROFILE_ID,
     image_edit_profile,
 )
@@ -200,6 +203,65 @@ def test_text_to_image_cpu_ignores_accelerator_offload_mode():
     assert events == ["cpu"]
 
 
+def test_qwen_lora_loader_normalizes_prefixed_kohya_checkpoint(
+    monkeypatch,
+    tmp_path,
+):
+    source = tmp_path / "prefixed-qwen.safetensors"
+    source.touch()
+    raw_state = {
+        "transformer.transformer_blocks.0.attn.to_q.alpha": object(),
+        (
+            "transformer.transformer_blocks.0.attn.to_q."
+            "lora_down.weight"
+        ): object(),
+        (
+            "transformer.transformer_blocks.0.attn.to_q."
+            "lora_up.weight"
+        ): object(),
+    }
+    captured: dict[str, object] = {}
+
+    class Header:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def keys(self):
+            return raw_state.keys()
+
+    class FakePipe:
+        def load_lora_weights(self, state_dict, *, adapter_name):
+            captured["state_dict"] = state_dict
+            captured["adapter_name"] = adapter_name
+
+    monkeypatch.setitem(
+        sys.modules,
+        "safetensors",
+        SimpleNamespace(
+            SafetensorError=RuntimeError,
+            safe_open=lambda *_args, **_kwargs: Header(),
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "safetensors.torch",
+        SimpleNamespace(load_file=lambda _path: raw_state),
+    )
+
+    RealMlBackend._load_qwen_lora_weights(
+        FakePipe(), str(source), "test_adapter")
+
+    assert captured["adapter_name"] == "test_adapter"
+    assert set(captured["state_dict"]) == {
+        "transformer_blocks.0.attn.to_q.alpha",
+        "transformer_blocks.0.attn.to_q.lora_down.weight",
+        "transformer_blocks.0.attn.to_q.lora_up.weight",
+    }
+
+
 def test_text_to_image_load_applies_scaled_fp8_component_offload(monkeypatch):
     captured: dict[str, object] = {}
 
@@ -235,10 +297,18 @@ def test_text_to_image_load_applies_scaled_fp8_component_offload(monkeypatch):
             cast_lora=(name, dtype)))
     monkeypatch.setattr(
         backend,
-        "_load_qwen_fp8_components",
+        "_load_qwen_transformer_component",
         lambda model, **kwargs: (
-            captured.update(fp8_model=model, fp8_kwargs=kwargs)
-            or ("fp8-transformer", "fp8-text-encoder")
+            captured.update(transformer_model=model, transformer_kwargs=kwargs)
+            or ("fp8-transformer", "local-scaled-fp8")
+        ),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_load_qwen_text_encoder_component",
+        lambda model, **kwargs: (
+            captured.update(encoder_model=model, encoder_kwargs=kwargs)
+            or ("fp8-text-encoder", "local-scaled-fp8")
         ),
     )
     monkeypatch.setitem(
@@ -276,10 +346,16 @@ def test_text_to_image_load_applies_scaled_fp8_component_offload(monkeypatch):
     assert loaded["offload_mode"] == "model"
     assert loaded["component_mode"] == "local-scaled-fp8"
     assert captured["model"] == "fake/qwen-image"
-    assert captured["fp8_model"] == "fake/qwen-image"
-    assert captured["fp8_kwargs"] == {
+    assert captured["transformer_model"] == "fake/qwen-image"
+    assert captured["transformer_kwargs"] == {
         "transformer_path": "/models/qwen-image-2512-fp8.safetensors",
-        "text_encoder_path": "/models/qwen-vl-fp8.safetensors",
+        "compute_dtype": "bfloat16",
+        "revision": None,
+        "local_files_only": True,
+    }
+    assert captured["encoder_kwargs"] == {
+        "text_encoder_source": "/models/qwen-vl-fp8.safetensors",
+        "compute_dtype": "bfloat16",
         "revision": None,
         "local_files_only": True,
     }
@@ -296,6 +372,76 @@ def test_text_to_image_load_applies_scaled_fp8_component_offload(monkeypatch):
     assert loaded["active_lora_adapters"] == [
         "text_to_image_0_lightning"]
     assert captured["model_offload"] is True
+
+
+def test_text_to_image_combines_fp8_transformer_with_heretic_encoder(
+        monkeypatch, tmp_path):
+    from diffusion_editor.generation import image_edit_profiles
+
+    captured: dict[str, object] = {}
+    heretic = tmp_path / "heretic"
+    heretic.mkdir()
+
+    class FakeQwenPipeline(_FakePipeline):
+        transformer = object()
+
+    class PipelineFactory:
+        @classmethod
+        def from_pretrained(cls, model, **kwargs):
+            captured.update(model=model, load_kwargs=kwargs)
+            return FakeQwenPipeline()
+
+    monkeypatch.setattr(
+        image_edit_profiles, "_QWEN_HERETIC_TEXT_ENCODER", str(heretic))
+    backend = RealMlBackend()
+    monkeypatch.setattr(
+        backend, "_release_accelerator_memory", lambda: None)
+    monkeypatch.setattr(backend, "_device", lambda _requested: "cpu")
+    monkeypatch.setattr(
+        backend, "_configured_dtype", lambda _name, _device: "bfloat16")
+    monkeypatch.setattr(
+        backend, "_cached_pipeline_directory",
+        lambda _model, _revision: "/cache/qwen-image-2512")
+    monkeypatch.setattr(
+        backend, "_load_qwen_transformer_component",
+        lambda _model, **_kwargs: (
+            "fp8-transformer", "local-scaled-fp8"))
+    monkeypatch.setattr(
+        backend, "_load_qwen_text_encoder_component",
+        lambda _model, **kwargs: (
+            captured.update(encoder_kwargs=kwargs)
+            or ("heretic-encoder", "text-encoder-bfloat16")))
+    monkeypatch.setitem(
+        sys.modules,
+        "diffusers",
+        SimpleNamespace(QwenImagePipeline=PipelineFactory),
+    )
+    parameters = text_to_image_profile(
+        QWEN_IMAGE_2512_PROFILE_ID).defaults()
+    parameters.update({
+        "model": "fake/qwen-image",
+        "device": "cpu",
+        "local_files_only": True,
+        "offload_mode": "none",
+        "transformer_checkpoint": "/models/qwen-image-fp8.safetensors",
+        "text_encoder_variant": QWEN_TEXT_ENCODER_HERETIC_BF16_ID,
+    })
+
+    loaded = backend.load_text_to_image({
+        "profile_id": QWEN_IMAGE_2512_PROFILE_ID,
+        "parameters": parameters,
+        "lora_adapters": [],
+    })
+
+    assert loaded["component_mode"] == (
+        "local-scaled-fp8+text-encoder-bfloat16")
+    assert captured["model"] == "/cache/qwen-image-2512"
+    assert captured["load_kwargs"]["text_encoder"] == "heretic-encoder"
+    assert captured["encoder_kwargs"]["text_encoder_source"] == str(heretic)
+    assert loaded["model_identity"]["text_encoder"] == {
+        "source": str(heretic),
+        "variant": QWEN_TEXT_ENCODER_HERETIC_BF16_ID,
+    }
 
 
 def test_text_to_image_omits_inactive_negative_prompt(monkeypatch):
@@ -352,6 +498,7 @@ def test_text_to_image_omits_inactive_negative_prompt(monkeypatch):
     "profile_id",
     [
         QWEN_IMAGE_EDIT_PROFILE_ID,
+        QWEN_IMAGE_EDIT_RAPID_AIO_V23_PROFILE_ID,
         FLUX2_KLEIN_PROFILE_ID,
     ],
 )
@@ -403,6 +550,11 @@ def test_diffusers_image_edit_passes_second_image_as_ordered_list(
     assert isinstance(captured["image"], list)
     assert [image.size for image in captured["image"]] == [(8, 6), (5, 7)]
     assert all(image.mode == "RGB" for image in captured["image"])
+    if profile_id in {
+        QWEN_IMAGE_EDIT_PROFILE_ID,
+        QWEN_IMAGE_EDIT_RAPID_AIO_V23_PROFILE_ID,
+    }:
+        assert "negative_prompt" not in captured
 
 
 def test_qwen_multiple_angles_loads_lightning_and_angle_adapters(monkeypatch):
@@ -445,6 +597,7 @@ def test_qwen_multiple_angles_loads_lightning_and_angle_adapters(monkeypatch):
         "cpu_offload": False,
         "transformer_checkpoint": "",
         "text_encoder_checkpoint": "",
+        "text_encoder_variant": QWEN_TEXT_ENCODER_UPSTREAM_ID,
     })
     adapters = (
         {
@@ -488,6 +641,98 @@ def test_qwen_multiple_angles_loads_lightning_and_angle_adapters(monkeypatch):
         ["image_edit_0_lightning", "image_edit_1_multiple_angles"],
         [1.0, 0.9],
     )
+
+
+def test_qwen_rapid_aio_loads_sharded_fp8_without_default_lora(
+        monkeypatch, tmp_path):
+    captured: dict[str, object] = {}
+    transformer_dir = tmp_path / "rapid-v23"
+    transformer_dir.mkdir()
+
+    class FakeQwenPipeline(_FakePipeline):
+        transformer = object()
+
+    class PipelineFactory:
+        @classmethod
+        def from_pretrained(cls, model, **kwargs):
+            captured.update(model=model, load_kwargs=kwargs)
+            return FakeQwenPipeline()
+
+    backend = RealMlBackend()
+    monkeypatch.setattr(
+        backend, "_release_accelerator_memory", lambda: None)
+    monkeypatch.setattr(backend, "_device", lambda _requested: "cpu")
+    monkeypatch.setattr(
+        backend, "_configured_dtype",
+        lambda _name, _device: "bfloat16")
+    monkeypatch.setattr(
+        backend,
+        "_cached_pipeline_directory",
+        lambda _model, _revision: "/cache/qwen-edit-2511",
+    )
+    monkeypatch.setattr(
+        backend,
+        "_load_qwen_transformer_component",
+        lambda model, **kwargs: (
+            captured.update(transformer_model=model, transformer_kwargs=kwargs)
+            or ("rapid-transformer", "local-diffusers-fp8-layerwise")
+        ),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_load_qwen_text_encoder_component",
+        lambda model, **kwargs: (
+            captured.update(encoder_model=model, encoder_kwargs=kwargs)
+            or ("fp8-text-encoder", "local-scaled-fp8")
+        ),
+    )
+    fake_diffusers = _fake_diffusers(FakeQwenPipeline)
+    fake_diffusers.QwenImageEditPlusPipeline = PipelineFactory
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+    profile = image_edit_profile(
+        QWEN_IMAGE_EDIT_RAPID_AIO_V23_PROFILE_ID)
+    parameters = profile.defaults()
+    parameters.update({
+        "model": "Qwen/Qwen-Image-Edit-2511",
+        "device": "cpu",
+        "dtype": "bfloat16",
+        "cpu_offload": False,
+        "local_files_only": True,
+        "transformer_checkpoint": str(transformer_dir),
+        "text_encoder_checkpoint": "/models/qwen-vl-fp8.safetensors",
+    })
+
+    loaded = backend.load_image_edit({
+        "profile_id": profile.stable_id,
+        "parameters": parameters,
+        "lora_adapters": [],
+    })
+
+    assert loaded["component_mode"] == "local-diffusers-fp8-layerwise"
+    assert loaded["active_lora_adapters"] == []
+    assert loaded["model_identity"]["repository"] == profile.model_id
+    assert captured["model"] == "/cache/qwen-edit-2511"
+    assert captured["load_kwargs"]["transformer"] == "rapid-transformer"
+    assert captured["transformer_kwargs"]["compute_dtype"] == "bfloat16"
+
+
+def test_qwen_rapid_aio_rejects_missing_transformer(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules, "diffusers", _fake_diffusers(_FakePipeline))
+    profile = image_edit_profile(
+        QWEN_IMAGE_EDIT_RAPID_AIO_V23_PROFILE_ID)
+    parameters = profile.defaults()
+    parameters.update({
+        "transformer_checkpoint": "",
+        "text_encoder_checkpoint": "",
+    })
+
+    with pytest.raises(ValueError, match="requires its Transformer"):
+        RealMlBackend().load_image_edit({
+            "profile_id": profile.stable_id,
+            "parameters": parameters,
+            "lora_adapters": [],
+        })
 
 
 def test_sensenova_provider_loads_gguf_and_uses_standalone_edit_adapter(

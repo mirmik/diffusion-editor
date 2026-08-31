@@ -83,8 +83,9 @@ class TextToImageTool(Tool):
             profile_lora_adapters: dict[str, list[dict]] | None = None,
             *,
             profile_schema_version: int = TEXT_TO_IMAGE_PROFILE_SCHEMA_VERSION):
-        adopt_lightning_defaults = (
-            int(profile_schema_version) < TEXT_TO_IMAGE_PROFILE_SCHEMA_VERSION)
+        # Schema v2 introduced Lightning defaults.  Later migrations must not
+        # re-apply that one-time policy to already-v2 documents.
+        adopt_lightning_defaults = int(profile_schema_version) < 2
         self.profile_parameters = normalize_text_to_image_profile_store(
             profile_parameters,
             adopt_lightning_defaults=adopt_lightning_defaults)

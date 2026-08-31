@@ -21,6 +21,7 @@ from diffusion_editor.generation.image_edit_profiles import (
 )
 from diffusion_editor.generation.text_to_image_profiles import (
     QWEN_IMAGE_2512_PROFILE_ID,
+    QWEN_IMAGE_PROFILE_ID,
     TEXT_TO_IMAGE_PROFILE_SCHEMA_VERSION,
     text_to_image_profile,
 )
@@ -154,6 +155,38 @@ def test_project_file_roundtrips_text_to_image_tool_without_patch(tmp_path):
     assert restored_layer.tool.parameters["steps"] == 17
     assert restored_layer.tool.profile_schema_version == (
         TEXT_TO_IMAGE_PROFILE_SCHEMA_VERSION)
+
+
+def test_project_file_roundtrips_original_qwen_image_profile(tmp_path):
+    stack = LayerStack()
+    stack.init_from_image(_solid_rgba(12, 10, (255, 255, 255, 255)))
+    layer = Layer("Original Qwen Image", 7, 5)
+    layer.tool = TextToImageTool(model_profile_id=QWEN_IMAGE_PROFILE_ID)
+    layer.tool.set_parameter("prompt", "vintage botanical plate")
+    layer.tool.set_parameter("steps", 29)
+    layer.tool.set_lora_adapters([{
+        "stable_id": "original-only",
+        "label": "Original-only adapter",
+        "source": "/models/original-only.safetensors",
+        "weight": 0.65,
+        "enabled": True,
+    }])
+    stack.insert_layer(layer)
+    path = tmp_path / "text-to-image-original-qwen.deproj"
+
+    stack.save_project(str(path))
+    restored = LayerStack()
+    restored.load_project(str(path))
+
+    tool = restored.active_layer.tool
+    assert isinstance(tool, TextToImageTool)
+    assert tool.model_profile_id == QWEN_IMAGE_PROFILE_ID
+    assert tool.parameters["prompt"] == "vintage botanical plate"
+    assert tool.parameters["steps"] == 29
+    assert [adapter.stable_id for adapter in tool.lora_adapters] == [
+        "original-only"]
+    assert tool.profile_lora_adapters[QWEN_IMAGE_2512_PROFILE_ID] != (
+        tool.profile_lora_adapters[QWEN_IMAGE_PROFILE_ID])
 
 
 def test_text_to_image_explicit_empty_lora_stack_survives_roundtrip(tmp_path):

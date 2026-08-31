@@ -16,6 +16,12 @@ from diffusion_editor.generation.image_edit_profiles import (
     FLUX2_KLEIN_PROFILE_ID,
     LEGACY_INSTRUCT_PROFILE_ID,
     QWEN_IMAGE_EDIT_PROFILE_ID,
+    QWEN_IMAGE_EDIT_RAPID_AIO_V23_PROFILE_ID,
+    QWEN_TEXT_ENCODER_CUSTOM_ID,
+    QWEN_TEXT_ENCODER_HERETIC_BF16_ID,
+    QWEN_TEXT_ENCODER_HUIHUI_BF16_ID,
+    QWEN_TEXT_ENCODER_STANDARD_FP8_ID,
+    QWEN_TEXT_ENCODER_UPSTREAM_ID,
     SENSENOVA_U15_PROFILE_ID,
     all_image_edit_parameters,
     image_edit_profile,
@@ -23,6 +29,7 @@ from diffusion_editor.generation.image_edit_profiles import (
     normalize_lora_adapters,
     normalize_profile_store,
     qwen_multiple_angles_lora_adapter,
+    resolve_qwen_text_encoder_source,
 )
 from diffusion_editor.generation.provenance import capture_tool_state
 
@@ -42,6 +49,7 @@ def test_builtin_profiles_are_stable_and_declarative():
     profiles = image_edit_profiles()
     assert [profile.stable_id for profile in profiles] == [
         QWEN_IMAGE_EDIT_PROFILE_ID,
+        QWEN_IMAGE_EDIT_RAPID_AIO_V23_PROFILE_ID,
         FLUX2_KLEIN_PROFILE_ID,
         SENSENOVA_U15_PROFILE_ID,
         LEGACY_INSTRUCT_PROFILE_ID,
@@ -54,7 +62,7 @@ def test_builtin_profiles_are_stable_and_declarative():
         assert {"prompt", "steps", "seed", "model", "dtype", "device"} <= set(ids)
         assert set(profile.normalize({})) == set(ids)
     assert [profile.max_input_images for profile in profiles] == [
-        2, 2, 2, 1,
+        2, 2, 2, 2, 1,
     ]
 
 
@@ -71,8 +79,70 @@ def test_qwen_prefers_installed_scaled_fp8_components():
             "qwen_2.5_vl_7b_fp8_scaled.safetensors")
     assert defaults["cpu_offload"] is bool(
         defaults["transformer_checkpoint"])
+    assert defaults["text_encoder_variant"] == (
+        QWEN_TEXT_ENCODER_STANDARD_FP8_ID
+        if defaults["text_encoder_checkpoint"]
+        else QWEN_TEXT_ENCODER_UPSTREAM_ID
+    )
+    assert [choice.value for choice in qwen.parameter(
+        "text_encoder_variant").choices] == [
+        QWEN_TEXT_ENCODER_UPSTREAM_ID,
+        QWEN_TEXT_ENCODER_STANDARD_FP8_ID,
+        QWEN_TEXT_ENCODER_HERETIC_BF16_ID,
+        QWEN_TEXT_ENCODER_HUIHUI_BF16_ID,
+        QWEN_TEXT_ENCODER_CUSTOM_ID,
+    ]
     assert image_edit_profile(
         FLUX2_KLEIN_PROFILE_ID).defaults()["cpu_offload"] is False
+
+
+def test_qwen_encoder_selector_resolves_independently(monkeypatch, tmp_path):
+    from diffusion_editor.generation import image_edit_profiles
+
+    heretic = tmp_path / "heretic"
+    heretic.mkdir()
+    huihui = tmp_path / "huihui"
+    huihui.mkdir()
+    monkeypatch.setattr(
+        image_edit_profiles, "_QWEN_HERETIC_TEXT_ENCODER", str(heretic))
+    monkeypatch.setattr(
+        image_edit_profiles, "_QWEN_HUIHUI_TEXT_ENCODER", str(huihui))
+
+    assert resolve_qwen_text_encoder_source({
+        "text_encoder_variant": QWEN_TEXT_ENCODER_UPSTREAM_ID,
+    }) == ""
+    assert resolve_qwen_text_encoder_source({
+        "text_encoder_variant": QWEN_TEXT_ENCODER_HERETIC_BF16_ID,
+    }) == str(heretic)
+    assert resolve_qwen_text_encoder_source({
+        "text_encoder_variant": QWEN_TEXT_ENCODER_HUIHUI_BF16_ID,
+    }) == str(huihui)
+    assert resolve_qwen_text_encoder_source({
+        "text_encoder_variant": QWEN_TEXT_ENCODER_CUSTOM_ID,
+        "text_encoder_checkpoint": "org/custom-encoder",
+    }) == "org/custom-encoder"
+
+
+def test_qwen_rapid_aio_v23_is_an_independent_four_step_profile():
+    profile = image_edit_profile(
+        QWEN_IMAGE_EDIT_RAPID_AIO_V23_PROFILE_ID)
+    defaults = profile.defaults()
+
+    assert profile.fast
+    assert not profile.primary
+    assert profile.model_id == (
+        "prithivMLmods/Qwen-Image-Edit-Rapid-AIO-V23")
+    assert defaults["model"] == "Qwen/Qwen-Image-Edit-2511"
+    assert defaults["steps"] == 4
+    assert defaults["true_cfg_scale"] == 1.0
+    assert defaults["guidance_scale"] == 1.0
+    assert profile.default_lora_adapters == ()
+    if defaults["transformer_checkpoint"]:
+        assert defaults["transformer_checkpoint"].endswith(
+            "qwen-image-edit-rapid-aio-v23")
+        assert defaults["text_encoder_checkpoint"].endswith(
+            "qwen_2.5_vl_7b_fp8_scaled.safetensors")
+        assert defaults["cpu_offload"] is True
 
 
 def test_qwen_multiple_angles_is_an_explicit_optional_adapter():

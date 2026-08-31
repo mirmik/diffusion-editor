@@ -46,6 +46,10 @@ from diffusion_editor.generation.image_edit_profiles import (
     SENSENOVA_U15_PROFILE_ID,
     image_edit_profile,
 )
+from diffusion_editor.generation.text_to_image_profiles import (
+    QWEN_IMAGE_2512_PROFILE_ID,
+    QWEN_IMAGE_PROFILE_ID,
+)
 
 
 class _Settings:
@@ -428,6 +432,54 @@ def test_text_to_image_panel_generates_at_layer_size_without_mask(tmp_path):
         panel.close()
         coordinator.close()
         tc_ui_document_destroy(document)
+
+
+def test_text_to_image_panel_switches_to_original_qwen_profile(tmp_path):
+    application, _diffusion, _instruct, _lama = _application(tmp_path)
+    layer = Layer(
+        "Original Qwen region",
+        32,
+        16,
+        np.zeros((16, 32, 4), dtype=np.uint8),
+    )
+    layer.tool = TextToImageTool()
+    application.layer_stack.insert_layer(layer)
+    coordinator = GenerationPanelsCoordinator(application, _Canvas())
+
+    assert [choice.stable_id for choice in
+            coordinator.state.text_to_image.model_profiles] == [
+        QWEN_IMAGE_2512_PROFILE_ID,
+        QWEN_IMAGE_PROFILE_ID,
+    ]
+    coordinator.handle_intent(GenerationIntent(
+        GenerationAction.SELECT_TEXT_TO_IMAGE_PROFILE,
+        QWEN_IMAGE_PROFILE_ID,
+    ))
+
+    state = coordinator.state.text_to_image
+    assert state.model_profile_id == QWEN_IMAGE_PROFILE_ID
+    assert state.parameter_values["model"] == "Qwen/Qwen-Image"
+    assert state.parameter_values["steps"] == 25
+    assert state.parameter_values["true_cfg_scale"] == 3.0
+    assert state.lora_adapters == ()
+
+    coordinator.handle_intent(GenerationIntent(
+        GenerationAction.SET_TEXT_TO_IMAGE_PARAMETER,
+        ("prompt", "base model prompt"),
+    ))
+    coordinator.handle_intent(GenerationIntent(
+        GenerationAction.SELECT_TEXT_TO_IMAGE_PROFILE,
+        QWEN_IMAGE_2512_PROFILE_ID,
+    ))
+    assert coordinator.state.text_to_image.parameter_values["prompt"] == ""
+    coordinator.handle_intent(GenerationIntent(
+        GenerationAction.SELECT_TEXT_TO_IMAGE_PROFILE,
+        QWEN_IMAGE_PROFILE_ID,
+    ))
+    assert coordinator.state.text_to_image.parameter_values["prompt"] == (
+        "base model prompt")
+
+    coordinator.close()
 
 
 def test_text_to_image_result_replaces_layer_and_is_undoable(tmp_path):

@@ -29,10 +29,14 @@ from ..generation.provenance import (
 from ..generation.image_edit_profiles import (
     FLUX2_KLEIN_PROFILE_ID,
     LEGACY_INSTRUCT_PROFILE_ID,
+    QWEN_IMAGE_EDIT_PROFILE_ID,
+    QWEN_IMAGE_EDIT_RAPID_AIO_V23_PROFILE_ID,
     SENSENOVA_U15_PROFILE_ID,
     image_edit_profile,
+    infer_qwen_text_encoder_variant,
     parse_float_list,
     parse_int_tuple,
+    resolve_qwen_text_encoder_source,
 )
 from ..generation.text_to_image_profiles import text_to_image_profile
 
@@ -434,7 +438,23 @@ class RealMlBackend:
 
         profile_id = str(data["profile_id"])
         profile = image_edit_profile(profile_id)
-        parameters = profile.normalize(data.get("parameters"))
+        raw_parameters = dict(data.get("parameters") or {})
+        if (
+            profile.provider == "diffusers.qwen_image_edit_plus"
+            and "text_encoder_variant" not in raw_parameters
+        ):
+            raw_parameters["text_encoder_variant"] = (
+                infer_qwen_text_encoder_variant(raw_parameters)
+            )
+        parameters = profile.normalize(raw_parameters)
+        if (
+            profile_id == QWEN_IMAGE_EDIT_RAPID_AIO_V23_PROFILE_ID
+            and not str(parameters["transformer_checkpoint"]).strip()
+        ):
+            raise ValueError(
+                "Qwen Rapid AIO v23 requires its Transformer checkpoint "
+                "directory"
+            )
         lora_adapters = profile.normalize_lora_adapters(
             data.get("lora_adapters"))
         device = self._device(str(parameters["device"]))
@@ -463,6 +483,29 @@ class RealMlBackend:
                 "huggingface", model, revision=revision)
             identity_warnings = enforce_model_identity_policy(
                 identity, ModelIdentityPolicy.WARN.value)
+        if profile_id == QWEN_IMAGE_EDIT_RAPID_AIO_V23_PROFILE_ID:
+            base_identity = identity
+            transformer_source = str(
+                parameters["transformer_checkpoint"]).strip()
+            local_override = None
+            if transformer_source:
+                candidate = Path(transformer_source).expanduser()
+                if candidate.exists():
+                    local_override = str(candidate.absolute())
+            identity = floating_model_identity(
+                "huggingface",
+                profile.model_id,
+                local_override=local_override,
+            )
+            identity = replace(
+                identity,
+                extensions=FrozenJsonObject.capture({
+                    "base_pipeline_identity": base_identity.to_dict(),
+                    "transformer_source": transformer_source,
+                }),
+            )
+            identity_warnings = enforce_model_identity_policy(
+                identity, ModelIdentityPolicy.WARN.value)
         if profile_id == SENSENOVA_U15_PROFILE_ID:
             config_identity = identity
             config_warnings = identity_warnings
@@ -483,6 +526,18 @@ class RealMlBackend:
             )
             identity_warnings = tuple(
                 [*identity_warnings, *config_warnings])
+        text_encoder_source = ""
+        if profile.provider == "diffusers.qwen_image_edit_plus":
+            text_encoder_source = resolve_qwen_text_encoder_source(parameters)
+            extensions = identity.extensions.to_dict()
+            extensions["text_encoder"] = {
+                "variant": str(parameters["text_encoder_variant"]),
+                "source": text_encoder_source or f"{model}#text_encoder",
+            }
+            identity = replace(
+                identity,
+                extensions=FrozenJsonObject.capture(extensions),
+            )
         # A second heavyweight pipeline must never overlap the currently
         # loaded one in RAM/VRAM.  Keep the backend truthfully unloaded if any
         # part of the new load fails after this point.
@@ -499,29 +554,42 @@ class RealMlBackend:
         if profile.provider == "diffusers.qwen_image_edit_plus":
             transformer_path = str(
                 parameters["transformer_checkpoint"]).strip()
-            text_encoder_path = str(
-                parameters["text_encoder_checkpoint"]).strip()
-            if bool(transformer_path) != bool(text_encoder_path):
-                raise ValueError(
-                    "Qwen local FP8 loading requires both Transformer "
-                    "checkpoint and Text encoder checkpoint"
-                )
+            transformer_mode = "upstream"
+            text_encoder_mode = "upstream"
             if transformer_path:
-                transformer, text_encoder = self._load_qwen_fp8_components(
-                    model,
-                    transformer_path=transformer_path,
-                    text_encoder_path=text_encoder_path,
-                    revision=revision,
-                    local_files_only=bool(
-                        parameters.get("local_files_only", False)),
+                transformer, transformer_mode = (
+                    self._load_qwen_transformer_component(
+                        model,
+                        transformer_path=transformer_path,
+                        compute_dtype=dtype,
+                        revision=revision,
+                        local_files_only=bool(
+                            parameters.get("local_files_only", False)),
+                    )
                 )
-                load_kwargs.update(
-                    transformer=transformer,
-                    text_encoder=text_encoder,
+                load_kwargs["transformer"] = transformer
+            if text_encoder_source:
+                text_encoder, text_encoder_mode = (
+                    self._load_qwen_text_encoder_component(
+                        model,
+                        text_encoder_source=text_encoder_source,
+                        compute_dtype=dtype,
+                        revision=revision,
+                        local_files_only=bool(
+                            parameters.get("local_files_only", False)),
+                    )
                 )
-                component_mode = "local-scaled-fp8"
+                load_kwargs["text_encoder"] = text_encoder
+            component_mode = self._qwen_component_mode(
+                transformer_mode, text_encoder_mode)
+            pipeline_model = (
+                self._cached_pipeline_directory(model, revision)
+                if transformer_path and text_encoder_source and bool(
+                    parameters.get("local_files_only", False)
+                ) else None
+            ) or model
             pipe = QwenImageEditPlusPipeline.from_pretrained(
-                model, **load_kwargs)
+                pipeline_model, **load_kwargs)
         elif profile_id == FLUX2_KLEIN_PROFILE_ID:
             pipe = Flux2KleinPipeline.from_pretrained(model, **load_kwargs)
         elif profile_id == SENSENOVA_U15_PROFILE_ID:
@@ -570,10 +638,16 @@ class RealMlBackend:
                     f"image_edit_{index}_"
                     f"{adapter.stable_id.replace('-', '_')}"
                 )
-                pipe.load_lora_weights(
-                    str(Path(adapter.source).expanduser()),
-                    adapter_name=adapter_name,
-                )
+                adapter_source = str(Path(adapter.source).expanduser())
+                if profile_id in {
+                    QWEN_IMAGE_EDIT_PROFILE_ID,
+                    QWEN_IMAGE_EDIT_RAPID_AIO_V23_PROFILE_ID,
+                }:
+                    self._load_qwen_lora_weights(
+                        pipe, adapter_source, adapter_name)
+                else:
+                    pipe.load_lora_weights(
+                        adapter_source, adapter_name=adapter_name)
                 adapter_model = getattr(
                     pipe, "transformer", getattr(pipe, "unet", None))
                 if adapter_model is None:
@@ -629,7 +703,12 @@ class RealMlBackend:
 
         profile_id = str(data["profile_id"])
         profile = text_to_image_profile(profile_id)
-        parameters = profile.normalize(data.get("parameters"))
+        raw_parameters = dict(data.get("parameters") or {})
+        if "text_encoder_variant" not in raw_parameters:
+            raw_parameters["text_encoder_variant"] = (
+                infer_qwen_text_encoder_variant(raw_parameters)
+            )
+        parameters = profile.normalize(raw_parameters)
         adapters = profile.normalize_lora_adapters(data.get("lora_adapters"))
         device = self._device(str(parameters["device"]))
         dtype = self._configured_dtype(str(parameters["dtype"]), device)
@@ -653,6 +732,17 @@ class RealMlBackend:
             warnings = enforce_model_identity_policy(
                 identity, ModelIdentityPolicy.WARN.value)
 
+        text_encoder_source = resolve_qwen_text_encoder_source(parameters)
+        extensions = identity.extensions.to_dict()
+        extensions["text_encoder"] = {
+            "variant": str(parameters["text_encoder_variant"]),
+            "source": text_encoder_source or f"{model}#text_encoder",
+        }
+        identity = replace(
+            identity,
+            extensions=FrozenJsonObject.capture(extensions),
+        )
+
         self.unload_text_to_image()
         kwargs: dict[str, Any] = {
             "torch_dtype": dtype,
@@ -662,27 +752,42 @@ class RealMlBackend:
             kwargs["revision"] = revision
         transformer_path = str(
             parameters.get("transformer_checkpoint", "")).strip()
-        text_encoder_path = str(
-            parameters.get("text_encoder_checkpoint", "")).strip()
-        if bool(transformer_path) != bool(text_encoder_path):
-            raise ValueError(
-                "Qwen Image scaled FP8 loading requires both Transformer "
-                "checkpoint and Text encoder checkpoint")
-        component_mode = "upstream-bfloat16"
+        transformer_mode = "upstream"
+        text_encoder_mode = "upstream"
         if transformer_path:
-            transformer, text_encoder = self._load_qwen_fp8_components(
-                model,
-                transformer_path=transformer_path,
-                text_encoder_path=text_encoder_path,
-                revision=revision,
-                local_files_only=bool(parameters["local_files_only"]),
+            transformer, transformer_mode = (
+                self._load_qwen_transformer_component(
+                    model,
+                    transformer_path=transformer_path,
+                    compute_dtype=dtype,
+                    revision=revision,
+                    local_files_only=bool(parameters["local_files_only"]),
+                )
             )
-            kwargs.update(
-                transformer=transformer,
-                text_encoder=text_encoder,
+            kwargs["transformer"] = transformer
+        if text_encoder_source:
+            text_encoder, text_encoder_mode = (
+                self._load_qwen_text_encoder_component(
+                    model,
+                    text_encoder_source=text_encoder_source,
+                    compute_dtype=dtype,
+                    revision=revision,
+                    local_files_only=bool(parameters["local_files_only"]),
+                )
             )
-            component_mode = "local-scaled-fp8"
-        pipe = QwenImagePipeline.from_pretrained(model, **kwargs)
+            kwargs["text_encoder"] = text_encoder
+        component_mode = self._qwen_component_mode(
+            transformer_mode, text_encoder_mode)
+        pipeline_model = (
+            self._cached_pipeline_directory(model, revision)
+            if (
+                transformer_path
+                and text_encoder_source
+                and bool(parameters["local_files_only"])
+            )
+            else None
+        ) or model
+        pipe = QwenImagePipeline.from_pretrained(pipeline_model, **kwargs)
         active = tuple(
             adapter for adapter in adapters
             if adapter.enabled and adapter.source)
@@ -692,9 +797,8 @@ class RealMlBackend:
             name = (
                 f"text_to_image_{index}_"
                 f"{adapter.stable_id.replace('-', '_')}")
-            pipe.load_lora_weights(
-                str(Path(adapter.source).expanduser()),
-                adapter_name=name)
+            self._load_qwen_lora_weights(
+                pipe, str(Path(adapter.source).expanduser()), name)
             self._cast_adapter_parameters(pipe.transformer, name, dtype)
             adapter_names.append(name)
             adapter_weights.append(adapter.weight)
@@ -844,20 +948,46 @@ class RealMlBackend:
         return offload_mode
 
     @staticmethod
-    def _load_qwen_fp8_components(
+    def _cached_pipeline_directory(
+        model: str,
+        revision: str | None,
+    ) -> str | None:
+        """Use a cached thin snapshot without requiring unused base weights.
+
+        Recent huggingface_hub versions reject an incomplete snapshot in
+        offline mode even when Diffusers receives explicit transformer and
+        text-encoder overrides. Resolving the cached model_index directly lets
+        Diffusers load the processor/VAE/scheduler files that are actually
+        needed, while preserving a truthful local-files-only request.
+        """
+        if Path(model).expanduser().exists():
+            return None
+        try:
+            from huggingface_hub import try_to_load_from_cache
+
+            cached = try_to_load_from_cache(
+                model,
+                "model_index.json",
+                revision=revision or "main",
+            )
+        except (ImportError, OSError, ValueError):
+            return None
+        if not isinstance(cached, str):
+            return None
+        candidate = Path(cached).absolute().parent
+        return str(candidate) if candidate.is_dir() else None
+
+    @staticmethod
+    def _load_qwen_transformer_component(
         model: str,
         *,
         transformer_path: str,
-        text_encoder_path: str,
+        compute_dtype,
         revision: str | None,
         local_files_only: bool,
     ):
         from accelerate import init_empty_weights
         from diffusers import QwenImageTransformer2DModel
-        from transformers import (
-            AutoConfig,
-            Qwen2_5_VLForConditionalGeneration,
-        )
 
         from .scaled_fp8 import load_scaled_fp8_checkpoint
 
@@ -867,13 +997,94 @@ class RealMlBackend:
         if revision is not None:
             config_kwargs["revision"] = revision
 
-        transformer_config = QwenImageTransformer2DModel.load_config(
-            model, subfolder="transformer", **config_kwargs)
-        with init_empty_weights():
-            transformer = QwenImageTransformer2DModel.from_config(
-                transformer_config)
-        transformer = load_scaled_fp8_checkpoint(
-            transformer, transformer_path)
+        transformer_candidate = Path(transformer_path).expanduser().absolute()
+        if transformer_candidate.is_dir():
+            import torch
+            from diffusers.hooks import apply_layerwise_casting_hook
+
+            transformer = QwenImageTransformer2DModel.from_pretrained(
+                str(transformer_candidate),
+                torch_dtype=torch.float8_e4m3fn,
+                local_files_only=True,
+                low_cpu_mem_usage=True,
+            )
+            hooked_parameters: set[int] = set()
+            for module in transformer.modules():
+                direct_parameters = tuple(module.parameters(recurse=False))
+                if not any(
+                    parameter.dtype == torch.float8_e4m3fn
+                    for parameter in direct_parameters
+                ):
+                    continue
+                apply_layerwise_casting_hook(
+                    module,
+                    storage_dtype=torch.float8_e4m3fn,
+                    compute_dtype=compute_dtype,
+                    non_blocking=False,
+                )
+                hooked_parameters.update(map(id, direct_parameters))
+            unhooked = [
+                name for name, parameter in transformer.named_parameters()
+                if parameter.dtype == torch.float8_e4m3fn
+                and id(parameter) not in hooked_parameters
+            ]
+            if unhooked:
+                sample = ", ".join(unhooked[:5])
+                raise ValueError(
+                    "Diffusers FP8 transformer contains unhooked parameters: "
+                    f"{sample}"
+                )
+            transformer.eval()
+            mode = "local-diffusers-fp8-layerwise"
+        else:
+            transformer_config = QwenImageTransformer2DModel.load_config(
+                model, subfolder="transformer", **config_kwargs)
+            with init_empty_weights():
+                transformer = QwenImageTransformer2DModel.from_config(
+                    transformer_config)
+            transformer = load_scaled_fp8_checkpoint(
+                transformer, transformer_path)
+            mode = "local-scaled-fp8"
+
+        return transformer, mode
+
+    @staticmethod
+    def _load_qwen_text_encoder_component(
+        model: str,
+        *,
+        text_encoder_source: str,
+        compute_dtype,
+        revision: str | None,
+        local_files_only: bool,
+    ):
+        from transformers import (
+            AutoConfig,
+            Qwen2_5_VLForConditionalGeneration,
+        )
+
+        candidate = Path(text_encoder_source).expanduser().absolute()
+        if not candidate.is_file():
+            source = (
+                str(candidate) if candidate.exists() else text_encoder_source
+            )
+            encoder = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                source,
+                torch_dtype=compute_dtype,
+                local_files_only=local_files_only or candidate.exists(),
+                low_cpu_mem_usage=True,
+            )
+            encoder.eval()
+            return encoder, "text-encoder-bfloat16"
+
+        from accelerate import init_empty_weights
+
+        from .scaled_fp8 import load_scaled_fp8_checkpoint
+
+        config_kwargs: dict[str, Any] = {
+            "local_files_only": local_files_only,
+        }
+        if revision is not None:
+            config_kwargs["revision"] = revision
 
         text_config = AutoConfig.from_pretrained(
             model, subfolder="text_encoder", **config_kwargs)
@@ -889,10 +1100,25 @@ class RealMlBackend:
 
         text_encoder = load_scaled_fp8_checkpoint(
             text_encoder,
-            text_encoder_path,
+            str(candidate),
             key_mapper=text_encoder_key,
         )
-        return transformer, text_encoder
+        return text_encoder, "local-scaled-fp8"
+
+    @staticmethod
+    def _qwen_component_mode(
+        transformer_mode: str,
+        text_encoder_mode: str,
+    ) -> str:
+        if transformer_mode == "upstream" and text_encoder_mode == "upstream":
+            return "upstream-bfloat16"
+        if (
+            transformer_mode != "upstream"
+            and text_encoder_mode == "local-scaled-fp8"
+        ):
+            # Preserve the established names for the normal all-FP8 bundles.
+            return transformer_mode
+        return f"{transformer_mode}+{text_encoder_mode}"
 
     @staticmethod
     def _cast_adapter_parameters(model, adapter_name: str, dtype) -> None:
@@ -907,6 +1133,64 @@ class RealMlBackend:
         for name, parameter in model.named_parameters():
             if "lora_" in name and marker in name:
                 parameter.data = parameter.data.to(dtype=dtype)
+
+    @staticmethod
+    def _load_qwen_lora_weights(
+        pipe,
+        source: str,
+        adapter_name: str,
+    ) -> None:
+        """Load Qwen LoRA exports without duplicating their model prefix.
+
+        Some Kohya-style Qwen checkpoints already prefix every key with
+        ``transformer.`` and also include alpha tensors.  Diffusers recognizes
+        the alpha tensors as a non-Diffusers export, converts the keys, and
+        prepends ``transformer.`` once more.  PEFT then looks for nonexistent
+        ``transformer.transformer_blocks`` modules inside the transformer.
+        Inspecting the safetensors header keeps the normal loading path cheap;
+        only the affected format is materialized and normalized in memory.
+        """
+        path = Path(source)
+        if path.is_file() and path.suffix.lower() == ".safetensors":
+            from safetensors import SafetensorError, safe_open
+
+            try:
+                with safe_open(
+                    str(path), framework="pt", device="cpu"
+                ) as checkpoint:
+                    keys = tuple(checkpoint.keys())
+            except (OSError, SafetensorError):
+                # Preserve Diffusers' usual error handling for unreadable
+                # checkpoints instead of replacing it with header probing.
+                keys = ()
+
+            is_prefixed_kohya = (
+                bool(keys)
+                and all(key.startswith("transformer.") for key in keys)
+                and any(
+                    key.startswith("transformer.transformer_blocks.")
+                    for key in keys
+                )
+                and any(key.endswith(".alpha") for key in keys)
+                and any(
+                    key.endswith((
+                        ".lora_down.weight", ".lora_up.weight"
+                    ))
+                    for key in keys
+                )
+            )
+            if is_prefixed_kohya:
+                from safetensors.torch import load_file
+
+                state_dict = {
+                    key.removeprefix("transformer."): value
+                    for key, value in load_file(str(path)).items()
+                }
+                pipe.load_lora_weights(
+                    state_dict, adapter_name=adapter_name)
+                return
+
+        pipe.load_lora_weights(source, adapter_name=adapter_name)
 
     def image_edit(
         self,
@@ -971,13 +1255,16 @@ class RealMlBackend:
                 raise ValueError("attention_kwargs must be a JSON object")
             kwargs["attention_kwargs"] = parsed
         if profile.provider == "diffusers.qwen_image_edit_plus":
+            true_cfg_scale = float(parameters["true_cfg_scale"])
             kwargs.update({
-                "negative_prompt": str(parameters["negative_prompt"]),
-                "true_cfg_scale": float(parameters["true_cfg_scale"]),
+                "true_cfg_scale": true_cfg_scale,
                 "guidance_scale": float(parameters["guidance_scale"]),
                 "max_sequence_length": int(
                     parameters["max_sequence_length"]),
             })
+            if true_cfg_scale > 1.0:
+                kwargs["negative_prompt"] = str(
+                    parameters["negative_prompt"])
         elif profile_id == FLUX2_KLEIN_PROFILE_ID:
             kwargs.update({
                 "guidance_scale": float(parameters["guidance_scale"]),

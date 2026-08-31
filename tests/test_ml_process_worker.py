@@ -24,11 +24,13 @@ from diffusion_editor.generation.types import (
 from diffusion_editor.generation.image_edit_profiles import (
     FLUX2_KLEIN_PROFILE_ID,
     QWEN_IMAGE_EDIT_PROFILE_ID,
+    QWEN_IMAGE_EDIT_RAPID_AIO_V23_PROFILE_ID,
     SENSENOVA_U15_PROFILE_ID,
     image_edit_profile,
 )
 from diffusion_editor.generation.text_to_image_profiles import (
     QWEN_IMAGE_2512_PROFILE_ID,
+    QWEN_IMAGE_PROFILE_ID,
     text_to_image_profile,
 )
 from diffusion_editor.grounding.types import GroundingParams, GroundingRequest
@@ -237,6 +239,7 @@ def test_depth_float_payload_rejects_corrupt_data(
     "profile_id",
     [
         QWEN_IMAGE_EDIT_PROFILE_ID,
+        QWEN_IMAGE_EDIT_RAPID_AIO_V23_PROFILE_ID,
         FLUX2_KLEIN_PROFILE_ID,
         SENSENOVA_U15_PROFILE_ID,
     ],
@@ -315,9 +318,14 @@ def test_image_edit_engine_reloads_only_for_load_time_parameters():
         engine.shutdown()
 
 
-def test_text_to_image_engine_roundtrips_exact_dimensions_through_worker():
+@pytest.mark.parametrize("profile_id", [
+    QWEN_IMAGE_2512_PROFILE_ID,
+    QWEN_IMAGE_PROFILE_ID,
+])
+def test_text_to_image_engine_roundtrips_exact_dimensions_through_worker(
+        profile_id):
     engine = TextToImageEngine(client=_client())
-    profile = text_to_image_profile(QWEN_IMAGE_2512_PROFILE_ID)
+    profile = text_to_image_profile(profile_id)
     parameters = profile.defaults()
     parameters.update({"prompt": "miniature railway", "seed": 909})
     try:
