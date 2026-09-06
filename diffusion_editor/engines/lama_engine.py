@@ -1,5 +1,5 @@
 from PIL import Image
-from tcbase import log
+from termin.base import log
 
 from ..generation.provenance import (
     FrozenJsonObject,

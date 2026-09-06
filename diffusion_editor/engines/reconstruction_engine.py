@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tcbase import log
+from termin.base import log
 
 from ..generation.types import (
     RECONSTRUCTION_BACKEND_LABELS,

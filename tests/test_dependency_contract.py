@@ -53,13 +53,13 @@ def test_main_process_lock_excludes_unavailable_native_ml_stack():
         for package in forbidden
     )
     assert project == (
-        "tcbase",
+        "termin-base",
         "termin-dispatch",
         "termin-display",
         "termin-glb-native",
         "termin-gui-native",
+        "termin-graphics-core",
         "termin-mcp",
-        "tgfx",
         *runtime,
     )
 
@@ -72,7 +72,7 @@ def test_developer_requirements_compose_the_two_authoritative_locks():
 
     installer = (PROJECT_ROOT / "install-deps.sh").read_text(encoding="utf-8")
     assert "--only-binary=:all:" in installer
-    assert "pip uninstall --yes tcgui" in installer
+    assert "pip uninstall --yes tcbase tgfx tmesh tcgui" in installer
 
 
 def test_native_entrypoint_does_not_use_a_private_dispatch_queue():

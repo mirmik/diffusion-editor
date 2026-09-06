@@ -13,7 +13,7 @@ import zipfile
 
 import numpy as np
 from PIL import Image
-from tcbase import log
+from termin.base import log
 from termin.dispatch import Dispatcher, DispatchStats
 from termin.display.window import WindowHandle, WindowManager, WindowedGraphicsSession
 from termin.gui_native import (
@@ -24,7 +24,7 @@ from termin.gui_native import (
     tc_ui_document_destroy,
 )
 from termin.gui_native.window import GuiWindowAdapter, dynamic_texture_lease
-from tgfx import configure_default_shader_runtime
+from termin.graphics import configure_default_shader_runtime
 
 from ..sdk_runtime import resolve_sdk
 from ..document.layer import Layer

@@ -4,7 +4,7 @@ import math
 
 import numpy as np
 import pytest
-from tcbase import Action, MouseButton
+from termin.base import Action, MouseButton
 
 from diffusion_editor.app.native_reconstruction_viewport import (
     NativeReconstructionViewport,
@@ -405,7 +405,7 @@ def test_refine_cube_selects_original_faces_without_splitting_vertices() -> None
 
 
 def test_index_subset_preserves_source_vertex_buffer_and_layout() -> None:
-    from tmesh import TcMesh, TcVertexLayout
+    from termin.mesh import TcMesh, TcVertexLayout
 
     layout = TcVertexLayout.pos_normal_uv()
     vertices = np.ascontiguousarray([
@@ -437,7 +437,7 @@ def test_index_subset_preserves_source_vertex_buffer_and_layout() -> None:
 
 
 def test_weighted_mask_mesh_uploads_interpolated_vertex_attribute() -> None:
-    from tmesh import TcAttribType, TcMesh, TcVertexLayout
+    from termin.mesh import TcAttribType, TcMesh, TcVertexLayout
 
     positions = np.asarray([
         (0.0, 0.0, 0.0),
@@ -617,7 +617,7 @@ def test_generated_vertex_normals_smooth_shared_vertices() -> None:
 
 
 def test_position_only_mesh_gets_smooth_render_variant() -> None:
-    from tmesh import TcAttribType, TcMesh, TcVertexLayout
+    from termin.mesh import TcAttribType, TcMesh, TcVertexLayout
 
     positions = np.ascontiguousarray([
         (0.0, 0.0, 0.0),

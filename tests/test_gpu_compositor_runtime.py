@@ -3,7 +3,7 @@ import struct
 
 import numpy as np
 import pytest
-from tgfx import TextureEncoding
+from termin.graphics import TextureEncoding
 
 from diffusion_editor.canvas.gpu_compositor import GPUCompositor
 from diffusion_editor.canvas import gpu_compositor as gpu_compositor_module

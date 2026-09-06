@@ -13,7 +13,7 @@ import time
 from typing import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 
-from tcbase import log
+from termin.base import log
 from termin.gui_native import (
     FileDialogMode,
     FileDialogModel,

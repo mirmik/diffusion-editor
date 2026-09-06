@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 import numpy as np
-from tcbase import log
+from termin.base import log
 from termin.gui_native import (
     CanvasTextureLayer,
     CursorIntent,
@@ -17,7 +17,7 @@ from termin.gui_native import (
     SrgbColor,
     TcDocument,
 )
-from tgfx import TextureEncoding, Tgfx2Context
+from termin.graphics import TextureEncoding, Tgfx2Context
 
 from ..document.layer import Layer
 from ..document.change_event import DocumentChangeEvent

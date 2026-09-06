@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tcbase import log
+from termin.base import log
 
 from ..generation.pose_estimation import PoseEstimationRequest
 from ..workers.pose_process import PoseProcessClient

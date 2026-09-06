@@ -9,7 +9,7 @@ import tempfile
 from typing import Any
 import uuid
 
-from tcbase import log
+from termin.base import log
 from termin.mcp import PythonScriptExecutor, TerminMcpServer, create_secure_mcp_config
 
 from ..sdk_runtime import PROJECT_ROOT, resolve_sdk

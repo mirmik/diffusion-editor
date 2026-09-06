@@ -11,7 +11,7 @@ import threading
 import time
 from typing import Callable
 
-from tcbase import log
+from termin.base import log
 
 from .model import MultiviewProject, ViewKey, view_schedule
 from .trellis_mesh_postprocess import postprocess_key

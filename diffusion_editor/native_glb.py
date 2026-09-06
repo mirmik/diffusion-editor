@@ -67,7 +67,7 @@ class NativeGLBDocument:
         name: str = "",
         convert_to_z_up: bool = True,
     ):
-        from tmesh import tc_mesh_get
+        from termin.mesh import tc_mesh_get
 
         self._document.build_mesh(
             int(mesh_index),
@@ -79,7 +79,7 @@ class NativeGLBDocument:
         mesh = tc_mesh_get(mesh_uuid)
         if mesh is None or not mesh.is_valid:
             raise RuntimeError(
-                f"Native GLB build published no tmesh for UUID {mesh_uuid!r}"
+                f"Native GLB build published no mesh for UUID {mesh_uuid!r}"
             )
         return mesh
 

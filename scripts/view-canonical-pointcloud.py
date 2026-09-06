@@ -8,7 +8,7 @@ import faulthandler
 from pathlib import Path
 import time
 
-from tcbase import Action
+from termin.base import Action
 from termin.gui_native import KeyCode
 
 from diffusion_editor.app.native_reconstruction_viewport import (

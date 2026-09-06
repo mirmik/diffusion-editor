@@ -66,7 +66,10 @@ echo "=== Installing diffusion-editor Python requirements ==="
 
 echo ""
 echo "=== Installing exact Termin packages from SDK wheelhouse ==="
-"$PY" -m pip uninstall --yes tcgui
+# Remove legacy distribution names that were renamed in Termin SDK 0.5.2:
+#   tcbase -> termin-base, tgfx -> termin-graphics-core, tmesh -> termin-mesh,
+#   tcgui -> termin-gui-native. pip uninstall tolerates names that are absent.
+"$PY" -m pip uninstall --yes tcbase tgfx tmesh tcgui
 "$PY" -m pip install --force-reinstall --no-index --no-deps --find-links "$WHEELHOUSE" \
     "${TERMIN_REQUIREMENTS[@]}"
 

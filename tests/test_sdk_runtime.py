@@ -70,7 +70,7 @@ def _write_wheel(
 def _make_sdk(
     tmp_path: Path,
     *,
-    stale_tgfx: bool = False,
+    stale_graphics: bool = False,
     manifest_schema: int = 3,
 ) -> Path:
     sdk = tmp_path / "sdk"
@@ -79,8 +79,8 @@ def _make_sdk(
     (sdk / "lib/python3.14t/site-packages").mkdir(parents=True)
     core_version = "0.1.0+sdk-core" if manifest_schema == 4 else NATIVE_VERSION
     versions = {
-        "tcbase": core_version,
-        "tgfx": NATIVE_VERSION,
+        "termin-base": core_version,
+        "termin-graphics-core": NATIVE_VERSION,
         "termin-dispatch": core_version,
         "termin-display": NATIVE_VERSION,
         "termin-glb-native": NATIVE_VERSION,
@@ -107,13 +107,13 @@ def _make_sdk(
     (sdk / "python-runtime-manifest.json").write_text(
         json.dumps(payload), encoding="utf-8"
     )
-    _write_wheel(sdk, "tcbase", core_version)
+    _write_wheel(sdk, "termin-base", core_version)
     _write_wheel(
         sdk,
         "termin-dispatch",
         core_version,
         "termin-nanobind",
-        "tcbase",
+        "termin-base",
     )
     _write_wheel(
         sdk,
@@ -121,8 +121,8 @@ def _make_sdk(
         NATIVE_VERSION,
         "PyYAML",
         "termin-nanobind",
-        "tcbase",
-        "tgfx",
+        "termin-base",
+        "termin-graphics-core",
     )
     _write_wheel(
         sdk,
@@ -140,16 +140,16 @@ def _make_sdk(
     installed_glb_binding.parent.mkdir(parents=True)
     installed_glb_binding.write_bytes(b"native-binding")
     _write_wheel(sdk, "termin-nanobind", "0.1.0")
-    _write_wheel(sdk, "termin-mcp", "0.1.0", "tcbase")
+    _write_wheel(sdk, "termin-mcp", "0.1.0", "termin-base")
     _write_wheel(
         sdk,
-        "tgfx",
-        "0.1.0+sdk-old" if stale_tgfx else NATIVE_VERSION,
-        "tcbase",
+        "termin-graphics-core",
+        "0.1.0+sdk-old" if stale_graphics else NATIVE_VERSION,
+        "termin-base",
     )
-    _write_wheel(sdk, "termin-display", NATIVE_VERSION, "termin-scene", "tgfx")
-    _write_wheel(sdk, "termin-scene", NATIVE_VERSION, "tcbase")
-    _write_wheel(sdk, "tmesh", NATIVE_VERSION, "tcbase")
+    _write_wheel(sdk, "termin-display", NATIVE_VERSION, "termin-scene", "termin-graphics-core")
+    _write_wheel(sdk, "termin-scene", NATIVE_VERSION, "termin-base")
+    _write_wheel(sdk, "tmesh", NATIVE_VERSION, "termin-base")
     return sdk
 
 
@@ -161,31 +161,31 @@ def test_requirement_closure_is_exact_and_includes_sdk_transitives(tmp_path: Pat
     contract = _load(_make_sdk(tmp_path))
 
     assert termin_requirement_closure(contract) == (
-        f"tcbase=={NATIVE_VERSION}",
+        f"termin-base=={NATIVE_VERSION}",
         f"termin-dispatch=={NATIVE_VERSION}",
         f"termin-display=={NATIVE_VERSION}",
         f"termin-glb-native=={NATIVE_VERSION}",
+        f"termin-graphics-core=={NATIVE_VERSION}",
         f"termin-gui-native=={NATIVE_VERSION}",
         "termin-mcp==0.1.0",
         "termin-nanobind==0.1.0",
         f"termin-scene=={NATIVE_VERSION}",
-        f"tgfx=={NATIVE_VERSION}",
         f"tmesh=={NATIVE_VERSION}",
     )
 
 
 def test_stale_wheelhouse_fails_before_install(tmp_path: Path):
-    contract = _load(_make_sdk(tmp_path, stale_tgfx=True))
+    contract = _load(_make_sdk(tmp_path, stale_graphics=True))
 
-    with pytest.raises(SdkContractError, match="no payload-compatible tgfx"):
+    with pytest.raises(SdkContractError, match="no payload-compatible termin-graphics-core"):
         termin_requirement_closure(contract)
 
 
 def test_installed_native_build_must_match_manifest(tmp_path: Path):
     contract = _load(_make_sdk(tmp_path))
     installed = {
-        "tcbase": NATIVE_VERSION,
-        "tgfx": "0.1.0+sdk-other",
+        "termin-base": NATIVE_VERSION,
+        "termin-graphics-core": "0.1.0+sdk-other",
         "termin-dispatch": NATIVE_VERSION,
         "termin-display": NATIVE_VERSION,
         "termin-glb-native": NATIVE_VERSION,
@@ -195,7 +195,7 @@ def test_installed_native_build_must_match_manifest(tmp_path: Path):
         "tmesh": NATIVE_VERSION,
     }
 
-    with pytest.raises(SdkContractError, match="tgfx: installed"):
+    with pytest.raises(SdkContractError, match="termin-graphics-core: installed"):
         verify_installed(contract, installed)
 
 
@@ -294,20 +294,20 @@ def test_composed_schema_4_accepts_multiple_native_build_ids(tmp_path: Path):
     sdk = _make_sdk(tmp_path, manifest_schema=4)
     contract = _load(sdk)
 
-    assert contract.version("tcbase") == "0.1.0+sdk-core"
-    assert contract.version("tgfx") == NATIVE_VERSION
-    assert "tcbase==0.1.0+sdk-core" in termin_requirement_closure(contract)
-    assert f"tgfx=={NATIVE_VERSION}" in termin_requirement_closure(contract)
+    assert contract.version("termin-base") == "0.1.0+sdk-core"
+    assert contract.version("termin-graphics-core") == NATIVE_VERSION
+    assert "termin-base==0.1.0+sdk-core" in termin_requirement_closure(contract)
+    assert f"termin-graphics-core=={NATIVE_VERSION}" in termin_requirement_closure(contract)
 
 
 def test_native_cp314_wheel_is_rejected_for_cp314t_sdk(tmp_path: Path):
     sdk = _make_sdk(tmp_path)
-    next((sdk / "wheels").glob("tcbase-*.whl")).unlink()
+    next((sdk / "wheels").glob("termin_base-*.whl")).unlink()
     _write_wheel(
         sdk,
-        "tcbase",
+        "termin-base",
         NATIVE_VERSION,
-        native_member="tcbase/_native.so",
+        native_member="termin/base/_native.so",
         abi_tag="cp314-cp314-linux_x86_64",
     )
 
@@ -367,19 +367,19 @@ def test_sdk_python_launcher_rejects_runtime_gil(
 def test_retagged_wheel_is_accepted_only_when_native_payload_matches(tmp_path: Path):
     sdk = _make_sdk(tmp_path)
     dependencies = {
-        "tcbase": (),
-        "tgfx": ("tcbase",),
-        "termin-dispatch": ("termin-nanobind", "tcbase"),
-        "termin-display": ("termin-scene", "tgfx"),
+        "termin-base": (),
+        "termin-graphics-core": ("termin-base",),
+        "termin-dispatch": ("termin-nanobind", "termin-base"),
+        "termin-display": ("termin-scene", "termin-graphics-core"),
         "termin-glb-native": ("tmesh", "termin-nanobind"),
         "termin-gui-native": (
             "PyYAML",
             "termin-nanobind",
-            "tcbase",
-            "tgfx",
+            "termin-base",
+            "termin-graphics-core",
         ),
-        "termin-scene": ("tcbase",),
-        "tmesh": ("tcbase",),
+        "termin-scene": ("termin-base",),
+        "tmesh": ("termin-base",),
     }
     for name, requires in dependencies.items():
         next((sdk / "wheels").glob(f"{name.replace('-', '_')}-*.whl")).unlink()
@@ -399,7 +399,7 @@ def test_retagged_wheel_is_accepted_only_when_native_payload_matches(tmp_path: P
     contract = _load(sdk)
 
     requirements = termin_requirement_closure(contract)
-    assert "tgfx==0.1.0+sdk456" in requirements
+    assert "termin-graphics-core==0.1.0+sdk456" in requirements
     assert "termin-display==0.1.0+sdk456" in requirements
 
 
@@ -412,7 +412,7 @@ def test_installed_payload_must_match_selected_sdk_wheel(tmp_path: Path):
         "termin-dispatch",
         NATIVE_VERSION,
         "termin-nanobind",
-        "tcbase",
+        "termin-base",
         payload_members={"termin/dispatch.py": b"current-sdk-dispatch\n"},
     )
     installed = tmp_path / "installed"

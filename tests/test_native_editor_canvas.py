@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from termin.gui_native import DynamicTextureOwnership
-from tgfx import TextureEncoding
+from termin.graphics import TextureEncoding
 
 from diffusion_editor.canvas.native_editor_canvas import NativeEditorCanvas
 

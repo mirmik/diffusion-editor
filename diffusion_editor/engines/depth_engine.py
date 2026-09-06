@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
-from tcbase import log
+from termin.base import log
 
 from ..generation.types import (
     DepthEstimationRequest,

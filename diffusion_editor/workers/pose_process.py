@@ -15,7 +15,7 @@ import uuid
 
 import numpy as np
 from PIL import Image
-from tcbase import log
+from termin.base import log
 
 from ..generation.pose_estimation import PoseEstimationResult
 from .pose_protocol import (

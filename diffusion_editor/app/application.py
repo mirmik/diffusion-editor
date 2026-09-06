@@ -10,7 +10,7 @@ from typing import Any, Callable, Protocol
 
 import numpy as np
 from PIL import Image
-from tcbase import log
+from termin.base import log
 
 from ..agent.tools import create_editor_tool_registry
 from ..document.document_service import DocumentService

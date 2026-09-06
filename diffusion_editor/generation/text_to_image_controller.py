@@ -7,7 +7,7 @@ import copy
 from typing import Callable
 
 from PIL import Image
-from tcbase import log
+from termin.base import log
 
 from ..document.layer import Layer
 from ..document.tool import TextToImageTool

@@ -7,7 +7,7 @@ from typing import Callable, Protocol
 
 import numpy as np
 from PIL import Image
-from tcbase import MouseButton
+from termin.base import MouseButton
 from termin.gui_native import (
     CollectionItem,
     CollectionModel,
@@ -23,7 +23,7 @@ from termin.gui_native import (
     SrgbColor,
     TcDocument,
 )
-from tgfx import TextureEncoding
+from termin.graphics import TextureEncoding
 
 from .model import MAX_REFINE_REGIONS, MultiviewProject, ViewKey, all_view_keys
 

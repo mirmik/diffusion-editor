@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 
-from tcbase import log
+from termin.base import log
 
 from ..grounding.types import (
     GroundingDetection,

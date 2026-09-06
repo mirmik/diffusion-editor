@@ -6,7 +6,7 @@ import faulthandler
 import os
 import time
 
-from tcbase import log
+from termin.base import log
 
 from .application import EditorApplication
 from .native_root import NativeEditorRoot

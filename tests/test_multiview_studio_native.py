@@ -6,7 +6,7 @@ import tempfile
 
 import numpy as np
 from PIL import Image
-from tcbase import MouseButton
+from termin.base import MouseButton
 from termin.gui_native import (
     ModifierFlag,
     Point,

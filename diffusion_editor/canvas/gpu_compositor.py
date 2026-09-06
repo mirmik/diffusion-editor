@@ -1,19 +1,19 @@
-"""GPUCompositor — tgfx2 native layer compositing with premultiplied alpha."""
+"""GPUCompositor — termin.graphics native layer compositing with premultiplied alpha."""
 
 from __future__ import annotations
 
 import struct
 
 import numpy as np
-from tcbase import log
+from termin.base import log
 from termin.geombase import LinearColor
-from tgfx import TextureEncoding
+from termin.graphics import TextureEncoding
 
 from ..color import linear_rgba_to_srgb8
 from ..document.layer_stack import LayerStack
 from ..document.layer import Layer
 
-from tgfx._tgfx_native import (
+from termin.graphics._graphics_native import (
     CULL_NONE,
     ShaderArtifactPolicy,
     ShaderLanguage,

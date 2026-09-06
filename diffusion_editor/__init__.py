@@ -7,7 +7,7 @@ from pathlib import Path as _Path
 
 
 def _restore_saved_termin_sdk() -> None:
-    """Expose the installer-selected SDK before submodules import tcbase."""
+    """Expose the installer-selected SDK before submodules import termin.base."""
 
     if _os.environ.get("TERMIN_SDK"):
         return

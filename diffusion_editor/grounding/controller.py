@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 import numpy as np
-from tcbase import log
+from termin.base import log
 
 from ..engines.grounding_engine import GroundingEngine
 from .types import GroundingParams, GroundingRequest, GroundingResult

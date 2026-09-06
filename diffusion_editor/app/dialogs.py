@@ -10,7 +10,7 @@ from typing import Callable, Protocol
 
 import numpy as np
 from PIL import Image
-from tcbase import log
+from termin.base import log
 
 from ..agent.config import DEFAULT_AGENT_BASE_URL, DEFAULT_AGENT_MODEL
 from ..document.layer_stack import LayerStack

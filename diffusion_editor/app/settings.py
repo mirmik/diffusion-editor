@@ -1,6 +1,6 @@
-"""Settings for diffusion-editor (backed by tcbase.Settings)."""
+"""Settings for diffusion-editor (backed by termin.base.Settings)."""
 
-from tcbase.settings import Settings as _TcSettings
+from termin.base.settings import Settings as _TcSettings
 
 
 class Settings(_TcSettings):

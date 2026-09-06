@@ -1,5 +1,5 @@
 import numpy as np
-from tcbase import log
+from termin.base import log
 
 from ..generation.types import SegmentationRequest, SegmentationResult
 from ..workers.segmentation_process import SegmentationProcessClient

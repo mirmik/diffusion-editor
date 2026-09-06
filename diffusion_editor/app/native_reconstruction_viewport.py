@@ -10,11 +10,11 @@ import math
 
 import numpy as np
 from PIL import Image
-from tcbase import Action, MouseButton
-from tcbase._geom_native import LinearColor
+from termin.base import Action, MouseButton
+from termin.geombase._geom_native import LinearColor
 from termin.geombase import OrbitCamera, Rect2, Vec2, Vec3
 from termin.gui_native import ModifierFlag, Size, TcDocument
-from tgfx import (
+from termin.graphics import (
     CULL_NONE,
     PIXEL_D32F,
     PIXEL_RGBA8,
@@ -28,7 +28,7 @@ from tgfx import (
     TextureEncoding,
     draw_tc_mesh,
 )
-from tgfx._tgfx_native import (
+from termin.graphics._graphics_native import (
     ShaderArtifactPolicy,
     ShaderLanguage,
     TcShader,
@@ -582,7 +582,7 @@ def _vertex_weights_under_screen_brush(
 
 def _build_index_subset_mesh(source_mesh, triangles: np.ndarray):
     """Copy a mesh verbatim while replacing only its triangle indices."""
-    from tmesh import TcMesh
+    from termin.mesh import TcMesh
 
     faces = np.ascontiguousarray(triangles, dtype=np.uint32)
     if faces.ndim != 2 or faces.shape[1:] != (3,) or not len(faces):
@@ -605,7 +605,7 @@ def _build_index_subset_mesh(source_mesh, triangles: np.ndarray):
 
 
 def _build_unit_cube_meshes(namespace: str):
-    from tmesh import TcAttribType, TcDrawMode, TcMesh, TcVertexLayout
+    from termin.mesh import TcAttribType, TcDrawMode, TcMesh, TcVertexLayout
 
     positions = np.ascontiguousarray([
         (-0.5, -0.5, -0.5), (0.5, -0.5, -0.5),
@@ -639,7 +639,7 @@ def _build_unit_cube_meshes(namespace: str):
 
 
 def _build_unit_arrow_mesh(namespace: str):
-    from tmesh import TcAttribType, TcMesh, TcVertexLayout
+    from termin.mesh import TcAttribType, TcMesh, TcVertexLayout
 
     positions = np.ascontiguousarray([
         (0.00, -0.018, -0.018), (0.00, 0.018, -0.018),
@@ -671,7 +671,7 @@ def _build_unit_arrow_mesh(namespace: str):
 
 
 def _build_unit_screen_circle_mesh(namespace: str):
-    from tmesh import TcAttribType, TcDrawMode, TcMesh, TcVertexLayout
+    from termin.mesh import TcAttribType, TcDrawMode, TcMesh, TcVertexLayout
 
     segment_count = 64
     angles = np.linspace(0.0, math.tau, segment_count, endpoint=False)
@@ -778,7 +778,7 @@ class _RefineGizmoDrag:
 
 
 def _build_wireframe_mesh(source_mesh):
-    from tmesh import TcDrawMode, TcMesh
+    from termin.mesh import TcDrawMode, TcMesh
 
     triangles = source_mesh.triangles
     if triangles is None or not len(triangles):
@@ -830,7 +830,7 @@ def _build_weighted_mask_mesh(
     weights: np.ndarray,
 ):
     """Build an overlay mesh whose vertex scalar is interpolated by the GPU."""
-    from tmesh import TcAttribType, TcMesh, TcVertexLayout
+    from termin.mesh import TcAttribType, TcMesh, TcVertexLayout
 
     vertices = np.ascontiguousarray(positions, dtype=np.float32)
     faces = np.ascontiguousarray(triangles, dtype=np.uint32)
@@ -867,7 +867,7 @@ def _build_weighted_mask_mesh(
 
 def _build_smooth_mesh(source_mesh):
     """Add generated normals to a position-only mesh for legacy GLBs."""
-    from tmesh import TcAttribType, TcMesh, TcVertexLayout
+    from termin.mesh import TcAttribType, TcMesh, TcVertexLayout
 
     positions = np.ascontiguousarray(source_mesh.vertices, dtype=np.float32)
     triangles = source_mesh.triangles

@@ -8,7 +8,7 @@ from typing import Callable
 
 import numpy as np
 from PIL import Image
-from tcbase import log
+from termin.base import log
 
 from ..document.layer import Layer
 from ..document.layer_stack import LayerStack

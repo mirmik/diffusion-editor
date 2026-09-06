@@ -30,11 +30,11 @@ DEFAULT_STATE_FILE = PROJECT_ROOT / ".termin-sdk"
 RUNTIME_MANIFEST = "python-runtime-manifest.json"
 SUPPORTED_RUNTIME_MANIFEST_SCHEMAS = frozenset({3, 4})
 DIRECT_TERMIN_DISTRIBUTIONS = (
-    "tcbase",
+    "termin-base",
     "termin-dispatch",
     "termin-glb-native",
     "termin-gui-native",
-    "tgfx",
+    "termin-graphics-core",
     "termin-display",
     "termin-mcp",
 )
@@ -285,7 +285,7 @@ def _read_contract(
     if schema == 3:
         native_build_ids = {
             local
-            for name in ("tcbase", "tgfx", "termin-display")
+            for name in ("termin-base", "termin-graphics-core", "termin-display")
             if (local := _native_sdk_build_id(contract.version(name))) is not None
         }
         if len(native_build_ids) != 1:
@@ -659,8 +659,8 @@ def _require_module_from_runtime_environment(module) -> None:
 
 
 def verify_imports(contract: SdkContract) -> None:
-    import tcbase  # noqa: F401
-    import tgfx
+    import termin.base  # noqa: F401
+    import termin.graphics
     import termin.dispatch
     import termin.display
     import termin.display.window
@@ -672,7 +672,7 @@ def verify_imports(contract: SdkContract) -> None:
     from termin.display.window import WindowedGraphicsSession
     from termin.gui_native import OffscreenGuiComposition
     from termin.gui_native.window import GuiWindowAdapter, dynamic_texture_lease
-    from tgfx import Tgfx2Context, configure_default_shader_runtime
+    from termin.graphics import Tgfx2Context, configure_default_shader_runtime
 
     required = (
         Dispatcher,
@@ -698,8 +698,8 @@ def verify_imports(contract: SdkContract) -> None:
                 "by the native command routing contract"
             )
     for module in (
-        tcbase,
-        tgfx,
+        termin.base,
+        termin.graphics,
         termin.dispatch,
         termin.display,
         termin.display.window,

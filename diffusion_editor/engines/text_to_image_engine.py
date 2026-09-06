@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tcbase import log
+from termin.base import log
 
 from ..generation.provenance import GenerationProvenance
 from ..generation.text_to_image_profiles import text_to_image_profile
