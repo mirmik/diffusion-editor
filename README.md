@@ -263,3 +263,6 @@ TERMIN_BACKEND=opengl SDL_VIDEODRIVER=offscreen \
 
 The complete automated/manual graphics and ML matrix is documented in
 [CPython 3.14t quality gates](docs/quality-gates.md).
+
+Manual camera-based texture editing with a brush mask, Depth ControlNet and
+IPAdapter is described in [StableGen texture passes](docs/multiview-studio-stablegen.md).

@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
 import tempfile
 import threading
 import time
@@ -28,9 +29,15 @@ class Pixal3DGenerator:
         self._lock = threading.Lock()
 
     def generate(self, project: MultiviewProject, project_path: Path, cancel: threading.Event, on_progress=None) -> Path:
+        return self._generate(project, project_path, cancel, on_progress, operation='shape')
+
+    def generate_texture(self, project, project_path, cancel, on_progress=None):
+        return self._generate(project, project_path, cancel, on_progress, operation='texture')
+
+    def _generate(self, project, project_path, cancel, on_progress, *, operation):
         if project.shape_backend != 'pixal3d':
             raise ValueError('Pixal3D generator requires the Pixal3D backend')
-        errors = project.validate_shape_request()
+        errors = project.validate_texture_request() if operation == 'texture' else project.validate_shape_request()
         if errors:
             raise ValueError('; '.join(errors))
         for path, hint in ((self.python, 'DIFFUSION_EDITOR_PIXAL3D_PYTHON'),
@@ -40,7 +47,7 @@ class Pixal3DGenerator:
                 raise FileNotFoundError(f'Pixal3D runtime file missing: {path}. Configure {hint}.')
         if cancel.is_set():
             raise RuntimeError('Pixal3D generation cancelled')
-        runs = project_path.resolve().parent / 'shape-runs'
+        runs = project_path.resolve().parent / ('texture-runs' if operation == 'texture' else 'shape-runs')
         runs.mkdir(parents=True, exist_ok=True)
         output = Path(tempfile.mkdtemp(prefix=f'pixal3d-{time.strftime("%Y%m%d-%H%M%S")}-', dir=runs))
         try:
@@ -51,6 +58,16 @@ class Pixal3DGenerator:
         request = {'protocol': 1, 'backend': 'pixal3d', 'project': str(project_path.resolve()),
                    'root': str(self.root.resolve()), 'model_path': str(self.model_path.resolve()),
                    'settings': asdict(project.pixal3d), 'views_dir': 'views'}
+        request['operation'] = operation
+        if operation == 'texture':
+            encoder = Path(os.environ.get('DIFFUSION_EDITOR_PIXAL3D_SHAPE_ENCODER',
+                '/home/mirmik/soft/TRELLIS.2/models/TRELLIS.2-4B/ckpts/shape_enc_next_dc_f16c32_fp16')).expanduser()
+            for suffix in ('.json', '.safetensors'):
+                if not Path(str(encoder) + suffix).is_file():
+                    raise FileNotFoundError(f'Missing shape encoder: {encoder}{suffix}; configure DIFFUSION_EDITOR_PIXAL3D_SHAPE_ENCODER')
+            shutil.copyfile(Path(project.geometry_path).expanduser().resolve(), output / 'input.glb')
+            request.update(input_mesh='input.glb', shape_encoder=str(encoder.resolve()),
+                           texture_settings=asdict(project.pixal3d_texture))
         request_path = output / 'request.json'
         request_path.write_text(json.dumps(request, indent=2) + '\n')
         runner = Path(__file__).with_name('pixal3d_runner.py')

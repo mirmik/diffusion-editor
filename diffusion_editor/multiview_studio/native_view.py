@@ -164,6 +164,7 @@ class NativeMultiviewStudioView:
         self._build_settings()
         self._build_pixal_settings()
         self._build_texture_settings()
+        self._build_pixal_texture_settings()
         self._build_postprocess_settings()
         self._build_shape_output()
         self._build_refine_settings()
@@ -259,6 +260,9 @@ class NativeMultiviewStudioView:
         self.selected_path.stable_id = (
             "multiview-studio.workspace.image.path"
         )
+        self.texture_pass_canvas = document.create_canvas()
+        self.texture_pass_canvas.widget.visible = False
+        self.texture_pass_canvas.widget.stable_id = "stablegen.captured-view"
         self.selected_image = document.create_canvas()
         self.selected_image.widget.stable_id = (
             "multiview-studio.workspace.image.preview"
@@ -279,6 +283,7 @@ class NativeMultiviewStudioView:
         selected_content.add_fixed_child(self.selected_title, 22.0)
         selected_content.add_fixed_child(self.selected_path, 20.0)
         selected_content.add_flex_child(self.selected_image.widget, 1.0)
+        selected_content.add_flex_child(self.texture_pass_canvas.widget, 1.0)
         self.selected_panel.set_content(selected_content)
 
         self.model_panel = document.create_group_box("3D model")
@@ -766,7 +771,6 @@ class NativeMultiviewStudioView:
             self.setting_controls["pixal3d.seed"].text = str(project.pixal3d.seed)
             for field in ("steps", "resolution", "fov", "decimation_target"):
                 self.setting_controls[f"pixal3d.{field}"].value = float(getattr(project.pixal3d, field))
-            self.setting_controls["pixal3d.texture_size"].selected_index = (1024, 2048, 4096).index(project.pixal3d.texture_size)
             self.setting_controls["pixal3d.normalize_views"].checked = project.pixal3d.normalize_views
             self.setting_controls["qwen_seed"].text = str(project.qwen_seed)
             self.setting_controls["seed"].text = str(project.trellis.seed)
@@ -791,6 +795,9 @@ class NativeMultiviewStudioView:
                 self.setting_controls[f"texture.{field}"].value = float(
                     getattr(project.texture, field)
                 )
+            self.setting_controls['pixal3d_texture.seed'].text = str(project.pixal3d_texture.seed)
+            for field in ('steps', 'texture_size'):
+                self.setting_controls[f'pixal3d_texture.{field}'].value = float(getattr(project.pixal3d_texture, field))
             postprocess = project.trellis.postprocess
             for field in (
                 "fill_holes",
@@ -972,6 +979,8 @@ class NativeMultiviewStudioView:
         self.trellis_settings_content.visible = not is_pixal
         self.trellis_postprocess_widget.visible = not refining and not is_pixal
         self.pixal_settings_widget.visible = not refining and is_pixal
+        self.pixal_texture_widget.visible = not refining and is_pixal
+        self.trellis_texture_widget.visible = not refining and not is_pixal
         self.refine_settings_widget.visible = refining
         self._update_refine_panel()
 
@@ -1358,26 +1367,17 @@ class NativeMultiviewStudioView:
             ("steps", "Steps per stage", 12, 1, 200, 1),
             ("resolution", "Resolution", 1024, 1024, 1536, 512),
             ("fov", "Camera FOV (degrees)", 20, 5, 90, 1),
-            ("decimation_target", "Target faces", 1000000, 10000, 4000000, 10000),
+            ("decimation_target", "Final triangles", 1000000, 10000, 4000000, 10000),
         ):
             self.setting_controls[f"pixal3d.{field}"] = self._spin(
                 content, label, f"pixal3d.{field}", value, minimum, maximum, step,
                 lambda selected, name=field: self._actions.set_pixal3d_setting(name, selected))
-        combo = self._document.create_combo_box()
-        combo.widget.stable_id = "multiview-studio.setting.pixal3d.texture_size"
-        for size in (1024, 2048, 4096):
-            combo.add_item(f"Texture {size}")
-        self._connections.append(combo.connect_changed(
-            lambda index, *_: None if self._syncing or index not in (0, 1, 2)
-            else self._actions.set_pixal3d_setting("texture_size", (1024, 2048, 4096)[index])))
-        content.add_preferred_child(combo.widget)
-        self.setting_controls["pixal3d.texture_size"] = combo
         self.setting_controls["pixal3d.normalize_views"] = self._checkbox(
             content, "Normalize view framing", "pixal3d.normalize_views",
             lambda checked: self._actions.set_pixal3d_setting("normalize_views", checked))
         hint = self._document.create_label(
             "All populated views are used together. Cameras follow the grid angles; "
-            "Qwen camera poses are approximate. Includes PBR texture.")
+            "Qwen camera poses are approximate. Repair and simplify to the final triangle count. Texture separately.")
         content.add_preferred_child(hint)
         group.set_content(content)
         self.left_content.add_preferred_child(group.widget)
@@ -1433,8 +1433,32 @@ class NativeMultiviewStudioView:
         self.left_content.add_preferred_child(group.widget)
         self.main_settings_widgets.append(group.widget)
 
+    def _build_pixal_texture_settings(self):
+        group = self._document.create_group_box("Pixal3D multiview texture generation")
+        group.widget.stable_id = "multiview-studio.pixal3d-texture-settings"
+        self.pixal_texture_widget = group.widget
+        content = self._document.create_vstack("Pixal3DTextureSettings")
+        content.set_layout_spacing(4.0)
+        self.setting_controls['pixal3d_texture.seed'] = self._seed_input(
+            content, 'Texture seed', 'pixal3d_texture.seed', 43,
+            lambda value: self._actions.set_pixal3d_texture_setting('seed', value))
+        for field, label, value, minimum, maximum, step in (
+            ('steps', 'Texture steps', 12, 1, 200, 1),
+            ('texture_size', 'Texture size', 2048, 1024, 4096, 512),
+        ):
+            self.setting_controls[f'pixal3d_texture.{field}'] = self._spin(
+                content, label, f'pixal3d_texture.{field}', value, minimum, maximum, step,
+                lambda value, name=field: self._actions.set_pixal3d_texture_setting(name, value))
+        content.add_preferred_child(self._document.create_label(
+            'Textures the current mesh using all views together. Encode resolution: 1024. '
+            'Uses Pixal3D camera FOV and framing settings.'))
+        group.set_content(content)
+        self.left_content.add_preferred_child(group.widget)
+        self.main_settings_widgets.append(group.widget)
+
     def _build_texture_settings(self) -> None:
         group = self._document.create_group_box("TRELLIS.2 texture generation")
+        self.trellis_texture_widget = group.widget
         group.widget.stable_id = "multiview-studio.texture-settings"
         content = self._document.create_vstack("MultiviewStudioTextureSettings")
         content.set_layout_spacing(4.0)
@@ -1980,6 +2004,8 @@ class NativeMultiviewStudioView:
         self._request_repaint()
 
     def _apply_selected_view(self) -> None:
+        if self.texture_pass_canvas.widget.visible:
+            return
         slot = self._project.slot(self._selected_key)
         if self._selected_key == _FRONT_KEY:
             label = "Front"

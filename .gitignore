@@ -26,3 +26,5 @@ data/canonical-experiments/
 
 # Local Pixal3D multiview checkout, weights and experiment outputs.
 .local/pixal3d-multiview/
+
+.local/stablegen-studio/

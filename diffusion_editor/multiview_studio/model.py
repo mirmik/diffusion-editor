@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .stablegen_model import StableGenSettings
 from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
@@ -120,6 +121,21 @@ class Pixal3DSettings:
             raise ValueError("Pixal3D target faces must be positive")
         if self.texture_size not in (1024, 2048, 4096):
             raise ValueError("Pixal3D texture size must be 1024, 2048 or 4096")
+
+
+@dataclass(frozen=True)
+class Pixal3DTextureSettings:
+    seed: int = 43
+    steps: int = 12
+    texture_size: int = 2048
+
+    def __post_init__(self):
+        if not 0 <= self.seed <= 2_147_483_647:
+            raise ValueError("Pixal3D texture seed must fit a signed 32-bit integer")
+        if not 1 <= self.steps <= 200:
+            raise ValueError("Pixal3D texture steps must be between 1 and 200")
+        if not 1024 <= self.texture_size <= 4096 or self.texture_size % 512:
+            raise ValueError("Pixal3D texture size must be a multiple of 512 from 1024 to 4096")
 
 
 @dataclass(frozen=True)
@@ -532,8 +548,12 @@ class MultiviewProject:
     shape_backend: str = "trellis"
     pixal3d: Pixal3DSettings = Pixal3DSettings()
     texture: TrellisTextureSettings = TrellisTextureSettings()
+    pixal3d_texture: Pixal3DTextureSettings = Pixal3DTextureSettings()
     geometry_path: str = ""
     shape_path: str = ""
+    stablegen: StableGenSettings = StableGenSettings()
+    stablegen_history: tuple[str, ...] = ()
+    stablegen_history_index: int = -1
     refine_cube: RefineCube | None = None
     refine_regions: tuple[RefineCube, ...] = ()
     refine_masks: tuple[RefineFaceMask, ...] = ()
@@ -730,6 +750,10 @@ class MultiviewProject:
         populated = self.populated_slots()
         if not populated:
             errors.append("At least one populated view is required for texturing")
+        if self.shape_backend == 'pixal3d':
+            if not any(slot.key == ViewKey('eye', 0) for slot in populated):
+                errors.append("Front view is required for Pixal3D texturing")
+            return tuple(errors)
         if self.texture.warmup_steps and not self.front_path:
             errors.append("Front image is required for texture warmup")
         if (
@@ -754,6 +778,7 @@ class MultiviewProject:
             "qwen": {"seed": self.qwen_seed},
             "shape_backend": self.shape_backend,
             "pixal3d": asdict(self.pixal3d),
+            "pixal3d_texture": asdict(self.pixal3d_texture),
             "trellis": {
                 "seed": self.trellis.seed,
                 "total_steps": self.trellis.total_steps,
@@ -793,6 +818,9 @@ class MultiviewProject:
                 }
                 for slot in self.slots
             ],
+            "stablegen": dict(asdict(self.stablegen), reference=_encode_path(self.stablegen.reference, root)),
+            "stablegen_history": [_encode_path(p, root) for p in self.stablegen_history],
+            "stablegen_history_index": self.stablegen_history_index,
             "geometry": _encode_path(self.geometry_path, root),
             "shape": _encode_path(self.shape_path, root),
             "refine": {
@@ -1009,7 +1037,11 @@ class MultiviewProject:
             trellis=settings,
             shape_backend=str(payload.get("shape_backend", "trellis")),
             pixal3d=Pixal3DSettings(**payload.get("pixal3d", {})),
+            pixal3d_texture=Pixal3DTextureSettings(**payload.get("pixal3d_texture", {})),
             texture=texture_settings,
+            stablegen=StableGenSettings(**dict({k: v for k, v in payload.get('stablegen', {}).items() if k != 'comfy_url'}, reference=_decode_path(payload.get('stablegen', {}).get('reference',''), root))),
+            stablegen_history=tuple(_decode_path(p, root) for p in payload.get('stablegen_history', [])),
+            stablegen_history_index=int(payload.get('stablegen_history_index', -1)),
             geometry_path=geometry_path,
             shape_path=shape_path,
             refine_cube=refine_cube,

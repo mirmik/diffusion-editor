@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import faulthandler
 import os
 from pathlib import Path
@@ -127,6 +128,8 @@ class NativeMultiviewStudioApplication:
         self._pixal3d = Pixal3DGenerator()
         self._refine = TrellisRegionRefineGenerator()
         self._texture = TrellisTextureGenerator()
+        from .stablegen_session import StableGenSession
+        self.stablegen_session = StableGenSession(self)
         composition.set_unhandled_key_handler(self.view.dispatch_shortcut)
         self.controller.connect(self._apply_project)
         if project_path:
@@ -211,6 +214,9 @@ class NativeMultiviewStudioApplication:
 
     def set_trellis_setting(self, field: str, value: int) -> None:
         self._safe(lambda: self.controller.set_trellis_setting(field, value))
+
+    def set_pixal3d_texture_setting(self, field: str, value: int) -> None:
+        self._safe(lambda: self.controller.set_pixal3d_texture_setting(field, value))
 
     def set_texture_setting(self, field: str, value: int) -> None:
         self._safe(lambda: self.controller.set_texture_setting(field, value))
@@ -652,14 +658,17 @@ class NativeMultiviewStudioApplication:
             return
         project_path = self.controller.project_path
         generation_path = project_path or self._unsaved_project_path
-        settings = snapshot.texture
+        is_pixal = snapshot.shape_backend == 'pixal3d'
+        settings = snapshot.pixal3d_texture if is_pixal else snapshot.texture
+        steps = settings.steps if is_pixal else settings.total_steps
+        backend = 'Pixal3D' if is_pixal else 'TRELLIS.2'
         count = len(snapshot.populated_slots())
         self._cancel = threading.Event()
         self._set_busy(True)
         self.view.apply_project(snapshot, project_path, self.controller.dirty)
         self.view.set_status(
-            f"Preparing texture: repaired mesh, {count} view(s), "
-            f"{settings.total_steps} steps"
+            f"Preparing {backend} texture: current mesh, {count} view(s), "
+            f"{steps} steps"
         )
         self._qwen.shutdown()
 
@@ -667,7 +676,7 @@ class NativeMultiviewStudioApplication:
             self._post(lambda text=message: self.view.set_status(text))
 
         future = self._executor.submit(
-            self._texture.generate,
+            self._pixal3d.generate_texture if is_pixal else self._texture.generate,
             snapshot,
             generation_path,
             self._cancel,
@@ -847,6 +856,7 @@ class NativeMultiviewStudioApplication:
         for box in self._message_boxes:
             if getattr(box, "open", False):
                 self.document.dismiss_overlay(box.handle)
+        self.stablegen_session.close()
         self.reconstruction_viewport.close()
         self.view.close()
         self._unsaved_workspace.cleanup()
@@ -856,6 +866,8 @@ class NativeMultiviewStudioApplication:
 
     def _apply_project(self, project, path, dirty: bool) -> None:
         self.view.apply_project(project, path, dirty)
+        if hasattr(self, "stablegen_session"):
+            self.stablegen_session.refresh()
         self.view.set_reprocess_available(
             project.shape_backend == "trellis" and self._trellis.has_reusable_cache(project)
         )
@@ -1105,6 +1117,7 @@ class NativeMultiviewStudioApplication:
             "geometry": project.geometry_path,
             "shape": project.shape_path,
         }
+        artifact_paths.update({f"stablegen:{i}": p for i, p in enumerate(project.stablegen_history)})
         copied_runs: dict[Path, Path] = {}
         adopted_paths: dict[str, Path] = {}
         project_root = manifest_path.expanduser().resolve().parent
@@ -1140,6 +1153,9 @@ class NativeMultiviewStudioApplication:
         if geometry is not None and shape is not None:
             self.controller.set_model_paths(geometry, shape)
 
+        if project.stablegen_history:
+            history = tuple(str(adopted_paths.get(f'stablegen:{i}', p)) for i, p in enumerate(project.stablegen_history))
+            self.controller._replace(replace(self.controller.project, stablegen_history=history))
         adopted_groups = []
         results_changed = False
         for group in self.controller.project.refine_shape_results:
@@ -1327,6 +1343,7 @@ class NativeMultiviewStudioApplication:
     def _finish_texture_generation(
         self, future: Future, expected_project: MultiviewProject
     ) -> None:
+        backend = 'Pixal3D' if expected_project.shape_backend == 'pixal3d' else 'TRELLIS.2'
         self._active_future = None
         self._set_busy(False)
         try:
@@ -1334,9 +1351,9 @@ class NativeMultiviewStudioApplication:
         except Exception as error:
             message = str(error)
             if "cancel" in message.lower():
-                self.view.set_status("TRELLIS.2 texturing cancelled")
+                self.view.set_status(f"{backend} texturing cancelled")
             else:
-                self._show_error("TRELLIS.2 texturing failed", message)
+                self._show_error(f"{backend} texturing failed", message)
             self.view.apply_project(
                 self.controller.project,
                 self.controller.project_path,
@@ -1448,6 +1465,8 @@ class NativeMultiviewStudioApplication:
 
     def _set_busy(self, busy: bool) -> None:
         self.view.set_busy(busy)
+        if hasattr(self, "stablegen_session"):
+            self.stablegen_session.set_busy(busy)
         viewport = getattr(self, "reconstruction_viewport", None)
         if viewport is not None:
             viewport.set_refine_cube_edit_enabled(not busy)

@@ -181,6 +181,7 @@ def _bake_pbr_preserving_faces(
     resolution: int,
     texture_size: int,
     device,
+    convert_to_gltf: bool = True,
 ):
     """UV-unwrap and bake without CuMesh's implicit topology cleanup."""
     import cv2
@@ -297,14 +298,15 @@ def _bake_pbr_preserving_faces(
     out_normals_np = out_normals.detach().cpu().numpy()
     out_faces_np = out_faces.detach().cpu().numpy()
     uvs_np = uvs.detach().cpu().numpy()
-    out_vertices_np[:, 1], out_vertices_np[:, 2] = (
-        out_vertices_np[:, 2].copy(),
-        -out_vertices_np[:, 1].copy(),
-    )
-    out_normals_np[:, 1], out_normals_np[:, 2] = (
-        out_normals_np[:, 2].copy(),
-        -out_normals_np[:, 1].copy(),
-    )
+    if convert_to_gltf:
+        out_vertices_np[:, 1], out_vertices_np[:, 2] = (
+            out_vertices_np[:, 2].copy(),
+            -out_vertices_np[:, 1].copy(),
+        )
+        out_normals_np[:, 1], out_normals_np[:, 2] = (
+            out_normals_np[:, 2].copy(),
+            -out_normals_np[:, 1].copy(),
+        )
     uvs_np[:, 1] = 1 - uvs_np[:, 1]
     return trimesh.Trimesh(
         vertices=out_vertices_np,

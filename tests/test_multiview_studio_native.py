@@ -318,8 +318,10 @@ def test_selected_refine_region_switches_left_panel_and_marks_view_patch(
         view.set_selected_mesh(0)
         assert not view.refine_settings_widget.visible
         assert all(widget.visible for widget in view.main_settings_widgets
-                   if widget.stable_id != view.pixal_settings_widget.stable_id)
+                   if widget.stable_id not in {view.pixal_settings_widget.stable_id, view.pixal_texture_widget.stable_id})
         assert not view.pixal_settings_widget.visible
+        assert not view.pixal_texture_widget.visible
+        assert view.trellis_texture_widget.visible
     finally:
         view.close()
         tc_ui_document_destroy(document)
@@ -987,6 +989,9 @@ def test_pixal_backend_exposes_own_settings_and_hides_trellis_postprocess():
         view.apply_project(project,None,True)
         assert view.setting_controls['backend'].selected_index == 1
         assert view.pixal_settings_widget.visible
+        assert view.pixal_texture_widget.visible
+        assert not view.trellis_texture_widget.visible
+        assert view.setting_controls["pixal3d_texture.steps"].value == 12
         assert not view.trellis_settings_content.visible
         assert not view.trellis_postprocess_widget.visible
         assert view.setting_controls['pixal3d.resolution'].value == 1536
@@ -999,6 +1004,8 @@ def test_pixal_backend_exposes_own_settings_and_hides_trellis_postprocess():
         view.set_busy(False)
         view.apply_project(replace(project,shape_backend='trellis'),None,True)
         assert not view.pixal_settings_widget.visible
+        assert not view.pixal_texture_widget.visible
+        assert view.trellis_texture_widget.visible
         assert view.trellis_settings_content.visible
         assert view.trellis_postprocess_widget.visible
     finally:

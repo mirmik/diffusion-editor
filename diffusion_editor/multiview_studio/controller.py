@@ -144,6 +144,38 @@ class MultiviewStudioController:
         settings = replace(self.project.trellis, postprocess=postprocess)
         self._replace(replace(self.project, trellis=settings))
 
+    def set_pixal3d_texture_setting(self, field: str, value: int) -> None:
+        if field not in {'seed', 'steps', 'texture_size'}:
+            raise ValueError(f'Unknown Pixal3D texture setting: {field}')
+        settings = replace(self.project.pixal3d_texture, **{field: int(value)})
+        self._replace(replace(self.project, pixal3d_texture=settings))
+
+    def set_stablegen_setting(self, field, value):
+        old = getattr(type(self.project.stablegen)(), field)
+        value = type(old)(value)
+        self._replace(replace(self.project, stablegen=replace(self.project.stablegen, **{field: value})))
+
+    def accept_stablegen(self, path):
+        p = self.project
+        history = p.stablegen_history
+        index = p.stablegen_history_index
+        if not (0 <= index < len(history) and history[index] == p.shape_path):
+            history = (p.shape_path,)
+            index = 0
+        history = history[:index+1] + (str(Path(path).resolve()),)
+        self._replace(replace(p, shape_path=history[-1], stablegen_history=history, stablegen_history_index=len(history)-1))
+
+    def step_stablegen_history(self, delta):
+        p = self.project
+        index = p.stablegen_history_index
+        if not (0 <= index < len(p.stablegen_history) and p.stablegen_history[index] == p.shape_path):
+            raise ValueError('The current material is outside the texture-pass history')
+        target = index + int(delta)
+        if not 0 <= target < len(p.stablegen_history): return
+        path = p.stablegen_history[target]
+        if not Path(path).is_file(): raise FileNotFoundError(path)
+        self._replace(replace(p, shape_path=path, stablegen_history_index=target))
+
     def set_texture_setting(self, field: str, value: int) -> None:
         if field not in {
             "seed",

@@ -10,7 +10,7 @@ import time
 from typing import Callable
 
 
-POSTPROCESS_PROTOCOL = 2
+POSTPROCESS_PROTOCOL = 3
 
 
 def postprocess_key(settings: dict, actual_resolution: int) -> str:
@@ -180,8 +180,42 @@ def run_mesh_postprocess(
         stage["removed_faces"] = removed
         stages.append(stage)
 
+    if settings.get('exact_face_count', False):
+        target = int(settings['decimation_target'])
+        mark = time.perf_counter()
+        # Cleanup can add faces after the first decimation. Recheck the final
+        # budget, then fill any decimator undershoot by subdividing surfaces.
+        for attempt in range(4):
+            if len(faces) <= target:
+                break
+            _progress(progress, f'[postprocess] Final face budget: {len(faces):,} -> {target:,}')
+            gpu_mesh = cumesh.CuMesh()
+            gpu_mesh.init(torch.as_tensor(vertices, dtype=torch.float32, device='cuda').contiguous(),
+                          torch.as_tensor(faces, dtype=torch.int32, device='cuda').contiguous())
+            gpu_mesh.simplify(target, verbose=True)
+            gpu_mesh.remove_duplicate_faces()
+            gpu_mesh.repair_non_manifold_edges()
+            v, f = gpu_mesh.read()
+            vertices, faces = v.cpu().numpy(), f.cpu().numpy()
+            faces = faces[~_exact_degenerate_faces(vertices, faces)]
+        if len(faces) > target:
+            raise RuntimeError(f'Could not meet final face budget {target}: {len(faces)} faces remain')
+        if __package__:
+            from .mesh_face_budget import refine_to_face_count
+        else:
+            from mesh_face_budget import refine_to_face_count
+        before_budget = len(faces)
+        vertices, faces = refine_to_face_count(vertices, faces, target)
+        stages.append(dict(_stage('exact_face_count', vertices, faces, mark),
+                           before_subdivision=before_budget, target=target))
+
     result = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
     result.remove_unreferenced_vertices()
+    if settings.get('fix_winding', False):
+        mark = time.perf_counter()
+        _progress(progress, '[postprocess] Make adjacent triangle winding consistent')
+        trimesh.repair.fix_winding(result)
+        stages.append(_stage('fix_winding', result.vertices, result.faces, mark))
     topology = _topology_counts(
         np.asarray(result.faces, dtype=np.int64)
     )
@@ -190,7 +224,11 @@ def run_mesh_postprocess(
             np.asarray(result.vertices), np.asarray(result.faces)
         ).sum()
     )
-    result.apply_transform(_gltf_y_up_transform(np))
+    coordinates = settings.get('input_coordinates', 'z_up')
+    if coordinates == 'z_up':
+        result.apply_transform(_gltf_y_up_transform(np))
+    elif coordinates != 'gltf_y_up':
+        raise ValueError(f'Unknown input coordinates: {coordinates}')
     _ = result.vertex_normals
     result.export(output_path)
 
