@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
 import math
@@ -95,6 +95,31 @@ class TrellisShapeSettings:
             )
         if self.decimation_target <= 0:
             raise ValueError("decimation target must be positive")
+
+
+@dataclass(frozen=True)
+class Pixal3DSettings:
+    seed: int = 42
+    steps: int = 12
+    resolution: int = 1024
+    fov: float = 20.0
+    normalize_views: bool = True
+    decimation_target: int = 1_000_000
+    texture_size: int = 4096
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.seed <= 2_147_483_647:
+            raise ValueError("Pixal3D seed must fit a signed 32-bit integer")
+        if not 1 <= self.steps <= 200:
+            raise ValueError("Pixal3D steps must be between 1 and 200")
+        if self.resolution not in (1024, 1536):
+            raise ValueError("Pixal3D resolution must be 1024 or 1536")
+        if not math.isfinite(self.fov) or not 5 <= self.fov <= 90:
+            raise ValueError("Pixal3D FOV must be between 5 and 90 degrees")
+        if self.decimation_target <= 0:
+            raise ValueError("Pixal3D target faces must be positive")
+        if self.texture_size not in (1024, 2048, 4096):
+            raise ValueError("Pixal3D texture size must be 1024, 2048 or 4096")
 
 
 @dataclass(frozen=True)
@@ -504,6 +529,8 @@ class MultiviewProject:
         ViewSlot(key) for key in all_view_keys()
     )
     trellis: TrellisShapeSettings = TrellisShapeSettings()
+    shape_backend: str = "trellis"
+    pixal3d: Pixal3DSettings = Pixal3DSettings()
     texture: TrellisTextureSettings = TrellisTextureSettings()
     geometry_path: str = ""
     shape_path: str = ""
@@ -515,6 +542,8 @@ class MultiviewProject:
     refine_shape_results: tuple[tuple[RefineShapeResult, ...], ...] = ()
 
     def __post_init__(self) -> None:
+        if self.shape_backend not in ("trellis", "pixal3d"):
+            raise ValueError(f"unknown shape backend: {self.shape_backend}")
         keys = tuple(slot.key for slot in self.slots)
         expected = all_view_keys()
         if keys != expected:
@@ -678,6 +707,10 @@ class MultiviewProject:
         return tuple(slot for slot in self.slots if slot.populated)
 
     def validate_shape_request(self) -> tuple[str, ...]:
+        if self.shape_backend == "pixal3d":
+            if not self.slot(ViewKey("eye", 0)).populated:
+                return ("Front view is required as the Pixal3D main camera",)
+            return ()
         errors: list[str] = []
         if not self.front_path:
             errors.append("Front image is required for TRELLIS.2 warmup")
@@ -719,6 +752,8 @@ class MultiviewProject:
                 "back": _encode_path(self.back_path, root),
             },
             "qwen": {"seed": self.qwen_seed},
+            "shape_backend": self.shape_backend,
+            "pixal3d": asdict(self.pixal3d),
             "trellis": {
                 "seed": self.trellis.seed,
                 "total_steps": self.trellis.total_steps,
@@ -972,6 +1007,8 @@ class MultiviewProject:
             qwen_seed=int(qwen.get("seed", 20_260_822)),
             slots=slots,
             trellis=settings,
+            shape_backend=str(payload.get("shape_backend", "trellis")),
+            pixal3d=Pixal3DSettings(**payload.get("pixal3d", {})),
             texture=texture_settings,
             geometry_path=geometry_path,
             shape_path=shape_path,

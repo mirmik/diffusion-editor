@@ -23,3 +23,6 @@ data/canonical-experiments/
 .claude/
 .codex/
 .venv-workers
+
+# Local Pixal3D multiview checkout, weights and experiment outputs.
+.local/pixal3d-multiview/

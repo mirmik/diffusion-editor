@@ -7,6 +7,11 @@ The editor stores document pixels as straight sRGB RGBA8 and composites RGB
 in linear light with linear alpha. The boundary contract is documented in
 [Color management](docs/color-management.md).
 
+The standalone Multiview Studio (`./run-multiview-studio.sh`) supports
+TRELLIS.2 and **Pixal3D multiview** reconstruction from populated view cells.
+See [Pixal3D in Studio](docs/multiview-studio-pixal3d.md) for controls, runtime
+paths, and camera assumptions.
+
 ## Prerequisites
 
 Install or build the Termin SDK first. The default lookup path is:

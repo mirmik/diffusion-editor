@@ -36,6 +36,7 @@ from .native_view import NativeMultiviewStudioView
 from .qwen_generation import QwenViewGenerator, generated_view_keys
 from .recent_projects import RecentProjectsStore
 from .trellis_generation import TrellisShapeGenerator
+from .pixal3d_generation import Pixal3DGenerator
 from .trellis_refine_generation import TrellisRegionRefineGenerator
 from .trellis_texture_generation import TrellisTextureGenerator
 
@@ -123,6 +124,7 @@ class NativeMultiviewStudioApplication:
         self._cancel = threading.Event()
         self._qwen = QwenViewGenerator()
         self._trellis = TrellisShapeGenerator()
+        self._pixal3d = Pixal3DGenerator()
         self._refine = TrellisRegionRefineGenerator()
         self._texture = TrellisTextureGenerator()
         composition.set_unhandled_key_handler(self.view.dispatch_shortcut)
@@ -200,6 +202,12 @@ class NativeMultiviewStudioApplication:
 
     def set_qwen_seed(self, seed: int) -> None:
         self._safe(lambda: self.controller.set_qwen_seed(seed))
+
+    def set_shape_backend(self, backend: str) -> None:
+        self._safe(lambda: self.controller.set_shape_backend(backend))
+
+    def set_pixal3d_setting(self, field: str, value: int | float | bool) -> None:
+        self._safe(lambda: self.controller.set_pixal3d_setting(field, value))
 
     def set_trellis_setting(self, field: str, value: int) -> None:
         self._safe(lambda: self.controller.set_trellis_setting(field, value))
@@ -560,14 +568,18 @@ class NativeMultiviewStudioApplication:
         project_path = self.controller.project_path
         snapshot = self.controller.project
         generation_path = project_path or self._unsaved_project_path
-        settings = snapshot.trellis
+        is_pixal = snapshot.shape_backend == "pixal3d"
+        generator = self._pixal3d if is_pixal else self._trellis
+        settings = snapshot.pixal3d if is_pixal else snapshot.trellis
         count = len(snapshot.populated_slots())
         self._cancel = threading.Event()
         self._set_busy(True)
         self.view.apply_project(snapshot, project_path, self.controller.dirty)
         self.view.set_status(
-            f"Preparing TRELLIS.2: {count} view(s), "
-            f"{settings.total_steps} steps, {settings.warmup_steps} warmup"
+            (f"Preparing Pixal3D: {count} view(s), {settings.steps} steps, "
+             f"resolution {settings.resolution}") if is_pixal else
+            (f"Preparing TRELLIS.2: {count} view(s), "
+             f"{settings.total_steps} steps, {settings.warmup_steps} warmup")
         )
         # Qwen and TRELLIS.2 cannot coexist comfortably on the target GPU.
         self._qwen.shutdown()
@@ -576,7 +588,7 @@ class NativeMultiviewStudioApplication:
             self._post(lambda text=message: self.view.set_status(text))
 
         future = self._executor.submit(
-            self._trellis.generate,
+            generator.generate,
             snapshot,
             generation_path,
             self._cancel,
@@ -594,7 +606,7 @@ class NativeMultiviewStudioApplication:
             self.view.set_status("Another operation is already running")
             return
         snapshot = self.controller.project
-        if not self._trellis.has_reusable_cache(snapshot):
+        if snapshot.shape_backend != "trellis" or not self._trellis.has_reusable_cache(snapshot):
             self.view.set_status(
                 "Cached decoded mesh is unavailable or generation inputs changed"
             )
@@ -798,6 +810,7 @@ class NativeMultiviewStudioApplication:
         if self._job_active():
             self._cancel.set()
             self._trellis.cancel()
+            self._pixal3d.cancel()
             self._refine.cancel()
             self._texture.cancel()
             self.view.set_status("Cancelling active operation...")
@@ -823,6 +836,7 @@ class NativeMultiviewStudioApplication:
         self.composition.set_unhandled_key_handler(None)
         self._cancel.set()
         self._trellis.cancel()
+        self._pixal3d.cancel()
         self._refine.cancel()
         self._texture.cancel()
         self._executor.shutdown(wait=True, cancel_futures=True)
@@ -843,7 +857,7 @@ class NativeMultiviewStudioApplication:
     def _apply_project(self, project, path, dirty: bool) -> None:
         self.view.apply_project(project, path, dirty)
         self.view.set_reprocess_available(
-            self._trellis.has_reusable_cache(project)
+            project.shape_backend == "trellis" and self._trellis.has_reusable_cache(project)
         )
         self._selected_mesh_index = min(
             self._selected_mesh_index, len(project.refine_regions)
@@ -1250,6 +1264,7 @@ class NativeMultiviewStudioApplication:
     def _finish_shape_generation(
         self, future: Future, expected_project: MultiviewProject
     ) -> None:
+        label = "Pixal3D" if expected_project.shape_backend == "pixal3d" else "TRELLIS.2"
         self._active_future = None
         self._set_busy(False)
         try:
@@ -1257,9 +1272,9 @@ class NativeMultiviewStudioApplication:
         except Exception as error:
             message = str(error)
             if "cancel" in message.lower():
-                self.view.set_status("TRELLIS.2 shape generation cancelled")
+                self.view.set_status(f"{label} shape generation cancelled")
             else:
-                self._show_error("TRELLIS.2 shape generation failed", message)
+                self._show_error(f"{label} shape generation failed", message)
             self.view.apply_project(
                 self.controller.project,
                 self.controller.project_path,
@@ -1267,7 +1282,7 @@ class NativeMultiviewStudioApplication:
             )
             return
         if self.controller.project != expected_project:
-            self.view.set_status("Ignored TRELLIS.2 result for a different project")
+            self.view.set_status(f"Ignored {label} result for a different project")
             return
         self.controller.set_shape_path(shape_path)
         if self.controller.project_path is not None:

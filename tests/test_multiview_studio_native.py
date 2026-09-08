@@ -317,7 +317,9 @@ def test_selected_refine_region_switches_left_panel_and_marks_view_patch(
 
         view.set_selected_mesh(0)
         assert not view.refine_settings_widget.visible
-        assert all(widget.visible for widget in view.main_settings_widgets)
+        assert all(widget.visible for widget in view.main_settings_widgets
+                   if widget.stable_id != view.pixal_settings_widget.stable_id)
+        assert not view.pixal_settings_widget.visible
     finally:
         view.close()
         tc_ui_document_destroy(document)
@@ -971,3 +973,34 @@ def test_first_save_preserves_nested_refined_region_texture_run(tmp_path: Path):
         assert Path(result.texture_manifest_path).is_file()
     finally:
         application._unsaved_workspace.cleanup()
+
+
+def test_pixal_backend_exposes_own_settings_and_hides_trellis_postprocess():
+    from diffusion_editor.multiview_studio.model import Pixal3DSettings
+    document = tc_ui_document_create()
+    actions = _Actions()
+    view = NativeMultiviewStudioView(document, actions, request_repaint=lambda: None,
+                                    texture_lease_factory=_FakeLease)
+    try:
+        project = replace(MultiviewProject().with_source('front', '/tmp/front.png'),
+                          shape_backend='pixal3d', pixal3d=Pixal3DSettings(resolution=1536,steps=8))
+        view.apply_project(project,None,True)
+        assert view.setting_controls['backend'].selected_index == 1
+        assert view.pixal_settings_widget.visible
+        assert not view.trellis_settings_content.visible
+        assert not view.trellis_postprocess_widget.visible
+        assert view.setting_controls['pixal3d.resolution'].value == 1536
+        assert view.setting_controls['pixal3d.steps'].value == 8
+        assert view.build_shape_button.widget.enabled
+        assert not view.reprocess_shape_button.widget.enabled
+        view.set_busy(True)
+        assert not view.setting_controls['backend'].widget.enabled
+        assert not view.setting_controls['pixal3d.resolution'].widget.enabled
+        view.set_busy(False)
+        view.apply_project(replace(project,shape_backend='trellis'),None,True)
+        assert not view.pixal_settings_widget.visible
+        assert view.trellis_settings_content.visible
+        assert view.trellis_postprocess_widget.visible
+    finally:
+        view.close()
+        tc_ui_document_destroy(document)

@@ -106,6 +106,21 @@ class MultiviewStudioController:
         settings = replace(self.project.trellis, **{field: int(value)})
         self._replace(replace(self.project, trellis=settings))
 
+    def set_shape_backend(self, backend: str) -> None:
+        self._replace(replace(self.project, shape_backend=backend))
+
+    def set_pixal3d_setting(self, field: str, value: int | float | bool) -> None:
+        if field == "normalize_views":
+            value = bool(value)
+        elif field == "fov":
+            value = float(value)
+        elif field in {"seed", "steps", "resolution", "decimation_target", "texture_size"}:
+            value = int(value)
+        else:
+            raise ValueError(f"unknown Pixal3D setting: {field}")
+        settings = replace(self.project.pixal3d, **{field: value})
+        self._replace(replace(self.project, pixal3d=settings))
+
     def set_mesh_postprocess(self, field: str, value: bool | float) -> None:
         boolean_fields = {
             "fill_holes",

@@ -46,6 +46,8 @@ class StudioActions(Protocol):
     def pick_slot(self, key: ViewKey) -> None: ...
     def clear_slot(self, key: ViewKey) -> None: ...
     def set_qwen_seed(self, seed: int) -> None: ...
+    def set_shape_backend(self, backend: str) -> None: ...
+    def set_pixal3d_setting(self, field: str, value: int | float | bool) -> None: ...
     def set_trellis_setting(self, field: str, value: int) -> None: ...
     def set_texture_setting(self, field: str, value: int) -> None: ...
     def set_mesh_postprocess(self, field: str, value: bool | float) -> None: ...
@@ -160,6 +162,7 @@ class NativeMultiviewStudioView:
         self.left_content.set_layout_spacing(6.0)
         self.left_content.set_layout_padding(EdgeInsets(6, 6, 6, 6))
         self._build_settings()
+        self._build_pixal_settings()
         self._build_texture_settings()
         self._build_postprocess_settings()
         self._build_shape_output()
@@ -403,7 +406,7 @@ class NativeMultiviewStudioView:
             self.model_content.add_preferred_child(row)
 
         self.model_hint = document.create_label(
-            "Build a TRELLIS.2 shape to inspect it here"
+            "Build a model to inspect it here"
         )
         self.model_hint.stable_id = "multiview-studio.workspace.model.empty"
         self.model_content.add_flex_child(self.model_hint, 1.0)
@@ -491,7 +494,7 @@ class NativeMultiviewStudioView:
         )
         self._append_separator(generate_model, "generate.separator.shape")
         self._append_menu_command(
-            generate_model, CommandData("generate.shape", "Build TRELLIS.2 Shape")
+            generate_model, CommandData("generate.shape", "Build Model")
         )
         self._append_menu_command(
             generate_model,
@@ -759,6 +762,12 @@ class NativeMultiviewStudioView:
                 else 0
             )
 
+            self.setting_controls["backend"].selected_index = 1 if project.shape_backend == "pixal3d" else 0
+            self.setting_controls["pixal3d.seed"].text = str(project.pixal3d.seed)
+            for field in ("steps", "resolution", "fov", "decimation_target"):
+                self.setting_controls[f"pixal3d.{field}"].value = float(getattr(project.pixal3d, field))
+            self.setting_controls["pixal3d.texture_size"].selected_index = (1024, 2048, 4096).index(project.pixal3d.texture_size)
+            self.setting_controls["pixal3d.normalize_views"].checked = project.pixal3d.normalize_views
             self.setting_controls["qwen_seed"].text = str(project.qwen_seed)
             self.setting_controls["seed"].text = str(project.trellis.seed)
             for field in (
@@ -825,7 +834,7 @@ class NativeMultiviewStudioView:
             cache_available = bool(project.geometry_path) and (
                 Path(project.geometry_path).parent / "decoded-mesh-z-up.npz"
             ).is_file()
-            can_reprocess = cache_available and not self._busy
+            can_reprocess = project.shape_backend == "trellis" and cache_available and not self._busy
             self.reprocess_shape_button.widget.enabled = can_reprocess
             self._set_menu_command_enabled(
                 "generate.reprocess", can_reprocess
@@ -864,7 +873,8 @@ class NativeMultiviewStudioView:
             populated = sum(slot.populated for slot in project.slots)
             name = project_path.name if project_path else "Untitled"
             marker = " *" if dirty else ""
-            detail = errors[0] if errors else "Ready to build shape"
+            backend = "Pixal3D multiview" if project.shape_backend == "pixal3d" else "TRELLIS.2"
+            detail = errors[0] if errors else f"Ready: {backend}"
             self.status.text = (
                 f"{name}{marker} · {populated}/24 populated · {detail}"
             )
@@ -958,6 +968,10 @@ class NativeMultiviewStudioView:
         )
         for widget in self.main_settings_widgets:
             widget.visible = not refining
+        is_pixal = self._project.shape_backend == "pixal3d"
+        self.trellis_settings_content.visible = not is_pixal
+        self.trellis_postprocess_widget.visible = not refining and not is_pixal
+        self.pixal_settings_widget.visible = not refining and is_pixal
         self.refine_settings_widget.visible = refining
         self._update_refine_panel()
 
@@ -1259,6 +1273,19 @@ class NativeMultiviewStudioView:
             20_260_822,
             lambda value: self._actions.set_qwen_seed(value),
         )
+        combo = self._document.create_combo_box()
+        combo.widget.stable_id = "multiview-studio.setting.backend"
+        for label in ("TRELLIS.2", "Pixal3D multiview"):
+            combo.add_item(label)
+        self._connections.append(combo.connect_changed(
+            lambda index, *_: None if self._syncing or index not in (0, 1)
+            else self._actions.set_shape_backend(("trellis", "pixal3d")[index])))
+        content.add_preferred_child(combo.widget)
+        self.setting_controls["backend"] = combo
+        outer = content
+        content = self._document.create_vstack("TrellisGenerationSettings")
+        self.trellis_settings_content = content
+        outer.add_preferred_child(content)
         self.setting_controls["seed"] = self._seed_input(
             content,
             "TRELLIS.2 seed",
@@ -1314,6 +1341,44 @@ class NativeMultiviewStudioView:
                 "decimation_target", value
             ),
         )
+        group.set_content(outer)
+        self.left_content.add_preferred_child(group.widget)
+        self.main_settings_widgets.append(group.widget)
+
+    def _build_pixal_settings(self) -> None:
+        group = self._document.create_group_box("Pixal3D multiview")
+        group.widget.stable_id = "multiview-studio.pixal3d-settings"
+        self.pixal_settings_widget = group.widget
+        content = self._document.create_vstack("Pixal3DSettings")
+        content.set_layout_spacing(4.0)
+        self.setting_controls["pixal3d.seed"] = self._seed_input(
+            content, "Seed", "pixal3d.seed", 42,
+            lambda value: self._actions.set_pixal3d_setting("seed", value))
+        for field, label, value, minimum, maximum, step in (
+            ("steps", "Steps per stage", 12, 1, 200, 1),
+            ("resolution", "Resolution", 1024, 1024, 1536, 512),
+            ("fov", "Camera FOV (degrees)", 20, 5, 90, 1),
+            ("decimation_target", "Target faces", 1000000, 10000, 4000000, 10000),
+        ):
+            self.setting_controls[f"pixal3d.{field}"] = self._spin(
+                content, label, f"pixal3d.{field}", value, minimum, maximum, step,
+                lambda selected, name=field: self._actions.set_pixal3d_setting(name, selected))
+        combo = self._document.create_combo_box()
+        combo.widget.stable_id = "multiview-studio.setting.pixal3d.texture_size"
+        for size in (1024, 2048, 4096):
+            combo.add_item(f"Texture {size}")
+        self._connections.append(combo.connect_changed(
+            lambda index, *_: None if self._syncing or index not in (0, 1, 2)
+            else self._actions.set_pixal3d_setting("texture_size", (1024, 2048, 4096)[index])))
+        content.add_preferred_child(combo.widget)
+        self.setting_controls["pixal3d.texture_size"] = combo
+        self.setting_controls["pixal3d.normalize_views"] = self._checkbox(
+            content, "Normalize view framing", "pixal3d.normalize_views",
+            lambda checked: self._actions.set_pixal3d_setting("normalize_views", checked))
+        hint = self._document.create_label(
+            "All populated views are used together. Cameras follow the grid angles; "
+            "Qwen camera poses are approximate. Includes PBR texture.")
+        content.add_preferred_child(hint)
         group.set_content(content)
         self.left_content.add_preferred_child(group.widget)
         self.main_settings_widgets.append(group.widget)
@@ -1321,6 +1386,7 @@ class NativeMultiviewStudioView:
     def _build_postprocess_settings(self) -> None:
         group = self._document.create_group_box("Mesh postprocess (cached)")
         group.widget.stable_id = "multiview-studio.postprocess"
+        self.trellis_postprocess_widget = group.widget
         content = self._document.create_vstack("MultiviewStudioPostprocess")
         content.set_layout_spacing(4.0)
         stages = (
@@ -1368,7 +1434,7 @@ class NativeMultiviewStudioView:
         self.main_settings_widgets.append(group.widget)
 
     def _build_texture_settings(self) -> None:
-        group = self._document.create_group_box("Texture generation")
+        group = self._document.create_group_box("TRELLIS.2 texture generation")
         group.widget.stable_id = "multiview-studio.texture-settings"
         content = self._document.create_vstack("MultiviewStudioTextureSettings")
         content.set_layout_spacing(4.0)
