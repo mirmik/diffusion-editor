@@ -807,6 +807,40 @@ class NativeMultiviewStudioApplication:
             )
         )
 
+    def export_glb(self) -> None:
+        if self._job_active():
+            self.view.set_status("Wait for the current operation before exporting")
+            return
+        source = Path(self.controller.project.shape_path)
+        if not source.is_file():
+            self.view.set_status("No model to export")
+            return
+        self._show_file_dialog(
+            FileDialogMode.SaveFile, "GLB model | *.glb", self._export_glb_path,
+            file_name="model.glb",
+        )
+
+    def _export_glb_path(self, path: str) -> None:
+        if self._job_active():
+            raise ValueError("Wait for the current operation before exporting")
+        source = Path(self.controller.project.shape_path).expanduser().resolve()
+        if not source.is_file():
+            raise ValueError("Current model is missing")
+        target = Path(path).expanduser()
+        if target.suffix.lower() != ".glb":
+            target = target.with_name(target.name + ".glb")
+        target = target.resolve()
+        # Export the accepted artifact, including embedded textures, byte for byte.
+        if target != source:
+            with tempfile.NamedTemporaryFile(dir=target.parent, suffix=".glb", delete=False) as stream:
+                temporary = Path(stream.name)
+            try:
+                shutil.copyfile(source, temporary)
+                os.replace(temporary, target)
+            finally:
+                temporary.unlink(missing_ok=True)
+        self.view.set_status(f"Exported current model with textures: {target}")
+
     def open_shape(self) -> None:
         path = Path(self.controller.project.shape_path)
         if not path.is_file():

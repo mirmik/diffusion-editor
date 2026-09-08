@@ -136,6 +136,7 @@ def test_native_multiview_view_builds_compact_navigator_and_workspace():
             "file.separator.save",
             "file.save",
             "file.save_as",
+            "file.export_glb",
             "file.separator.quit",
             "app.quit",
         )
@@ -1011,3 +1012,19 @@ def test_pixal_backend_exposes_own_settings_and_hides_trellis_postprocess():
     finally:
         view.close()
         tc_ui_document_destroy(document)
+
+
+def test_export_glb_copies_accepted_textured_artifact(tmp_path):
+    from types import SimpleNamespace
+    geometry=tmp_path/'geometry.glb';geometry.write_bytes(b'geometry')
+    textured=tmp_path/'textured.glb';textured.write_bytes(b'GLB with embedded textures')
+    app=object.__new__(NativeMultiviewStudioApplication)
+    app.controller=MultiviewStudioController(replace(MultiviewProject(),geometry_path=str(geometry),shape_path=str(textured)))
+    app._job_active=lambda:False
+    app.view=SimpleNamespace(set_status=lambda text:None)
+    before=app.controller.project
+    app._export_glb_path(str(tmp_path/'result'))
+    assert (tmp_path/'result.glb').read_bytes()==textured.read_bytes()
+    assert app.controller.project==before
+    app._export_glb_path(str(textured))
+    assert textured.read_bytes()==b'GLB with embedded textures'

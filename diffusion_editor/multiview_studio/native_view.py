@@ -59,6 +59,7 @@ class StudioActions(Protocol):
     def reprocess_shape(self) -> None: ...
     def texture_model(self) -> None: ...
     def open_shape(self) -> None: ...
+    def export_glb(self) -> None: ...
     def cancel_job(self) -> None: ...
     def begin_refine_cube(self) -> None: ...
     def set_refine_cube_value(self, field: str, value: float) -> None: ...
@@ -478,6 +479,7 @@ class NativeMultiviewStudioView:
             file_model,
             CommandData("file.save_as", "Save As…", shortcut="Ctrl+Shift+S"),
         )
+        self._append_menu_command(file_model, CommandData("file.export_glb", "Export GLB…"))
         self._append_separator(file_model, "file.separator.quit")
         self._append_menu_command(
             file_model, CommandData("app.quit", "Quit", shortcut="Ctrl+Q")
@@ -625,6 +627,7 @@ class NativeMultiviewStudioView:
         handlers = {
             "file.new": self._actions.new_project,
             "file.open": self._actions.open_project,
+            "file.export_glb": self._actions.export_glb,
             "file.save": self._actions.save_project,
             "file.save_as": self._actions.save_project_as,
             "file.recent.clear": self._actions.clear_recent_projects,
@@ -873,6 +876,8 @@ class NativeMultiviewStudioView:
             )
             self._set_menu_command_enabled("generate.texture", can_texture)
             can_open_shape = shape_exists and not self._busy
+            self.export_glb_button.widget.enabled = can_open_shape
+            self._set_menu_command_enabled("file.export_glb", can_open_shape)
             self.build_shape_button.set_text(
                 "Rebuild model" if geometry_exists else "Build model"
             )
@@ -910,6 +915,8 @@ class NativeMultiviewStudioView:
         if self._busy:
             self.build_shape_button.widget.enabled = False
             self.texture_model_button.widget.enabled = False
+            self.export_glb_button.widget.enabled = False
+            self._set_menu_command_enabled("file.export_glb", False)
             self.reprocess_shape_button.widget.enabled = False
             self._set_menu_command_enabled("generate.texture", False)
             self._set_menu_command_enabled("generate.reprocess", False)
@@ -1519,6 +1526,11 @@ class NativeMultiviewStudioView:
             self.texture_model_button.connect_clicked(self._actions.texture_model)
         )
         self.texture_model_button.widget.enabled = False
+        self.export_glb_button = self._document.create_button("Export GLB…")
+        self.export_glb_button.widget.stable_id = "multiview-studio.shape-output.export"
+        self.export_glb_button.widget.enabled = False
+        self._connections.append(self.export_glb_button.connect_clicked(self._actions.export_glb))
+        content.add_preferred_child(self.export_glb_button.widget)
         content.add_preferred_child(self.shape_path_label)
         content.add_preferred_child(self.build_shape_button.widget)
         content.add_preferred_child(self.texture_model_button.widget)
