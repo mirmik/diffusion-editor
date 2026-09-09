@@ -5,6 +5,10 @@ import os
 from pathlib import Path
 import sys
 import time
+sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
+from diffusion_editor.sdxl_sampling import resolve_prediction_type
+from stablegen_patch import prepare_patch, paste_patch
+from stablegen_checkpoints import is_sdxl_checkpoint
 
 
 def model_path(folder, name):
@@ -26,20 +30,24 @@ def main(root):
     from safetensors.torch import load_file
     from huggingface_hub import snapshot_download
     from transformers import CLIPVisionConfig, CLIPVisionModelWithProjection, CLIPImageProcessor
-    from diffusers import ControlNetModel, StableDiffusionXLControlNetInpaintPipeline, EulerDiscreteScheduler
+    from diffusers import ControlNetModel, StableDiffusionXLControlNetInpaintPipeline, EulerDiscreteScheduler, DPMSolverMultistepScheduler
     from accelerate import init_empty_weights
 
     torch.set_grad_enabled(False)
     torch.set_num_threads(4)
     start = time.monotonic()
-    settings = json.loads((root / "request.json").read_text())["settings"]
+    request = json.loads((root / "request.json").read_text())
+    settings = request["settings"]
     paths = {key: model_path(folder, settings.get(key, default)) for key, folder, default in [
         ("checkpoint", "checkpoints", "RealVisXL_V5.0_fp16.safetensors"),
-        ("lora", "loras", "sdxl_lightning_8step_lora.safetensors"),
         ("depth_model", "controlnet", "controlnet_depth_sdxl.safetensors"),
         ("ip_adapter", "ipadapter", "ip-adapter-plus_sdxl_vit-h.safetensors"),
         ("image_encoder", "clip_vision", "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors"),
     ]}
+    if settings.get('lora'):
+        paths['lora'] = model_path('loras', settings['lora'])
+    if not is_sdxl_checkpoint(paths['checkpoint']):
+        raise ValueError('This ControlNet/IPAdapter pipeline requires a standard SDXL checkpoint')
     config = os.environ.get("DIFFUSION_EDITOR_STABLEGEN_SDXL_CONFIG")
     if not config:
         config = snapshot_download("stabilityai/stable-diffusion-xl-base-1.0", local_files_only=True)
@@ -98,26 +106,39 @@ def main(root):
     )
     if pipe.unet.config.in_channels != 4:
         raise ValueError("StableGen requires a standard four-channel SDXL checkpoint")
-    pipe.load_lora_weights(str(paths["lora"].parent), weight_name=paths["lora"].name, local_files_only=True)
-    pipe.fuse_lora()
-    pipe.unload_lora_weights()
+    if 'lora' in paths:
+        pipe.load_lora_weights(str(paths["lora"].parent), weight_name=paths["lora"].name, local_files_only=True)
+        pipe.fuse_lora()
+        pipe.unload_lora_weights()
     pipe.load_ip_adapter(str(paths["ip_adapter"].parent), subfolder="",
                          weight_name=paths["ip_adapter"].name, image_encoder_folder=None,
                          local_files_only=True)
     pipe.set_ip_adapter_scale(settings["ip_strength"])
-    pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config, timestep_spacing="trailing")
+    prediction = resolve_prediction_type(paths['checkpoint'],settings.get('prediction_type'))
+    sampler = settings.get('sampler','auto')
+    if sampler == 'auto':
+        sampler = 'euler' if 'lora' in paths else 'dpmpp_sde_karras'
+    if sampler == 'euler':
+        pipe.scheduler = EulerDiscreteScheduler.from_config(
+            pipe.scheduler.config,prediction_type=prediction,timestep_spacing='trailing')
+    else:
+        pipe.scheduler = DPMSolverMultistepScheduler.from_config(
+            pipe.scheduler.config,prediction_type=prediction,timestep_spacing='trailing',
+            algorithm_type='sde-dpmsolver++',use_karras_sigmas=True)
+    print(f'Sampling mode: {prediction}, {sampler}',flush=True)
     pipe.mask_processor.register_to_config(do_binarize=False)
     pipe.vae.enable_slicing()
     pipe.to("cuda")
 
-    image = Image.open(root / "input-rgb.png").convert("RGB")
-    mask = Image.open(root / "mask.png").convert("L")
-    depth = Image.open(root / "control-depth.png").convert("RGB")
-    reference = Image.open(root / "reference.png").convert("RGB")
-    if mask.size != image.size or depth.size != image.size:
-        raise ValueError("RGB, depth and mask must have identical dimensions")
-    if not np.asarray(mask).any():
-        raise ValueError("Empty generation mask")
+    source_path = root/'generation-input.png'
+    if not source_path.is_file(): source_path=root/'input-rgb.png'
+    full_image = Image.open(source_path).convert('RGB')
+    full_mask = Image.open(root/'mask.png').convert('L')
+    full_depth = Image.open(root/'control-depth.png').convert('RGB')
+    image, mask, depth, rect = prepare_patch(
+        full_image,full_mask,full_depth,request.get('patch'),settings['size'])
+    image.save(root/'patch-rgb.png');mask.save(root/'patch-mask.png');depth.save(root/'patch-depth.png')
+    reference = Image.open(root/'reference.png').convert('RGB')
 
     def differential_mask(pipeline, index, timestep, tensors):
         count = len(pipeline.pass_timesteps)
@@ -143,16 +164,15 @@ def main(root):
         generator=torch.Generator(device="cuda").manual_seed(settings["seed"]),
         callback_on_step_end=differential_mask,
     ).images[0].convert("RGB")
-    # VAE reconstruction also changes pixels outside the mask. Restore them
-    # exactly in the 2D candidate; UV projection performs the soft final blend.
-    pixels = np.array(result)
-    pixels[np.asarray(mask) == 0] = np.asarray(image)[np.asarray(mask) == 0]
-    Image.fromarray(pixels).save(root / "candidate.png")
+    result.save(root/'patch-result.png')
+    paste_patch(full_image,result,full_mask,rect).save(root/'candidate.png')
     import diffusers
     (root / "generation.json").write_text(json.dumps({
         "status": "success", "backend": "diffusers", "diffusers_version": diffusers.__version__,
-        "scheduler": "EulerDiscreteScheduler", "timestep_spacing": "trailing",
+        "scheduler": type(pipe.scheduler).__name__, "prediction_type": prediction,
+        "sampler": sampler, "timestep_spacing": "trailing",
         "mask": "step-dependent", "executed_steps": len(pipe.pass_timesteps),
+        "patch": rect, "patch_working_size": image.size,
         "models": {k: str(v) for k, v in paths.items()},
         "elapsed_seconds": time.monotonic() - start,
         "peak_allocated_mib": torch.cuda.max_memory_allocated() / 2**20,

@@ -869,7 +869,8 @@ class NativeMultiviewStudioApplication:
             processed += 1
 
     def render_viewports(self) -> bool:
-        return self.reconstruction_viewport.render_if_dirty()
+        preview_updated = self.stablegen_session.flush_preview()
+        return self.reconstruction_viewport.render_if_dirty() or preview_updated
 
     def close(self) -> None:
         if self._closed:

@@ -125,13 +125,15 @@ def test_generation_returns_image_without_projection_and_removes_stale_candidate
     from diffusion_editor.multiview_studio.stablegen_service import StableGenService
     reference=tmp_path/'ref.png';Image.new('RGB',(16,16)).save(reference)
     (tmp_path/'request.json').write_text('{}')
-    (tmp_path/'candidate.png').write_bytes(b'stale')
+    Image.new('RGB',(16,16),'red').save(tmp_path/'candidate.png')
     (tmp_path/'candidate.glb').write_bytes(b'stale')
+    Image.new('RGB',(16,16)).save(tmp_path/'input-rgb.png')
     service=StableGenService()
     operations=[]
     def gpu(root, operation, cancel):
         operations.append(operation)
         if operation=='generate':
+            assert (root/'generation-input.png').read_bytes()==(root/'input-rgb.png').read_bytes()
             assert not (root/'candidate.png').exists()
             assert not (root/'candidate.glb').exists()
             Image.new('RGB',(16,16)).save(root/'candidate.png')
@@ -142,6 +144,8 @@ def test_generation_returns_image_without_projection_and_removes_stale_candidate
     assert result==tmp_path/'candidate.png'
     assert operations==['generate']
     assert not (tmp_path/'candidate.glb').exists()
+    service.generate(tmp_path,StableGenSettings(reference=str(reference)),threading.Event())
+    assert operations==['generate','generate']
 
 
 def test_failed_image_generation_never_projects_old_candidate(tmp_path, monkeypatch):
@@ -151,6 +155,7 @@ def test_failed_image_generation_never_projects_old_candidate(tmp_path, monkeypa
     reference=tmp_path/'ref.png';Image.new('RGB',(16,16)).save(reference)
     (tmp_path/'request.json').write_text('{}')
     (tmp_path/'candidate.glb').write_bytes(b'stale')
+    Image.new('RGB',(16,16)).save(tmp_path/'input-rgb.png')
     service=StableGenService()
     def gpu(root, operation, cancel):
         assert operation=='generate'
@@ -231,35 +236,94 @@ def test_projection_is_an_explicit_separate_worker(tmp_path, monkeypatch):
     assert operations==['project']
 
 
-def test_editor_return_keeps_document_and_patch(tmp_path):
-    import numpy as np
-    from types import SimpleNamespace
-    from PIL import Image
-    from diffusion_editor.document.layer_stack import LayerStack
-    from diffusion_editor.multiview_studio.image_editor_bridge import return_image
-    stack=LayerStack()
-    pixels=np.full((24,32,4),255,np.uint8)
-    stack.init_from_image(pixels)
-    stack.active_layer.patch_rect=(2,3,20,21)
-    Image.fromarray(pixels).save(tmp_path/'editor-input.png')
-    events=[]
-    app=SimpleNamespace(layer_stack=stack,mark_document_saved=lambda p:events.append(p),request_stop=lambda:events.append('stop'))
-    return_image(app,tmp_path)
-    restored=LayerStack();restored.load_project(str(tmp_path/'image-edit.deproj'))
-    assert restored.active_layer.patch_rect==(2,3,20,21)
-    assert (tmp_path/'editor-return.json').is_file()
-    assert not (tmp_path/'candidate.glb').exists()
-    assert events[-1]=='stop'
 
 
-def test_editor_cannot_return_resized_canvas(tmp_path):
+def test_patch_crops_controls_together_and_preserves_outside():
     import numpy as np
-    from types import SimpleNamespace
     from PIL import Image
-    from diffusion_editor.document.layer_stack import LayerStack
-    from diffusion_editor.multiview_studio.image_editor_bridge import return_image
-    stack=LayerStack();stack.init_from_image(np.full((48,64,4),255,np.uint8))
-    Image.new('RGB',(32,24)).save(tmp_path/'editor-input.png')
-    with pytest.raises(ValueError,match='dimensions'):
-        return_image(SimpleNamespace(layer_stack=stack),tmp_path)
-    assert not (tmp_path/'editor-return.json').exists()
+    from diffusion_editor.multiview_studio.stablegen_patch import prepare_patch,paste_patch
+    source=Image.new('RGB',(100,80),(10,20,30))
+    mask=Image.new('L',source.size)
+    from PIL import ImageDraw
+    ImageDraw.Draw(mask).rectangle((35,25,55,45),fill=255)
+    depth=Image.new('RGB',source.size,(120,120,120))
+    rgb,m,d,rect=prepare_patch(source,mask,depth,(30,20,70,60),512)
+    assert rect==(30,20,70,60)
+    assert rgb.size==m.size==d.size==(512,512)
+    result=paste_patch(source,Image.new('RGB',rgb.size,'red'),mask,rect)
+    a=np.asarray(result);before=np.asarray(source)
+    changed=np.any(a!=before,axis=-1)
+    assert changed.any()
+    assert not changed[np.asarray(mask)==0].any()
+    assert not changed[:20].any() and not changed[:,70:].any()
+    assert result.size==source.size
+    with pytest.raises(ValueError,match='intersect'):
+        prepare_patch(source,mask,depth,(0,0,10,10),512)
+
+
+def test_checkpoint_header_filter(tmp_path):
+    import struct
+    from diffusion_editor.multiview_studio.stablegen_checkpoints import is_sdxl_checkpoint
+    path=tmp_path/'model.safetensors'
+    def write(shape):
+        header=json.dumps({'model.diffusion_model.input_blocks.0.0.weight':{'shape':shape},
+                           'conditioner.embedders.1.model.text_projection':{'shape':[1280,1280]}}).encode()
+        path.write_bytes(struct.pack('<Q',len(header))+header)
+    write([320,4,3,3]);assert is_sdxl_checkpoint(path)
+    write([320,9,3,3]);assert not is_sdxl_checkpoint(path)
+    path.write_bytes(b'broken');assert not is_sdxl_checkpoint(path)
+
+
+def test_model_and_optional_lora_survive_save(tmp_path):
+    c=MultiviewStudioController()
+    c.set_stablegen_setting('checkpoint','dreamshaperXL_lightningDPMSDE.safetensors')
+    c.set_stablegen_setting('lora','')
+    c.set_stablegen_setting('size',1024)
+    loaded=MultiviewProject.load(c.save(tmp_path/'project.json'))
+    assert loaded.stablegen.checkpoint=='dreamshaperXL_lightningDPMSDE.safetensors'
+    assert loaded.stablegen.lora==''
+    assert loaded.stablegen.size==1024
+
+
+def test_mask_events_coalesce_without_png_io(tmp_path,monkeypatch):
+    import numpy as np
+    from PIL import Image
+    from types import SimpleNamespace
+    from diffusion_editor.multiview_studio.stablegen_session import StableGenSession
+    from termin.gui_native import Point
+    session=object.__new__(StableGenSession)
+    session.root=tmp_path;session.rgb=Image.new('RGB',(256,256))
+    session.mask=Image.new('L',(256,256));session.image_candidate=None;session.candidate=None
+    session.previous=None;session.erase=False;session.brush=SimpleNamespace(value=8)
+    session._preview_dirty=False;session._preview_options=(False,True)
+    session.app=SimpleNamespace(composition=SimpleNamespace(request_repaint=lambda:None))
+    uploads=[]
+    lease=SimpleNamespace(texture=object(),set_rgba8=lambda pixels,encoding:uploads.append(pixels.copy()))
+    session.view=SimpleNamespace(_leases={},_preview_sizes={},_texture_lease_factory=lambda:lease)
+    session.canvas=SimpleNamespace(set_texture=lambda *args:None)
+    def forbidden(*args,**kwargs):pytest.fail('PNG IO in input/render path')
+    monkeypatch.setattr(Image.Image,'save',forbidden)
+    monkeypatch.setattr(Image,'open',forbidden)
+    for i in range(100):session.dab(Point(20+i,40))
+    assert not uploads
+    assert session.flush_preview()
+    assert len(uploads)==1
+    assert not session.flush_preview()
+    assert np.asarray(session.mask)[40,80]==255
+    assert uploads[0][40,80,0]>0
+
+
+def test_sampling_mode_matches_editor_and_allows_override(tmp_path):
+    from diffusion_editor.sdxl_sampling import resolve_prediction_type
+    assert resolve_prediction_type('smoothYaoiBoys_v30Vpred.safetensors')=='v_prediction'
+    assert resolve_prediction_type('RealVisXL.safetensors')=='epsilon'
+    assert resolve_prediction_type('vpred.safetensors','epsilon')=='epsilon'
+    assert resolve_prediction_type('unknown.safetensors','v_prediction')=='v_prediction'
+    c=MultiviewStudioController()
+    c.set_stablegen_setting('prediction_type','v_prediction')
+    c.set_stablegen_setting('sampler','dpmpp_sde_karras')
+    loaded=MultiviewProject.load(c.save(tmp_path/'project.json'))
+    assert loaded.stablegen.prediction_type=='v_prediction'
+    assert loaded.stablegen.sampler=='dpmpp_sde_karras'
+    with pytest.raises(ValueError):
+        StableGenSettings(prediction_type='invalid')

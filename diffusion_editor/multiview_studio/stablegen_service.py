@@ -7,7 +7,6 @@ from pathlib import Path
 import shutil
 import subprocess
 import threading
-import sys
 import uuid
 
 
@@ -53,13 +52,16 @@ class StableGenService:
         self.gpu(root,'prepare',cancel)
         return root
 
-    def generate(self, root, settings, cancel):
+    def generate(self, root, settings, cancel, patch=None):
         from PIL import Image
         if not Path(settings.reference).expanduser().is_file(): raise ValueError('Choose an existing reference image for IPAdapter')
         with Image.open(Path(settings.reference).expanduser()) as image: image.convert('RGB').save(root/'reference.png')
         request=json.loads((root/'request.json').read_text());request['settings']=asdict(settings)
+        request['patch']=patch
         request['reference_sha256']=fingerprint(root/'reference.png')
         (root/'request.json').write_text(json.dumps(request,indent=2))
+        # Every attempt starts from the captured view, including seed retries.
+        shutil.copyfile(root/'input-rgb.png',root/'generation-input.png')
         for name in ('candidate.png', 'candidate.glb', 'generation.json'):
             (root/name).unlink(missing_ok=True)
         self.gpu(root,'generate',cancel)
@@ -90,36 +92,3 @@ class StableGenService:
         (root/'candidate-import.png').replace(root/'candidate.png')
         (root/'candidate.glb').unlink(missing_ok=True)
         return root/'candidate.png'
-
-    def edit_image(self, root, cancel):
-        if cancel.is_set(): raise RuntimeError('Image editing cancelled')
-        for name in ('editor-return.json', 'editor-cancel'):
-            (root/name).unlink(missing_ok=True)
-        source=root/('candidate.png' if (root/'candidate.png').is_file() else 'input-rgb.png')
-        shutil.copyfile(source, root/'editor-input.png')
-        env=dict(os.environ)
-        package_root=str(Path(__file__).resolve().parents[2])
-        env['PYTHONPATH']=os.pathsep.join(filter(None,[package_root,env.get('PYTHONPATH')]))
-        with (root/'editor.log').open('w') as log:
-            process=subprocess.Popen(
-                [sys.executable,'-m','diffusion_editor.multiview_studio.image_editor_bridge',str(root)],
-                stdout=log,stderr=subprocess.STDOUT,env=env)
-            self.process=process
-            try:
-                while process.poll() is None:
-                    if cancel.wait(.1):
-                        # Let EditorApplication close its own model workers first.
-                        (root/'editor-cancel').touch()
-                        try: process.wait(timeout=15)
-                        except subprocess.TimeoutExpired:
-                            process.terminate()
-                            try: process.wait(timeout=3)
-                            except subprocess.TimeoutExpired: process.kill();process.wait()
-                        raise RuntimeError('Image editing cancelled')
-                if process.returncode:
-                    raise RuntimeError((root/'editor.log').read_text()[-5000:])
-            finally:
-                self.process=None
-        if cancel.is_set(): raise RuntimeError('Image editing cancelled')
-        if not (root/'editor-return.json').is_file(): return None
-        return self.import_image(root, root/'editor-result.png')

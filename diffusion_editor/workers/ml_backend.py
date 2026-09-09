@@ -41,9 +41,7 @@ from ..generation.image_edit_profiles import (
 from ..generation.text_to_image_profiles import text_to_image_profile
 
 
-_VPRED_HINTS = (
-    "vpred", "v-pred", "v_pred", "vprediction", "v-prediction", "v_prediction"
-)
+from ..sdxl_sampling import guess_prediction_type, resolve_prediction_type
 
 
 class RealMlBackend:
@@ -144,13 +142,8 @@ class RealMlBackend:
                 ModelIdentityPolicy.WARN.value,
             ),
         )
-        name = os.path.basename(model_path).lower()
-        guessed = (
-            "v_prediction"
-            if any(hint in name for hint in _VPRED_HINTS)
-            else None
-        )
-        chosen = data.get("prediction_type") or guessed or "epsilon"
+        guessed = guess_prediction_type(model_path)
+        chosen = resolve_prediction_type(model_path, data.get("prediction_type"))
         pipe = StableDiffusionXLPipeline.from_single_file(
             model_path,
             torch_dtype=self._dtype(device),
