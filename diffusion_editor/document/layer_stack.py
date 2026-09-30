@@ -308,6 +308,31 @@ class LayerStack:
         self._rebuild_caches()
         self.publish_change(DocumentChangeKind.STRUCTURE, layers=(layer,))
 
+    def replace_layer(self, layer: Layer, replacement: Layer) -> None:
+        """Replace one node atomically, preserving identity, children and selection."""
+        self._require_member(layer)
+        if replacement._owner is not None or replacement.parent is not None or replacement.children:
+            raise ValueError("replacement must be a detached, childless layer")
+        if replacement.id != layer.id:
+            raise ValueError("replacement must preserve the layer id")
+        parent = layer.parent
+        siblings = parent._children if parent is not None else self._layers
+        index = siblings.index(layer)
+        replacement.parent = parent
+        replacement._children = layer._children
+        for child in replacement._children:
+            child.parent = replacement
+        layer._children = []
+        layer.parent = None
+        layer._owner = None
+        siblings[index] = replacement
+        self._set_subtree_owner(replacement, self)
+        self._apply_tile_size(replacement)
+        if self._active_layer is layer:
+            self._active_layer = replacement
+        self._rebuild_caches()
+        self.publish_change(DocumentChangeKind.STRUCTURE, layers=(replacement,))
+
     def remove_layer(self, layer: Layer):
         """Remove layer and its entire subtree."""
         all_layers = self._all_layers_flat()
@@ -665,7 +690,7 @@ class LayerStack:
 
     # --- Serialization ---
 
-    FORMAT_VERSION = 8
+    FORMAT_VERSION = 9
 
     def _serialize_manifest_and_layers(self, zf: zipfile.ZipFile):
         self._validate_serializable_state()
@@ -729,7 +754,7 @@ class LayerStack:
         self._layers.extend(new_layers)
         for layer in self._layers:
             self._set_subtree_owner(layer, self)
-        if version < self.FORMAT_VERSION:
+        if version < 8:
             self._ensure_unique_layer_ids()
         if version < 8:
             self._migrate_canvas_patch_rects_to_layer_local()
@@ -836,7 +861,7 @@ class LayerStack:
                 raise ValueError("project contains too many layers")
             if not isinstance(layer_dict, dict):
                 raise ValueError("project layer entry must be an object")
-            if version >= self.FORMAT_VERSION:
+            if version >= 8:
                 layer_id = layer_dict.get("id")
                 if not isinstance(layer_id, str) or not layer_id:
                     raise ValueError(
@@ -844,6 +869,10 @@ class LayerStack:
                 if layer_id in current_ids:
                     raise ValueError("current project layer IDs must be unique")
                 current_ids.add(layer_id)
+            if layer_dict.get("type") == "svg":
+                svg_file = layer_dict.get("svg_file")
+                if not isinstance(svg_file, str) or svg_file not in available:
+                    raise ValueError("project SVG source entry is missing")
             image_file = layer_dict.get("image_file")
             if not isinstance(image_file, str) or image_file not in available:
                 raise ValueError("project layer image entry is missing")
@@ -858,7 +887,7 @@ class LayerStack:
                     raise ValueError("project layer tool must be an object")
                 tool_type = tool_dict.get("tool_type") or tool_dict.get("type")
                 if (
-                        version >= self.FORMAT_VERSION
+                        version >= 8
                         and tool_type not in {
                             "diffusion", "lama", "instruct",
                             "text_to_image"}):
@@ -886,7 +915,7 @@ class LayerStack:
                 not isinstance(selection_file, str)
                 or selection_file not in available):
             raise ValueError("project selection entry is missing")
-        if version >= self.FORMAT_VERSION:
+        if version >= 8:
             active_path = manifest.get("active_layer_path")
             if (
                     not isinstance(active_path, str)
@@ -1011,6 +1040,14 @@ class LayerStack:
             if not isinstance(layer.name, str):
                 raise ValueError("project layer name must be a string")
             self._validate_rect(layer.patch_rect, "layer patch_rect")
+            if layer.node_type == "svg":
+                from .svg_layer import SvgLayer, parse_svg
+                if not isinstance(layer, SvgLayer):
+                    raise ValueError("invalid SVG layer type")
+                parse_svg(layer.svg_source)
+                if layer.tool is not None or not layer.mask.is_empty:
+                    raise ValueError("SVG layers cannot contain pixel tools or masks")
+                payload_bytes += len(layer.svg_source.encode("utf-8"))
             payload_bytes += self._validate_tool(layer.tool)
             payload_bytes += int(layer.image.nbytes)
             payload_bytes += int(layer.mask.data.nbytes)

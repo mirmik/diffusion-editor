@@ -63,6 +63,8 @@ class EditorCommandCoordinator:
             "selection.clear": self.clear_selection,
             "selection.invert": self.invert_selection,
             "layer.new": self.new_layer,
+            "layer.new_svg": self.new_svg_layer,
+            "layer.rasterize_svg": self.rasterize_svg_layer,
             "layer.remove": self.remove_layer,
             "layer.flatten": self.flatten_layers,
             **{
@@ -119,6 +121,11 @@ class EditorCommandCoordinator:
             ),
             "selection.invert": canvas_ready,
             "layer.new": canvas_ready,
+            "layer.new_svg": canvas_ready,
+            "layer.import_svg": canvas_ready,
+            "layer.replace_svg": active is not None and active.node_type == "svg",
+            "layer.export_svg": active is not None and active.node_type == "svg",
+            "layer.rasterize_svg": active is not None and active.node_type == "svg",
             "layer.remove": can_remove,
             "layer.flatten": (
                 len(layers) > 1
@@ -212,6 +219,18 @@ class EditorCommandCoordinator:
 
     def invert_selection(self) -> None:
         self._execute(InvertSelectionCommand(), "Selection inverted")
+
+    def new_svg_layer(self) -> None:
+        self._before_mutation()
+        self._document.svg.new(self._stack.next_name("SVG"))
+        self._application.set_status("Created SVG layer — import or replace SVG source to add shapes")
+        self.refresh()
+
+    def rasterize_svg_layer(self) -> None:
+        self._before_mutation()
+        self._document.svg.rasterize()
+        self._application.set_status("SVG rasterized — pixel tools are now available; Undo restores vectors")
+        self.refresh()
 
     def new_layer(self) -> None:
         self._execute(

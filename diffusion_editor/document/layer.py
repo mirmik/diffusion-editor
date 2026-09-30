@@ -259,6 +259,11 @@ def _layer_from_dict(d: dict, zf: zipfile.ZipFile, tile_size: int = 256) -> Laye
     """
     layer_type = d.get("type", "layer")
 
+    if layer_type == "svg":
+        from .svg_layer import SvgLayer
+
+        return SvgLayer.from_dict(d, zf, tile_size=tile_size)
+
     if layer_type == "reconstruction":
         from .reconstruction import ReconstructionLayer
 

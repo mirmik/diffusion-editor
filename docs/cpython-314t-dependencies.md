@@ -26,6 +26,7 @@ Verified Linux x86_64 CPython 3.14t wheels:
 | --- | ---: | --- |
 | NumPy | 2.5.1 | `cp314t`; imported with the GIL disabled |
 | Pillow | 12.3.0 | `cp314t` |
+| resvg_py | 0.5.0 | `cp314t`; SVG rendering verified with the GIL disabled |
 | PyYAML | 6.0.3 | `cp314t`; imported with the GIL disabled |
 | PySDL2 | 0.9.17 | pure Python |
 

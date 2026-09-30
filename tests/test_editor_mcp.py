@@ -170,3 +170,28 @@ def test_script_error_is_returned_without_stopping_endpoint(tmp_path: Path):
         assert recovered["result"]["content"][0]["text"] == "still alive\n"
     finally:
         automation.close()
+
+
+def test_svg_api_can_edit_and_undo_through_live_mcp(tmp_path):
+    import numpy as np
+    from diffusion_editor.document.layer_stack import LayerStack
+    from diffusion_editor.document.document_service import DocumentService
+    from diffusion_editor.document.history import HistoryManager
+    root = _Root()
+    stack = LayerStack()
+    stack.init_from_image(np.full((32, 32, 4), 255, dtype=np.uint8))
+    document = DocumentService(stack, HistoryManager(stack.load_state), stack.load_state)
+    root.application.document = document
+    root.application.layer_stack = stack
+    automation = DiffusionEditorAutomation(root, sdk_root=tmp_path/'sdk',
+        project_path=tmp_path/'project', session_file=tmp_path/'session.json', token='test-token')
+    try:
+        source = '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect id="room" width="20" height="20" fill="red"/></svg>'
+        result = _call_while_pumping(automation, f'document.svg.add({source!r}, "Rooms"); print(document.svg.elements())')
+        assert 'room' in json.dumps(result)
+        _call_while_pumping(automation, 'document.svg.update_element("room", {"fill":"blue"})')
+        np.testing.assert_array_equal(stack.composite()[5,5], [0,0,255,255])
+        _call_while_pumping(automation, 'document.undo()')
+        np.testing.assert_array_equal(stack.composite()[5,5], [255,0,0,255])
+    finally:
+        automation.close()

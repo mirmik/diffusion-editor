@@ -17,6 +17,7 @@ from diffusion_editor.quality_gate import (
 IMPORTS = (
     ("numpy", "numpy"),
     ("PIL", "Pillow"),
+    ("resvg_py", "resvg_py"),
     ("sdl2", "PySDL2"),
     ("yaml", "PyYAML"),
     ("termin.dispatch", "termin-dispatch"),

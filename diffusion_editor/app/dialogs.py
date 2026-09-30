@@ -136,6 +136,9 @@ class ApplicationDialogCoordinator:
             "file.save_as": self.save_project_as,
             "file.import": self.import_image,
             "file.export": self.export_image,
+            "layer.import_svg": self.import_svg,
+            "layer.replace_svg": self.replace_svg,
+            "layer.export_svg": self.export_svg,
             "app.quit": self.request_quit,
             "edit.settings": self.show_settings,
             "layer.detect": self.show_grounding,
@@ -260,6 +263,54 @@ class ApplicationDialogCoordinator:
             ),
             self.import_image_path,
         )
+
+    def import_svg(self) -> None:
+        self._show_file(FileDialogSpec(
+            FileDialogKind.OPEN_FILE, "Import SVG Layer", self._application.last_dir,
+            "SVG | *.svg"), self.import_svg_path)
+
+    def import_svg_path(self, path: str) -> None:
+        self._require_open()
+        try:
+            self._application.document.svg.import_file(path)
+            self._remember_parent(path)
+            self._application.set_status(f"Imported SVG layer: {Path(path).name}")
+        except Exception as exc:
+            self._operation_error("Import SVG Layer", path, exc)
+
+    def replace_svg(self) -> None:
+        layer = self._application.document.svg.layer()
+        # Bind the target now: a changed selection while the dialog is open
+        # must not send the replacement to a different layer.
+        self._show_file(FileDialogSpec(
+            FileDialogKind.OPEN_FILE, "Replace SVG Source", self._application.last_dir,
+            "SVG | *.svg"), lambda path: self.replace_svg_path(path, layer.id))
+
+    def replace_svg_path(self, path: str, layer_id: str) -> None:
+        self._require_open()
+        try:
+            self._application.document.svg.replace_from_file(path, layer_id)
+            self._remember_parent(path)
+            self._application.set_status(f"Updated SVG source: {Path(path).name}")
+        except Exception as exc:
+            self._operation_error("Replace SVG Source", path, exc)
+
+    def export_svg(self) -> None:
+        layer = self._application.document.svg.layer()
+        self._show_file(FileDialogSpec(
+            FileDialogKind.SAVE_FILE, "Export SVG Source", self._application.last_dir,
+            "SVG | *.svg", "layer.svg"), lambda path: self.export_svg_path(path, layer.id))
+
+    def export_svg_path(self, path: str, layer_id: str) -> None:
+        self._require_open()
+        if not path.lower().endswith(".svg"):
+            path += ".svg"
+        try:
+            self._application.document.svg.export_file(path, layer_id)
+            self._remember_parent(path)
+            self._application.set_status(f"Exported SVG: {Path(path).name}")
+        except Exception as exc:
+            self._operation_error("Export SVG Source", path, exc)
 
     def pick_ai_edit_reference(
             self, on_selected: Callable[[str], None]) -> None:

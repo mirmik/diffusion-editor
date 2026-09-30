@@ -167,9 +167,17 @@ class NativeBrushPanel:
         self._syncing = True
         try:
             for mode, (model, command_id) in self.tool_commands.items():
+                enabled = state.can_move if mode == BrushToolMode.MOVE else state.accepts_pixel_edits
+                model.set_enabled(command_id, enabled)
                 checked = mode == state.tool
                 if model.command(command_id).data.checked != checked:
                     model.set_checked(command_id, checked)
+            self.draw_patch.widget.enabled = state.accepts_pixel_edits
+            self.clear_patch.widget.enabled = state.accepts_pixel_edits
+            self.color_button.widget.enabled = state.accepts_pixel_edits
+            self.size.widget.enabled = state.accepts_pixel_edits
+            self.hardness.widget.enabled = state.accepts_pixel_edits
+            self.flow.widget.enabled = state.accepts_pixel_edits
             self.draw_patch.checked = state.draw_patch
             self.show_patch.checked = state.show_patch
             self.size.value = float(state.size)

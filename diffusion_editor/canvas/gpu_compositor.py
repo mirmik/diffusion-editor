@@ -542,12 +542,15 @@ class GPUCompositor:
     # ------------------------------------------------------------------
 
     def _sync_dirty_textures(self):
+        # The current native upload bindings require writable ndarrays. SVG
+        # render caches are immutable; copy only those buffers at this boundary.
+        # Ordinary writable raster buffers keep their zero-copy upload path.
         for layer in self._stack._all_layers_flat():
             lid = id(layer)
             w, h = layer.width, layer.height
             revision = int(getattr(layer, "pixel_revision", 0))
             if lid not in self._layer_textures:
-                img = np.ascontiguousarray(layer.image).reshape(-1)
+                img = np.require(layer.image, requirements=["C", "W"]).reshape(-1)
                 tex = self._graphics.create_texture_rgba8(
                     w, h, img, _LAYER_TEXTURE_ENCODING)
                 self._layer_textures[lid] = tex
@@ -558,7 +561,7 @@ class GPUCompositor:
 
             prev_w, prev_h = self._layer_tex_size.get(lid, (0, 0))
             if prev_w != w or prev_h != h:
-                img = np.ascontiguousarray(layer.image).reshape(-1)
+                img = np.require(layer.image, requirements=["C", "W"]).reshape(-1)
                 self._graphics.destroy_texture(self._layer_textures[lid])
                 tex = self._graphics.create_texture_rgba8(
                     w, h, img, _LAYER_TEXTURE_ENCODING)
@@ -574,7 +577,7 @@ class GPUCompositor:
                         lid not in self._dirty_layer_regions
                         and self._layer_tex_revision.get(lid) != revision
                     )):
-                img = np.ascontiguousarray(layer.image).reshape(-1)
+                img = np.require(layer.image, requirements=["C", "W"]).reshape(-1)
                 self._graphics.upload_texture(self._layer_textures[lid], img)
                 self._layer_tex_revision[lid] = revision
                 self._clear_layer_dirty(lid)
@@ -584,8 +587,8 @@ class GPUCompositor:
             if rect is None:
                 continue
             x0, y0, x1, y1 = rect
-            region = np.ascontiguousarray(
-                layer.image[y0:y1, x0:x1],
+            region = np.require(
+                layer.image[y0:y1, x0:x1], requirements=["C", "W"],
             ).reshape(-1)
             self._graphics.upload_texture_region(
                 self._layer_textures[lid],

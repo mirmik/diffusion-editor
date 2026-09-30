@@ -52,3 +52,12 @@ default_tools_approval_mode = "approve"
 The usual Termin overrides remain available:
 `TERMIN_EDITOR_MCP_HOST`, `TERMIN_EDITOR_MCP_PORT`,
 `TERMIN_EDITOR_MCP_TOKEN`, and `TERMIN_EDITOR_MCP_SESSION_FILE`.
+
+
+## SVG editing
+
+The shared document service exposes `document.svg`: import/add source, list
+objects, edit attributes or text by ID, replace source, resize the viewport,
+move/export/rasterize layers. All mutations use normal document history and
+refresh the native canvas. See [SVG layers](svg-layers.md) for examples and
+supported source/resource constraints.

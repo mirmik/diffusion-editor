@@ -100,6 +100,8 @@ class DocumentService:
         self._history = history
         self._apply_snapshot = apply_snapshot
         self._commands = CommandBus(history)
+        from .svg_api import SvgDocumentApi
+        self.svg = SvgDocumentApi(self, layer_stack)
         self._after_history_navigation = (
             after_history_navigation or (lambda: None))
         self._before_mutation_listeners: list[Callable[[], None]] = []

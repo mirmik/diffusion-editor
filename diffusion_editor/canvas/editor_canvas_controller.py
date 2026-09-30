@@ -265,6 +265,12 @@ class EditorCanvasController:
         if self._selection_mode:
             self._begin_tool_edit(self._selection_tool, None, x, y)
             return
+        if (not layer.accepts_pixel_edits
+                and layer.contributes_to_composite
+                and self._active_stroke_tool.target == "transform"
+                and self._layer_stack.is_layer_visible_for_composition(layer)):
+            self._begin_tool_edit(self._active_stroke_tool, layer, x, y)
+            return
         if not self._can_edit_layer(layer):
             return
         if self._rect_drags.begin_patch_rect(x, y):
@@ -340,7 +346,7 @@ class EditorCanvasController:
         layer = self._layer_stack.active_layer
         if (
                 layer is not None
-                and layer.accepts_pixel_edits
+                and layer.contributes_to_composite
                 and layer.width > 0
                 and layer.height > 0):
             result.append(CanvasAnnotation("active-layer", layer.bounds))

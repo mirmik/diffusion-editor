@@ -63,6 +63,8 @@ class BrushControlsState:
     color: Rgba
     draw_patch: bool = False
     show_patch: bool = True
+    accepts_pixel_edits: bool = True
+    can_move: bool = True
 
 
 @dataclass(frozen=True)
@@ -117,6 +119,19 @@ class CanvasControlsCoordinator:
         canvas.on_patch_rect_drawn = self._patch_rect_drawn_callback
         canvas.on_selection_rect_drawn = self._selection_rect_drawn_callback
         canvas.on_brush_size_changed = self._brush_size_changed_callback
+        self._stack_subscription = layer_stack.subscribe(
+            lambda _event: self._refresh_layer_capabilities())
+        self._refresh_layer_capabilities()
+
+    def _refresh_layer_capabilities(self) -> None:
+        layer = self._layer_stack.active_layer
+        state = self._replace_brush(
+            accepts_pixel_edits=layer is not None and layer.accepts_pixel_edits,
+            can_move=layer is not None and layer.contributes_to_composite,
+        )
+        if state != self._brush_state:
+            self._brush_state = state
+            self._publish()
 
     @property
     def brush_state(self) -> BrushControlsState:
@@ -262,6 +277,7 @@ class CanvasControlsCoordinator:
         if self._closed:
             return
         self._closed = True
+        self._stack_subscription.close()
         self._view = None
         if self._canvas.on_color_picked is self._color_picked_callback:
             self._canvas.on_color_picked = self._previous_color_picked

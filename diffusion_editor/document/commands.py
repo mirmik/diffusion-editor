@@ -686,6 +686,8 @@ class AttachLayerToolCommand:
     label: str = "Attach Tool"
 
     def apply(self, layer_stack: LayerStack) -> None:
+        if not self.layer.accepts_pixel_edits:
+            raise ValueError("Rasterize the layer before applying pixel tools")
         self.layer.tool = self.tool
         layer_stack.publish_change(
             DocumentChangeKind.METADATA, layers=(self.layer,))
@@ -751,6 +753,8 @@ class DrawRectCommand:
     label: str = "Draw Rectangle"
 
     def apply(self, layer_stack: LayerStack) -> None:
+        if not self.layer.accepts_pixel_edits:
+            raise ValueError("Rasterize the layer before applying pixel tools")
         lx = self.x - self.layer.x
         ly = self.y - self.layer.y
         x0 = max(0, lx)
@@ -814,6 +818,8 @@ class DrawGridCommand:
             raise ValueError("sections_y must be >= 1")
 
     def apply(self, layer_stack: LayerStack) -> None:
+        if not self.layer.accepts_pixel_edits:
+            raise ValueError("Rasterize the layer before applying pixel tools")
         t = max(1, self.thickness)
         image = self.layer.image
         w, h = self.layer.width, self.layer.height
@@ -1530,6 +1536,8 @@ class ApplyGeneratedResultCommand:
     label: str
 
     def apply(self, layer_stack: LayerStack) -> None:
+        if not self.layer.accepts_pixel_edits:
+            raise ValueError("Rasterize the layer before applying pixel tools")
         layer = self.layer
         tool = layer.tool
         if tool is None:

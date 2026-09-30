@@ -271,3 +271,23 @@ def test_pixel_revision_triggers_full_upload_without_an_explicit_region():
     compositor._sync_dirty_textures()
 
     assert [call[0] for call in graphics.calls] == ["upload"]
+
+
+def test_readonly_svg_pixels_cross_native_upload_as_writable_buffers():
+    compositor, layer, graphics = _upload_compositor()
+    layer.image.flags.writeable = False
+    # Match the real nanobind buffer contract, while retaining upload counts.
+    create = graphics.create_texture_rgba8
+    upload = graphics.upload_texture
+    def checked_create(width, height, data, encoding):
+        assert data.flags.writeable
+        return create(width, height, data, encoding)
+    def checked_upload(texture, data):
+        assert data.flags.writeable
+        upload(texture, data)
+    graphics.create_texture_rgba8 = checked_create
+    graphics.upload_texture = checked_upload
+    compositor._sync_dirty_textures()
+    compositor.mark_dirty(layer)
+    compositor._sync_dirty_textures()
+    assert not layer.image.flags.writeable

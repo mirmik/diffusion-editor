@@ -237,6 +237,13 @@ revision and no more often than once every five minutes. Recovery uses the
 same compressed, atomic `.deproj` writer as an explicit project save and has
 no fixed project-size ceiling beyond available storage.
 
+## SVG layers
+
+Use **Layer → Import SVG Layer…** to keep editable SVG geometry above a raster
+image. Source updates, Move, opacity and rasterization are undoable; `.deproj`
+saves the original vectors. The live MCP API exposes `document.svg` for editing
+objects by ID. See [SVG layers](docs/svg-layers.md).
+
 ## Tests
 
 ```bash

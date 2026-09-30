@@ -148,7 +148,7 @@ class NativeLayerPanel:
             self.opacity.value = state.opacity
             has_active = active is not None
             self.opacity.widget.enabled = (
-                has_active and active.node_type == "raster"
+                has_active and active.node_type in {"raster", "svg"}
             )
             self.add_button.widget.enabled = state.can_add
             self.remove_button.widget.enabled = state.can_remove
@@ -202,6 +202,8 @@ class NativeLayerPanel:
         is_reconstruction = node.node_type == "reconstruction"
         if is_reconstruction:
             subtitle = f"3D Reconstruction · {node.status}"
+        elif node.node_type == "svg":
+            subtitle = "SVG · Vector layer"
         else:
             tool_labels = {
                 "text_to_image": "Text to Image",
