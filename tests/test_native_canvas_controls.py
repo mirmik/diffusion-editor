@@ -61,21 +61,17 @@ def test_native_controls_programmatic_sync_suppresses_feedback():
 
     assert brush_intents == []
     assert selection_intents == []
-    model, command_id = controls.brush.tool_commands[BrushToolMode.MOVE]
+    model, command_id = controls.tool_commands[BrushToolMode.MOVE]
     assert model.command(command_id).data.checked
-    assert not controls.brush.size.widget.visible
-    assert controls.selection.edit_mode.checked
+    assert not controls.brush.widget.visible
+    assert controls.selection.eraser.checked
     assert controls.selection.size.value == 61
 
-    model, command_id = controls.brush.tool_commands[BrushToolMode.PAINT]
-    controls.brush._on_tool_activated(
-        0, command_id, model.command(command_id).data)
-    controls.selection.rect_mode.checked = True
-
-    assert brush_intents[-1].action == BrushControlAction.TOOL
-    assert brush_intents[-1].value == BrushToolMode.PAINT
-    assert selection_intents[-1].action == SelectionControlAction.RECT_MODE
-    assert selection_intents[-1].value is True
+    controls.activate_tool("paint")
+    controls.activate_tool("select_rect")
+    assert [intent.action for intent in brush_intents] == [BrushControlAction.ACTIVE_TOOL] * 2
+    assert [intent.value for intent in brush_intents] == ["paint", "select_rect"]
+    assert selection_intents == []
 
     controls.close()
     tc_ui_document_destroy(document)
@@ -100,13 +96,13 @@ def test_native_brush_mode_toolbar_routes_pointer_and_keyboard():
     )
     assert document.add_root(controls.widget.handle)
     document.layout_roots(Rect(0.0, 0.0, 320.0, 700.0))
-    toolbar = controls.brush.toolbars[0]
+    toolbar = controls.toolbars["eraser"]
 
     pointer = PointerEvent()
     pointer.type = PointerEventType.Down
     pointer.button = 0
-    pointer.x = toolbar.item_rects[1].x + 3.0
-    pointer.y = toolbar.item_rects[1].y + 3.0
+    pointer.x = toolbar.item_rects[0].x + 3.0
+    pointer.y = toolbar.item_rects[0].y + 3.0
     assert document.dispatch_pointer_event(pointer) == EventResult.Handled
     pointer.type = PointerEventType.Up
     assert document.dispatch_pointer_event(pointer) == EventResult.Handled
@@ -114,11 +110,9 @@ def test_native_brush_mode_toolbar_routes_pointer_and_keyboard():
 
     key = KeyEvent()
     key.type = KeyEventType.Down
-    key.key = KeyCode.Left
-    assert document.dispatch_key_event(key) == EventResult.Handled
     key.key = KeyCode.Space
     assert document.dispatch_key_event(key) == EventResult.Handled
-    assert brush_intents[-1].value == BrushToolMode.PAINT
+    assert brush_intents[-1].value == BrushToolMode.ERASER
 
     controls.close()
     tc_ui_document_destroy(document)

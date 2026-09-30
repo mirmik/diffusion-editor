@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from termin.gui_native import EdgeInsets, TcDocument
+from termin.gui_native import EdgeInsets, TcDocument, TextWrapMode
 
 from .generation_panels import (
     GenerationAction,
@@ -34,14 +34,16 @@ _MASKED_CONTENT_VALUES = (
 
 
 class NativeGenerationPanels:
-    """Generation controls measured by the shell-owned left-panel scroll."""
+    """Generation controls measured by the shell-owned inspector scroll."""
 
     def __init__(
             self,
             document: TcDocument,
             state: GenerationPanelsState,
             on_intent: Callable[[GenerationIntent], None],
-            request_repaint: Callable[[], None]) -> None:
+            request_repaint: Callable[[], None],
+            *, shared_mask_controls: bool = False) -> None:
+        self._shared_mask_controls = shared_mask_controls
         self._document = document
         self._on_intent = on_intent
         self._request_repaint = request_repaint
@@ -97,15 +99,17 @@ class NativeGenerationPanels:
         self._build_instruct(instruct)
         self.content.add_preferred_child(self.instruct_group.widget)
 
-        self.mask_group, mask = self._group("Mask Brush", "mask")
+        self.mask_group, mask = self._group("Mask display" if shared_mask_controls else "Mask Brush", "mask")
         self._build_mask(mask)
-        self.content.add_preferred_child(self.mask_group.widget)
+        self.content.add_preferred_child(
+            self.mask_display_row if shared_mask_controls else self.mask_group.widget)
 
         self.empty_label = document.create_label(
-            "Attach a Text to Image, Diffusion, LaMa or AI Edit tool to the "
-            "active layer.",
+            "Choose a processing tool above to configure generation for this layer."
+            if shared_mask_controls else "Attach a Text to Image, Diffusion, LaMa or AI Edit tool to the active layer.",
             "NativeGenerationEmptyLabel",
         )
+        self.empty_label.set_wrap_mode(TextWrapMode.Word)
         self.empty_label.stable_id = "diffusion-editor.generation.empty"
         self.content.add_preferred_child(self.empty_label)
         self.apply_generation_panels_state(state)
@@ -126,7 +130,7 @@ class NativeGenerationPanels:
             self.instruct_group.widget.visible = (
                 kind == GenerationPanelKind.INSTRUCT)
             self.mask_group.widget.visible = (
-                kind in {
+                self._shared_mask_controls or kind in {
                     GenerationPanelKind.DIFFUSION,
                     GenerationPanelKind.LAMA,
                     GenerationPanelKind.INSTRUCT,
@@ -1087,8 +1091,13 @@ class NativeGenerationPanels:
         self._add_inline_checkbox(
             row, self.mask_eraser, "Eraser", "mask.eraser")
         self._add_inline_checkbox(
-            row, self.show_mask, "Show", "mask.show")
+            row, self.show_mask, "Show mask", "mask.show")
         content.add_preferred_child(row)
+        self.mask_display_row = row
+        if self._shared_mask_controls:
+            for control in (self.mask_size, self.mask_hardness, self.mask_flow):
+                content.remove_child(control.widget)
+            row.remove_child(self.mask_eraser.widget.parent)
 
     def _group(self, title: str, suffix: str):
         group = self._document.create_group_box(

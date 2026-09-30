@@ -166,7 +166,7 @@ def test_native_shell_snapshot_has_stable_layout_and_command_inventory():
         toolbar = snapshot["diffusion-editor.toolbar"]["bounds"]
         toolbar_edge = snapshot[
             "diffusion-editor.toolbar-workspace-edge"]["bounds"]
-        main = snapshot["diffusion-editor.main-splitter"]["bounds"]
+        main = view.workspace_row.bounds
         status_edge = snapshot[
             "diffusion-editor.status-workspace-edge"]["bounds"]
         status = snapshot["diffusion-editor.status"]["bounds"]
@@ -215,9 +215,9 @@ def test_native_shell_snapshot_has_stable_layout_and_command_inventory():
             layers.height,
         ) == (
             right_host.x,
-            right_host.y,
+            right_host.y + 32,
             right_host.width,
-            right_host.height,
+            right_host.height - 32,
         )
         assert not view.agent_panel_visible
         assert not view.right_splitter.widget.visible
@@ -235,9 +235,9 @@ def test_native_shell_snapshot_has_stable_layout_and_command_inventory():
         assert view.workspace_splitter.split_fraction == pytest.approx(0.46)
         assert layers.x + layers.width <= agent.x
         assert (left.y, canvas.y, layers.y, agent.y) == (
-            main.y, main.y, main.y, main.y)
+            main.y, main.y, main.y + 32, main.y)
         assert (left.height, canvas.height, layers.height, agent.height) == (
-            main.height, main.height, main.height, main.height)
+            main.height, main.height, main.height - 32, main.height)
 
         view_model = view.menu_models["view"]
         agent_command = next(
@@ -262,16 +262,16 @@ def test_native_shell_snapshot_has_stable_layout_and_command_inventory():
             layers.height,
         ) == (
             right_host.x,
-            right_host.y,
+            right_host.y + 32,
             right_host.width,
-            right_host.height,
+            right_host.height - 32,
         )
     finally:
         view.close()
         tc_ui_document_destroy(document)
 
 
-def test_native_left_panel_scrolls_preferred_sections_without_overlap():
+def test_native_inspector_tabs_share_right_panel_and_preserve_canvas_size():
     document = tc_ui_document_create()
     view = NativeEditorView(
         document,
@@ -286,21 +286,35 @@ def test_native_left_panel_scrolls_preferred_sections_without_overlap():
 
     controls = document.create_vstack("TestCanvasControls")
     controls.stable_id = "test.canvas-controls"
-    controls.preferred_size = Size(240.0, 600.0)
+    controls.preferred_size = Size(44.0, 472.0)
     generation = document.create_vstack("TestGenerationPanels")
     generation.stable_id = "test.generation-panels"
-    generation.preferred_size = Size(240.0, 400.0)
+    generation.preferred_size = Size(240.0, 1000.0)
     try:
         view.mount_canvas_controls(MountedView(controls))
         view.mount_generation_panels(MountedView(generation), object())
+        view.set_ai_panel_visible(True)
         document.layout_roots(Rect(0.0, 0.0, 1280.0, 800.0))
         snapshot = _snapshot_by_id(document)
         controls_bounds = snapshot["test.canvas-controls"]["bounds"]
         generation_bounds = snapshot["test.generation-panels"]["bounds"]
 
-        assert controls_bounds.y + controls_bounds.height <= generation_bounds.y
-        assert view.left_scroll.content_size.height >= 1004.0
-        assert snapshot["diffusion-editor.left-panel"]["bounds"].height == 712.0
+        canvas = snapshot["diffusion-editor.canvas-host"]["bounds"]
+        layers = snapshot["diffusion-editor.layer-panel"]["bounds"]
+        assert canvas.x == 272
+        assert canvas.x + canvas.width <= generation_bounds.x
+        assert view.inspector_tabs.selected_index == 1
+        assert view.ai_scroll.widget.bounds.width >= 260
+        assert view.ai_scroll.content_size.height >= 1000.0
+        assert view.left_scroll.content_size.height < 1000.0
+        view.set_ai_panel_visible(False)
+        document.layout_roots(Rect(0.0, 0.0, 1280.0, 800.0))
+        assert view.inspector_tabs.selected_index == 0
+        assert not view.ai_panel_visible
+        assert view.left_scroll.widget.bounds.height == 712
+        assert controls.bounds.width == 52
+        assert view.inspector_tabs.selected_index == 0
+        assert view.canvas_host.bounds.width == canvas.width
     finally:
         view.close()
         tc_ui_document_destroy(document)
@@ -901,24 +915,18 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar(
         assert snapshot[
             "diffusion-editor.reconstruction.panel"
         ]["parent"] is not None
-        assert snapshot["diffusion-editor.left-panel"]["parent"] is None
+        assert view.left_scroll.widget.bounds.width == 52
         assert canvas_bounds.width < host.width
-        assert viewport_bounds.width == pytest.approx(canvas_bounds.width)
+        assert viewport_bounds.width > 150
+        assert canvas_bounds.x + canvas_bounds.width <= viewport_bounds.x
         assert (canvas_bounds.y, canvas_bounds.height) == (
             host.y,
             host.height,
         )
-        assert (
-            reconstruction_panel.x,
-            reconstruction_panel.y,
-            reconstruction_panel.width,
-            reconstruction_panel.height,
-        ) == (
-            left_panel.x,
-            left_panel.y,
-            left_panel.width,
-            left_panel.height,
-        )
+        assert reconstruction_panel.x == left_panel.x + 52
+        assert reconstruction_panel.y == left_panel.y
+        assert reconstruction_panel.height == view.main_splitter.widget.bounds.height
+        assert reconstruction_panel.width >= 250
         assert toolbar.height >= 3 * 20.0
         for command_id in (
                 "generation-3d",
@@ -970,11 +978,26 @@ def test_reconstruction_context_reparents_canvas_and_owns_3d_toolbar(
         canvas_bounds = snapshot["test.canvas"]["bounds"]
         host = snapshot["diffusion-editor.canvas-host"]["bounds"]
         assert (canvas_bounds.x, canvas_bounds.width) == (host.x, host.width)
-        assert snapshot["diffusion-editor.left-panel"]["parent"] is not None
+        assert view.left_scroll.widget.bounds.width == 52
         assert snapshot[
             "diffusion-editor.reconstruction.panel"
         ]["parent"] is None
         assert view.reconstruction_mode is False
+        # Inspector tab selection survives entering and leaving a 3D context.
+        view.set_ai_panel_visible(False)
+        view.set_reconstruction_context(True)
+        assert view.main_splitter.widget.visible
+        view.set_reconstruction_context(False)
+        document.layout_roots(Rect(0.0, 0.0, 1000.0, 700.0))
+        assert not view.ai_panel_visible
+        assert not view.main_splitter.widget.visible
+        assert view.inspector_tabs.selected_index == 0
+        assert view.left_scroll.widget.bounds.width == 52
+        assert view.canvas_host.bounds.x == 272
+        view.set_ai_panel_visible(True)
+        view.set_reconstruction_context(True)
+        view.set_reconstruction_context(False)
+        assert view.ai_panel_visible
     finally:
         view.close()
         tc_ui_document_destroy(document)

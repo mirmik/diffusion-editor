@@ -60,7 +60,6 @@ class CanvasRectDrag:
             return None
         sx, sy = self._start
         rect = self._normalized_rect(sx, sy, x, y)
-        self._enabled = False
         self.cancel_drag()
         x0, y0, x1, y1 = rect
         if x1 - x0 <= self._min_size or y1 - y0 <= self._min_size:
@@ -110,6 +109,10 @@ class CanvasRectDragController:
         self._show_patch_rect = show
 
     @property
+    def enabled(self) -> bool:
+        return self._selection_rect_drag.enabled or self._patch_rect_drag.enabled
+
+    @property
     def dragging(self) -> bool:
         return (
             self._selection_rect_drag.dragging
@@ -152,9 +155,9 @@ class CanvasRectDragController:
         patch_dragging = self._patch_rect_drag.dragging
         was_dragging = selection_dragging or patch_dragging
         if selection_dragging:
-            self._selection_rect_drag.set_enabled(False)
+            self._selection_rect_drag.cancel_drag()
         if patch_dragging:
-            self._patch_rect_drag.set_enabled(False)
+            self._patch_rect_drag.cancel_drag()
         return was_dragging
 
     def selection_preview_rect(self) -> Rect | None:

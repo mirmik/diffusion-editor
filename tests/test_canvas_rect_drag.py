@@ -27,7 +27,7 @@ def test_selection_rect_finish_includes_end_pixel():
 
     assert result is not None
     assert result.rect == (2, 3, 6, 7)
-    assert drag.enabled is False
+    assert drag.enabled is True
     assert drag.dragging is False
 
 
@@ -48,7 +48,7 @@ def test_rect_drag_rejects_tiny_rect():
     drag.begin(5, 5)
 
     assert drag.finish(6, 6) is None
-    assert drag.enabled is False
+    assert drag.enabled is True
     assert drag.dragging is False
 
 

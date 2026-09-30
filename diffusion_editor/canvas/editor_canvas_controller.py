@@ -303,7 +303,7 @@ class EditorCanvasController:
         x, y = int(ix), int(iy)
         rect_result = self._rect_drags.finish(x, y)
         if rect_result.handled:
-            self._set_cursor("default")
+            self._set_cursor("crosshair" if self._rect_drags.enabled else "default")
             if rect_result.rect is not None:
                 if (
                         rect_result.target == "selection"
@@ -349,7 +349,7 @@ class EditorCanvasController:
             self._edit_session.clear()
         if rect_cancelled or edit_cancelled:
             cleanup(lambda: self._set_cursor(
-                "crosshair" if self._selection_mode else "default"))
+                "crosshair" if self._selection_mode or self._rect_drags.enabled else "default"))
             cleanup(self._request_repaint)
         if errors:
             error, traceback = errors[0]

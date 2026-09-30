@@ -121,6 +121,26 @@ class NativeLayerPanel:
             self.rename_dialog.connect_value_finished(
                 self._on_rename_finished))
 
+        # This projection follows the same active-layer state as the tree,
+        # but is mounted in the AI inspector page.
+        self.ai_tool_widget = document.create_vstack("AIProcessingTool")
+        self.ai_tool_widget.set_layout_spacing(4)
+        self.ai_layer_caption = document.create_label("")
+        self.ai_layer_caption.stable_id = "diffusion-editor.ai.active-layer"
+        self.ai_tool_widget.add_preferred_child(self.ai_layer_caption)
+        self.ai_tool_combo = document.create_combo_box()
+        self.ai_tool_combo.widget.stable_id = "diffusion-editor.ai.attach-tool"
+        self._ai_tool_types = (None, "text_to_image", "diffusion", "lama", "instruct")
+        for label in ("Choose processing tool…", "Text to Image", "Diffusion", "LaMa", "AI Edit"):
+            self.ai_tool_combo.add_item(label)
+        self._connections.append(self.ai_tool_combo.connect_changed(self._on_ai_tool_changed))
+        self.ai_tool_widget.add_preferred_child(self.ai_tool_combo.widget)
+        self.ai_remove_tool = document.create_button("Remove processing tool")
+        self.ai_remove_tool.widget.stable_id = "diffusion-editor.ai.remove-tool"
+        self._connections.append(self.ai_remove_tool.connect_clicked(
+            lambda: self._emit(LayerTreeAction.DETACH_TOOL, layer_id=self._state.active_id)))
+        self.ai_tool_widget.add_preferred_child(self.ai_remove_tool.widget)
+
         self.apply_layer_tree_state(state)
 
     def apply_layer_tree_state(self, state: LayerTreeState) -> None:
@@ -153,9 +173,21 @@ class NativeLayerPanel:
             self.add_button.widget.enabled = state.can_add
             self.remove_button.widget.enabled = state.can_remove
             self.flatten_button.widget.enabled = state.can_flatten
+            self.ai_layer_caption.text = f"Layer: {active.name}" if active else "No active layer"
+            tool_type = active.tool_type if active else None
+            self.ai_tool_combo.selected_index = (
+                self._ai_tool_types.index(tool_type) if tool_type in self._ai_tool_types else 0)
+            self.ai_tool_combo.widget.enabled = state.can_attach_tool
+            self.ai_remove_tool.widget.visible = state.can_detach_tool
             self._state = state
         finally:
             self._syncing = False
+
+    def _on_ai_tool_changed(self, index, *_args):
+        if not self._syncing and 0 < index < len(self._ai_tool_types):
+            self._emit(LayerTreeAction.ATTACH_TOOL, layer_id=self._state.active_id,
+                       value=self._ai_tool_types[index])
+            self.apply_layer_tree_state(self._state)
 
     def close(self) -> None:
         if self._closed:

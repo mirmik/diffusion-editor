@@ -22,6 +22,7 @@ Rgba = tuple[int, int, int, int]
 
 
 class BrushControlAction(str, Enum):
+    ACTIVE_TOOL = "active_tool"
     TOOL = "tool"
     SIZE = "size"
     HARDNESS = "hardness"
@@ -65,6 +66,7 @@ class BrushControlsState:
     show_patch: bool = True
     accepts_pixel_edits: bool = True
     can_move: bool = True
+    active_tool: str | None = None
 
 
 @dataclass(frozen=True)
@@ -96,6 +98,7 @@ class CanvasControlsCoordinator:
         self._document = document
         self._canvas = canvas
         self._view: CanvasControlsPresentation | None = None
+        self._published_state = None
         self._closed = False
         brush = canvas.brush
         self._brush_state = BrushControlsState(
@@ -106,6 +109,7 @@ class CanvasControlsCoordinator:
             color=tuple(brush.color),
         )
         self._selection_state = SelectionControlsState()
+        self._transform_previous_tool: str | None = None
 
         self._previous_color_picked = canvas.on_color_picked
         self._previous_patch_rect_drawn = canvas.on_patch_rect_drawn
@@ -144,16 +148,64 @@ class CanvasControlsCoordinator:
     def bind_view(self, view: CanvasControlsPresentation) -> None:
         self._require_open()
         self._view = view
+        self._published_state = None
         self._publish()
+
+    @property
+    def active_tool(self) -> str:
+        if self._canvas.transform is not None and self._canvas.transform.active:
+            return "transform"
+        return self._ordinary_tool()
+
+    def _ordinary_tool(self) -> str:
+        if self._selection_state.rect_mode:
+            return "select_rect"
+        if self._selection_state.edit_mode:
+            return "select_brush"
+        if self._brush_state.draw_patch:
+            return "patch"
+        return self._brush_state.tool.value
+
+    def select_tool(self, tool: str) -> None:
+        self._require_open()
+        if self._canvas.transform is not None and self._canvas.transform.active:
+            return
+        if tool != self.active_tool:
+            self._canvas.pointer_cancel()
+        if tool == "transform":
+            self.begin_transform()
+        elif tool in ("select_rect", "select_brush"):
+            action = (SelectionControlAction.RECT_MODE if tool == "select_rect"
+                      else SelectionControlAction.EDIT_MODE)
+            self.handle_selection_intent(SelectionControlsIntent(action, True))
+        elif tool == "patch":
+            self.handle_brush_intent(BrushControlsIntent(BrushControlAction.DRAW_PATCH, True))
+        else:
+            self.handle_brush_intent(BrushControlsIntent(BrushControlAction.TOOL, BrushToolMode(tool)))
 
     def begin_transform(self, target="auto") -> bool:
         transform = self._canvas.transform
-        if transform is None or not transform.begin(target):
+        if transform is None:
             return False
-        self._deactivate_selection_modes()
-        self._disable_patch_mode()
+        if self._transform_previous_tool is None:
+            self._transform_previous_tool = self._ordinary_tool()
+        started = transform.begin(target)
+        self.transform_state_changed()
+        return started
+
+    def transform_state_changed(self) -> None:
+        """Keep tool selection consistent for Apply, Escape and document changes."""
+        if self._closed:
+            return
+        if self._canvas.transform is not None and self._canvas.transform.active:
+            if self._transform_previous_tool is None:
+                self._transform_previous_tool = self._ordinary_tool()
+            self._deactivate_selection_modes()
+            self._disable_patch_mode()
+        elif self._transform_previous_tool is not None:
+            previous, self._transform_previous_tool = self._transform_previous_tool, None
+            self.select_tool(previous)
         self._publish()
-        return True
 
     def handle_brush_intent(self, intent: BrushControlsIntent) -> None:
         self._require_open()
@@ -161,8 +213,12 @@ class CanvasControlsCoordinator:
             return
         action, value = intent.action, intent.value
         state = self._brush_state
+        if action == BrushControlAction.ACTIVE_TOOL:
+            self.select_tool(str(value))
+            return
         if action == BrushControlAction.TOOL:
             mode = BrushToolMode(value)
+            self._disable_patch_mode()
             self._canvas.set_brush_tool(mode)
             self._deactivate_selection_modes()
             state = self._replace_brush(tool=mode)
@@ -280,6 +336,10 @@ class CanvasControlsCoordinator:
         self._canvas.set_mask_brush(size, hardness, flow)
         self._canvas.set_mask_eraser(eraser)
         self._deactivate_selection_modes()
+        self._disable_patch_mode()
+        self._canvas.brush.set_size(size)
+        self._canvas.brush.set_hardness(hardness)
+        self._canvas.brush.set_flow(flow)
         self._brush_state = self._replace_brush(
             tool=mode,
             size=size,
@@ -318,8 +378,13 @@ class CanvasControlsCoordinator:
         return replace(self._selection_state, **changes)
 
     def _publish(self) -> None:
+        self._brush_state = self._replace_brush(active_tool=self.active_tool)
         if self._view is None:
             return
+        state = self._brush_state, self._selection_state
+        if self._published_state == state:
+            return
+        self._published_state = state
         self._view.apply_brush_state(self._brush_state)
         self._view.apply_selection_state(self._selection_state)
 
@@ -367,7 +432,6 @@ class CanvasControlsCoordinator:
 
     def _on_patch_rect_drawn(
             self, x0: int, y0: int, x1: int, y1: int) -> None:
-        self._disable_patch_mode()
         layer = self._layer_stack.active_layer
         if layer is not None:
             lx0, ly0, lx1, ly1 = layer.bounds
@@ -384,14 +448,13 @@ class CanvasControlsCoordinator:
                     rect=layer.canvas_rect_to_local(clipped),
                     label="Set Patch Rect",
                 ))
+        self._canvas.set_patch_rect_mode(self._brush_state.draw_patch)
         self._publish()
         if self._previous_patch_rect_drawn is not None:
             self._previous_patch_rect_drawn(x0, y0, x1, y1)
 
     def _on_selection_rect_drawn(
             self, x0: int, y0: int, x1: int, y1: int) -> None:
-        self._canvas.set_selection_rect_mode(False)
-        self._selection_state = self._replace_selection(rect_mode=False)
         height, width = self._layer_stack.height, self._layer_stack.width
         x0, y0 = max(0, x0), max(0, y0)
         x1, y1 = min(width, x1), min(height, y1)
@@ -402,6 +465,7 @@ class CanvasControlsCoordinator:
                 mask=mask,
                 label="Rect Selection",
             ))
+        self._canvas.set_selection_rect_mode(self._selection_state.rect_mode)
         self._publish()
         if self._previous_selection_rect_drawn is not None:
             self._previous_selection_rect_drawn(x0, y0, x1, y1)

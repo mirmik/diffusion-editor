@@ -1,44 +1,38 @@
-"""Contextual transform options mounted above the editor canvas."""
+"""Contextual transform options in the left tool settings panel."""
 
-from termin.gui_native import Size
+from termin.gui_native import EdgeInsets, Size, TextWrapMode
 
 
 class NativeTransformControls:
-    def __init__(self, document, transform, *, begin, controls):
+    def __init__(self, document, transform, *, begin, on_state_changed=lambda: None):
         self.transform = transform
         self._begin = begin
-        self._controls = controls
+        self._on_state_changed = on_state_changed
         self._syncing = False
         self._closed = False
         self._connections = []
         self.widget = document.create_vstack("TransformOptions")
         self.widget.stable_id = "diffusion-editor.transform-options"
         self.widget.set_layout_spacing(4)
-        self.launcher = document.create_button("Transform selection / layer")
-        self.launcher.widget.stable_id = "diffusion-editor.transform.start"
-        self._connections.append(self.launcher.connect_clicked(lambda: begin("auto")))
-        header = document.create_hstack("TransformHeader")
-        header.set_layout_spacing(6)
+        self.widget.set_layout_padding(EdgeInsets(6, 4, 6, 6))
+        self.widget.add_preferred_child(document.create_label("Transform"))
         self.target = document.create_combo_box()
         self.target.widget.stable_id = "diffusion-editor.transform.target"
         self.target.add_item("Selected pixels")
         self.target.add_item("Entire layer")
         self._connections.append(self.target.connect_changed(self._target_changed))
-        header.add_flex_child(self.target.widget, 1)
+        self.widget.add_preferred_child(self.target.widget)
         self.apply_button = document.create_button("Apply")
         self.apply_button.widget.stable_id = "diffusion-editor.transform.apply"
         self.cancel_button = document.create_button("Cancel")
         self.cancel_button.widget.stable_id = "diffusion-editor.transform.cancel"
         self._connections.append(self.apply_button.connect_clicked(transform.apply))
         self._connections.append(self.cancel_button.connect_clicked(transform.cancel))
-        header.add_fixed_child(self.apply_button.widget, 65)
-        header.add_fixed_child(self.cancel_button.widget, 65)
-        self.widget.add_preferred_child(header)
-        fields = document.create_hstack("TransformDimensions")
-        fields.set_layout_spacing(5)
         self.dimensions = {}
-        for axis, label in (("width", "W"), ("height", "H")):
-            fields.add_fixed_child(document.create_label(label), 16)
+        for axis, label in (("width", "Width"), ("height", "Height")):
+            fields = document.create_hstack(f"TransformDimension.{axis}")
+            fields.set_layout_spacing(4)
+            fields.add_fixed_child(document.create_label(label), 68)
             control = document.create_spin_box(1)
             control.widget.stable_id = f"diffusion-editor.transform.{axis}"
             control.set_range(1, 16384)
@@ -48,13 +42,22 @@ class NativeTransformControls:
                 lambda value, axis=axis: self._dimension_changed(axis, value)))
             fields.add_flex_child(control.widget, 1)
             self.dimensions[axis] = control
+            self.widget.add_preferred_child(fields)
+        ratio = document.create_hstack("TransformAspect")
+        ratio.set_layout_spacing(4)
         self.aspect = document.create_checkbox(True)
         self.aspect.widget.stable_id = "diffusion-editor.transform.keep-aspect"
         self._connections.append(self.aspect.connect_changed(self._aspect_changed))
-        fields.add_fixed_child(self.aspect.widget, 22)
-        fields.add_fixed_child(document.create_label("Keep ratio"), 70)
-        self.widget.add_preferred_child(fields)
+        ratio.add_fixed_child(self.aspect.widget, 22)
+        ratio.add_preferred_child(document.create_label("Keep ratio"))
+        self.widget.add_preferred_child(ratio)
+        actions = document.create_hstack("TransformActions")
+        actions.set_layout_spacing(4)
+        actions.add_flex_child(self.apply_button.widget, 1)
+        actions.add_flex_child(self.cancel_button.widget, 1)
+        self.widget.add_preferred_child(actions)
         self.caption = document.create_label("")
+        self.caption.set_wrap_mode(TextWrapMode.Word)
         self.caption.stable_id = "diffusion-editor.transform.caption"
         self.widget.add_preferred_child(self.caption)
         transform.on_changed = self.sync
@@ -63,15 +66,11 @@ class NativeTransformControls:
     def sync(self):
         if self._closed:
             return
+        self._on_state_changed()
         self._syncing = True
         try:
             session = self.transform.session
-            layer = self.transform.stack.active_layer
-            self.launcher.widget.enabled = (
-                layer is not None and layer.accepts_pixel_edits and not session)
             self.widget.visible = session is not None or self.transform.error is not None
-            self._controls.brush.widget.enabled = session is None
-            self._controls.selection.widget.enabled = session is None
             self.target.widget.enabled = session is not None
             self.apply_button.widget.enabled = session is not None
             self.cancel_button.widget.enabled = session is not None or self.transform.error is not None

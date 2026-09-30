@@ -8,12 +8,14 @@ import secrets
 from typing import Callable, Mapping
 
 from termin.gui_native import (
+    EdgeInsets,
     CommandData,
     CommandKind,
     CommandModel,
     MenuBarEntry,
     SrgbColor,
     StyleField,
+    StyleRole,
     TcDocument,
 )
 
@@ -370,16 +372,9 @@ MENU_COMMANDS = (
 )
 
 TOOLBAR_COMMANDS = (
-    "file.open",
-    "file.save",
-    None,
+    "file.open", "file.save", None,
+    "edit.undo", "edit.redo", None,
     "view.fit",
-    "layer.new_3d_reconstruction",
-    "ai.depth_map",
-    None,
-    "selection.all",
-    "selection.clear",
-    "selection.invert",
 )
 
 RECONSTRUCTION_TOOLBAR_COMMANDS = (
@@ -463,7 +458,10 @@ class NativeEditorView:
         self.canvas_host.stable_id = "diffusion-editor.canvas-host"
         self.transform_options_host = document.create_vstack("TransformOptionsHost")
         self.transform_options_host.stable_id = "diffusion-editor.transform-options-host"
-        self.canvas_host.add_preferred_child(self.transform_options_host)
+        self.tool_options_scroll = document.create_scroll_area("ToolOptionsScroll")
+        self.tool_options_scroll.widget.stable_id = "diffusion-editor.tool-options-scroll"
+        self.tool_options_scroll.set_scroll_axes(False, True)
+        self.tool_options_scroll.set_content(self.transform_options_host)
         self.canvas_placeholder = document.create_label(
             "Canvas", "DiffusionEditorCanvasHostLabel")
         self.canvas_placeholder.stable_id = "diffusion-editor.canvas-host.label"
@@ -566,6 +564,24 @@ class NativeEditorView:
             "Layers", "DiffusionEditorLayerPanelLabel")
         self.layer_placeholder.stable_id = "diffusion-editor.layer-panel.label"
         self.layer_panel.add_preferred_child(self.layer_placeholder)
+        self.ai_content = document.create_vstack("DiffusionEditorAIContent")
+        self.ai_content.stable_id = "diffusion-editor.ai-panel.content"
+        self.ai_content.set_layout_spacing(8)
+        self.ai_content.set_layout_padding(EdgeInsets(6, 6, 6, 6))
+        self.ai_setup = document.create_vstack("AISetupHost")
+        self.ai_content.add_preferred_child(self.ai_setup)
+        self.ai_scroll = document.create_scroll_area("DiffusionEditorAIScroll")
+        self.ai_scroll.widget.stable_id = "diffusion-editor.ai-panel"
+        self.ai_scroll.set_scroll_axes(False, True)
+        self.ai_scroll.set_content(self.ai_content)
+        self.inspector_tabs = document.create_tab_view("DiffusionEditorInspectorTabs")
+        self.inspector = self.inspector_tabs.widget
+        self.inspector.stable_id = "diffusion-editor.inspector"
+        self.inspector_tabs.add_page("Layers", self.layer_panel)
+        self.inspector_tabs.add_page("AI Attach", self.ai_scroll.widget)
+        self.inspector_tabs.selected_index = 0
+        self._connections.append(self.inspector_tabs.connect_selection_changed(
+            lambda *_: self._request_repaint()))
         self.layer_panel_view = None
         self.agent_panel = self._placeholder(
             document,
@@ -593,7 +609,7 @@ class NativeEditorView:
         self.right_host = document.create_hstack("DiffusionEditorRightHost")
         self.right_host.stable_id = "diffusion-editor.right-host"
         self.right_host.set_layout_spacing(0.0)
-        self.right_host.add_flex_child(self.layer_panel, 1.0)
+        self.right_host.add_flex_child(self.inspector, 1.0)
         self.right_host.add_flex_child(self.right_splitter.widget, 1.0)
 
         self.workspace_splitter = document.create_splitter(
@@ -610,17 +626,20 @@ class NativeEditorView:
         self.workspace_splitter.set_split_fraction(
             self._workspace_fraction_without_agent
         )
-        self.workspace_splitter.set_min_extents(320.0, 240.0)
+        self.workspace_splitter.set_min_extents(400.0, 260.0)
 
         self.main_splitter = document.create_splitter(
             True,
             "DiffusionEditorMainSplitter",
         )
         self.main_splitter.widget.stable_id = "diffusion-editor.main-splitter"
-        self.main_splitter.set_first(self.left_scroll.widget)
-        self.main_splitter.set_second(self.workspace_splitter.widget)
-        self.main_splitter.set_split_fraction(0.20)
-        self.main_splitter.set_min_extents(180.0, 480.0)
+        self._main_splitter_parking = document.create_vstack("MainSplitterParking")
+        self._reconstruction_panel_parking = document.create_vstack("ReconstructionPanelParking")
+        self.main_splitter.set_first(self._reconstruction_panel_parking)
+        self.main_splitter.set_second(self._main_splitter_parking)
+        self.main_splitter.set_split_fraction(.26)
+        self.main_splitter.set_min_extents(250.0, 480.0)
+        self.main_splitter.widget.visible = False
 
         self.status_bar = document.create_status_bar("Ready")
         self.status_bar.widget.stable_id = "diffusion-editor.status"
@@ -635,7 +654,16 @@ class NativeEditorView:
         self.root.add_fixed_child(self.menu_bar.widget, 28.0)
         self.root.add_fixed_child(self.toolbar.widget, 34.0)
         self.root.add_fixed_child(self.toolbar_workspace_edge, 2.0)
-        self.root.add_flex_child(self.main_splitter.widget, 1.0)
+        self.workspace_row = document.create_hstack("DiffusionEditorWorkspaceRow")
+        self.workspace_row.set_layout_spacing(0)
+        self.workspace_row.add_fixed_child(self.left_scroll.widget, 52)
+        self.workspace_row.add_fixed_child(self.tool_options_scroll.widget, 220)
+        self.workspace_content = document.create_hstack("WorkspaceContent")
+        self.workspace_content.set_layout_spacing(0)
+        self.workspace_content.add_flex_child(self.main_splitter.widget, 1)
+        self.workspace_content.add_flex_child(self.workspace_splitter.widget, 1)
+        self.workspace_row.add_flex_child(self.workspace_content, 1)
+        self.root.add_flex_child(self.workspace_row, 1.0)
         self.root.add_fixed_child(self.status_workspace_edge, 2.0)
         self.root.add_fixed_child(self.status_bar.widget, 22.0)
         if not document.add_root(self.root.handle):
@@ -702,6 +730,15 @@ class NativeEditorView:
         self._require_open()
         if self.menu_bar.dispatch_shortcut(key, modifiers):
             return True
+        # Text arrives separately from key-down in the native backend. A letter
+        # can be unhandled by an editor while it is still awaiting its text event.
+        focused = self._document.focused_widget
+        if (not modifiers and focused.valid
+                and self._document.ref(focused).style_role == StyleRole.TextInput):
+            return False
+        if (self.canvas_controls_view is not None
+                and self.canvas_controls_view.dispatch_shortcut(key, modifiers)):
+            return True
         return bool(
             self.canvas_view is not None
             and self.canvas_view.dispatch_shortcut(key, modifiers)
@@ -725,7 +762,7 @@ class NativeEditorView:
             )
         self.agent_panel_visible = visible
         if visible:
-            self.right_splitter.set_first(self.layer_panel)
+            self.right_splitter.set_first(self.inspector)
             self.right_splitter.widget.visible = True
             self.workspace_splitter.set_min_extents(320.0, 420.0)
             self.workspace_splitter.set_split_fraction(
@@ -733,9 +770,9 @@ class NativeEditorView:
             )
         else:
             self.right_splitter.set_first(self._agent_panel_parking)
-            self.right_host.add_flex_child(self.layer_panel, 1.0)
+            self.right_host.add_flex_child(self.inspector, 1.0)
             self.right_splitter.widget.visible = False
-            self.workspace_splitter.set_min_extents(320.0, 240.0)
+            self.workspace_splitter.set_min_extents(400.0, 260.0)
             self.workspace_splitter.set_split_fraction(
                 self._workspace_fraction_without_agent
             )
@@ -757,12 +794,32 @@ class NativeEditorView:
         self.canvas_view = canvas_view
         self._request_repaint()
 
+    @property
+    def ai_panel_visible(self) -> bool:
+        return self.inspector_tabs.selected_index == 1
+
+    def set_ai_panel_visible(self, visible: bool) -> None:
+        self.inspector_tabs.selected_index = 1 if visible else 0
+        self._request_repaint()
+
+    def _set_reconstruction_splitter_visible(self, visible: bool) -> None:
+        # A fixed-width tool rail is outside the resizable 3D workspace.
+        if visible:
+            self.main_splitter.set_second(self.workspace_splitter.widget)
+        else:
+            self.main_splitter.set_second(self._main_splitter_parking)
+            self.workspace_content.add_flex_child(self.workspace_splitter.widget, 1)
+        self.main_splitter.widget.visible = visible
+
     def mount_canvas_controls(self, controls_view) -> None:
         self._require_open()
         if self.canvas_controls_view is not None:
             raise RuntimeError("native canvas controls are already mounted")
         self.left_panel.remove_child(self.left_placeholder)
         self.left_panel.add_preferred_child(controls_view.widget)
+        if hasattr(controls_view, "options_widget"):
+            self.transform_options_host.add_preferred_child(controls_view.options_widget)
+            self.ai_content.add_preferred_child(controls_view.ai_widget)
         self.canvas_controls_view = controls_view
         self._request_repaint()
 
@@ -3259,6 +3316,7 @@ class NativeEditorView:
             self, visible: bool, status: str = "") -> None:
         self._require_open()
         visible = bool(visible)
+        self.tool_options_scroll.widget.visible = not visible
         if self.reconstruction_status is not None:
             self.reconstruction_status.text = status.title() if status else ""
         panel = self.reconstruction_panel
@@ -3278,12 +3336,16 @@ class NativeEditorView:
                 if self.reconstruction_workspace_mode
                 else panel
             )
+            self._set_reconstruction_splitter_visible(True)
+            self.main_splitter.set_min_extents(250.0, 480.0)
+            self.main_splitter.set_split_fraction(0.26)
             self.main_splitter.set_first(active_panel.widget)
             self.canvas_host.remove_child(canvas.widget)
             splitter.set_first(canvas.widget)
             self.canvas_host.add_flex_child(splitter.widget, 1.0)
         else:
-            self.main_splitter.set_first(self.left_scroll.widget)
+            self.main_splitter.set_first(self._reconstruction_panel_parking)
+            self._set_reconstruction_splitter_visible(False)
             self.canvas_host.remove_child(splitter.widget)
             splitter.set_first(self._canvas_splitter_parking)
             self.canvas_host.add_flex_child(canvas.widget, 1.0)
@@ -3295,7 +3357,7 @@ class NativeEditorView:
         self._require_open()
         if self.generation_panels_view is not None:
             raise RuntimeError("native generation panels are already mounted")
-        self.left_panel.add_preferred_child(panels_view.widget)
+        self.ai_content.add_preferred_child(panels_view.widget)
         self.generation_panels_view = panels_view
         self.panel_presentation = panel_presentation
         self._request_repaint()
@@ -3306,6 +3368,8 @@ class NativeEditorView:
             raise RuntimeError("native layer panel is already mounted")
         self.layer_panel.remove_child(self.layer_placeholder)
         self.layer_panel.add_flex_child(layer_panel_view.widget, 1.0)
+        if hasattr(layer_panel_view, "ai_tool_widget"):
+            self.ai_setup.add_preferred_child(layer_panel_view.ai_tool_widget)
         self.layer_panel_view = layer_panel_view
         self._request_repaint()
 

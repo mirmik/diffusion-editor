@@ -107,7 +107,7 @@ def test_patch_and_selection_rect_results_use_document_commands():
 
     assert isinstance(document.commands[-1], SetLayerPatchRectCommand)
     assert stack.active_layer.patch_rect == (3, 4, 18, 16)
-    assert not coordinator.brush_state.draw_patch
+    assert coordinator.brush_state.draw_patch
 
     coordinator.handle_brush_intent(BrushControlsIntent(
         BrushControlAction.CLEAR_PATCH,
@@ -125,7 +125,7 @@ def test_patch_and_selection_rect_results_use_document_commands():
 
     assert isinstance(document.commands[-1], SetLayerSelectionCommand)
     assert np.all(stack.selection.data[3:12, 2:10] == 1.0)
-    assert not coordinator.selection_state.rect_mode
+    assert coordinator.selection_state.rect_mode
 
 
 def test_eyedropper_updates_state_and_close_restores_callbacks():
@@ -156,3 +156,43 @@ def test_eyedropper_updates_state_and_close_restores_callbacks():
     assert canvas.on_patch_rect_drawn is old_patch_callback
     assert canvas.on_selection_rect_drawn is old_selection_callback
     assert canvas.on_brush_size_changed is old_size_callback
+
+
+def test_unified_tools_switch_off_conflicting_modes():
+    _stack, canvas, _document, coordinator, view, _cursors = _coordinator()
+    for tool in ("patch", "paint", "select_rect", "mask", "select_brush", "move", "patch", "eraser"):
+        coordinator.select_tool(tool)
+        assert coordinator.active_tool == tool
+        assert view.brush_states[-1].active_tool == tool
+        assert coordinator.brush_state.draw_patch == (tool == "patch")
+        assert coordinator.selection_state.rect_mode == (tool == "select_rect")
+        assert coordinator.selection_state.edit_mode == (tool == "select_brush")
+        assert canvas._rect_drags.enabled == (tool in {"patch", "select_rect"})
+    coordinator.select_tool("patch")
+    coordinator.apply_generation_mask_brush(37, .6, .2, True)
+    assert coordinator.active_tool == "mask_eraser"
+    assert not coordinator.brush_state.draw_patch
+    assert canvas.brush.size == 37
+    assert canvas.brush.hardness == .6
+    coordinator.close()
+
+
+def test_rectangle_tool_survives_tiny_gestures_and_capture_cancel():
+    stack, canvas, document, coordinator, _view, _cursors = _coordinator()
+    before = stack.active_layer.image.copy()
+    for tool in ("select_rect", "patch"):
+        coordinator.select_tool(tool)
+        canvas.pointer_down(3, 3, canvas.LEFT_BUTTON)
+        canvas.pointer_up(3, 3)  # Too small, still the same tool.
+        canvas.pointer_down(2, 2, canvas.LEFT_BUTTON)
+        canvas.pointer_move(15, 15)
+        canvas.pointer_cancel()
+        assert coordinator.active_tool == tool
+        assert canvas._rect_drags.enabled
+        count = len(document.commands)
+        for _ in range(2):
+            canvas.pointer_down(3, 4, canvas.LEFT_BUTTON)
+            canvas.pointer_up(16, 17)
+        assert len(document.commands) == count + 2
+    np.testing.assert_array_equal(stack.active_layer.image, before)
+    coordinator.close()

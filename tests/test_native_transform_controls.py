@@ -24,7 +24,9 @@ def test_native_transform_controls_input_history_and_layout(tmp_path, monkeypatc
         assert transform.session.target == "selection"
         assert not root.canvas_controls.brush.widget.enabled
         assert controls.target.selected_index == 0
-        assert controls.widget.bounds.y < root.canvas.widget.bounds.y
+        assert controls.widget.bounds.x + controls.widget.bounds.width <= root.canvas.widget.bounds.x
+        assert root.canvas.widget.bounds.y == root.view.workspace_row.bounds.y
+        assert root.view.tool_options_scroll.content_size.width <= 220
         assert controls.apply_button.widget.bounds.width >= 40
         controls.dimensions["width"].value = 75
         assert transform.session.rect == (30, 20, 105, 80)

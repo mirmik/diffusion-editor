@@ -367,6 +367,7 @@ class NativeEditorRoot:
         self._reconstruction_job_node_id: str | None = None
         self._reconstruction_parent_run_id: str | None = None
         self._presented_reconstruction_id: str | None = None
+        self._selection_reconstruction_context = False
         self._presented_depth_point_cloud_layer_id: str | None = None
         self._active_reconstruction_workspace = None
         self.automation = None
@@ -511,6 +512,7 @@ class NativeEditorRoot:
                         self.canvas_controls_coordinator.handle_brush_intent,
                         self.canvas_controls_coordinator.handle_selection_intent,
                         viewport_rect=lambda: self.view.root.bounds,
+                        activate_command=self.view.activate_command,
                     )
                     self.canvas_controls_coordinator.bind_view(
                         self.canvas_controls)
@@ -522,12 +524,8 @@ class NativeEditorRoot:
                     self.transform_controls = NativeTransformControls(
                         composition.document, self.transform_controller,
                         begin=self.canvas_controls_coordinator.begin_transform,
-                        controls=self.canvas_controls,
+                        on_state_changed=self.canvas_controls_coordinator.transform_state_changed,
                     )
-                    # The entry point belongs to tools on the left; its options
-                    # live above the canvas throughout the multi-gesture session.
-                    self.canvas_controls.tools.add_preferred_child(
-                        self.transform_controls.launcher.widget)
                     mount_transform = getattr(self.view, "mount_transform_controls", None)
                     if mount_transform is not None:
                         mount_transform(self.transform_controls)
@@ -564,6 +562,7 @@ class NativeEditorRoot:
                         self.generation_panels_coordinator.state,
                         self.generation_panels_coordinator.handle_intent,
                         composition.request_repaint,
+                        shared_mask_controls=True,
                     )
                     self.generation_panels_coordinator.bind_view(
                         self.generation_panels)
@@ -913,6 +912,8 @@ class NativeEditorRoot:
             self.reconstruction_viewport.render_if_dirty()
         if self.reconstruction_refine_viewport is not None:
             self.reconstruction_refine_viewport.render_if_dirty()
+        if self.canvas_controls is not None:
+            self.canvas_controls.update_tooltip()
         rendered = bool(self.composition.render_frame())
         return NativeTickResult(
             dispatched=stats.executed,
@@ -2085,6 +2086,8 @@ class NativeEditorRoot:
     def _sync_reconstruction_selection(
             self, node: ReconstructionLayer | None) -> None:
         set_context = getattr(self.view, "set_reconstruction_context", None)
+        was_reconstruction = self._selection_reconstruction_context
+        self._selection_reconstruction_context = node is not None
         if self.canvas is not None:
             self.canvas.set_selection_as_mask(node is not None)
         if node is None:
@@ -2097,7 +2100,8 @@ class NativeEditorRoot:
                     set_context(True, "Depth point cloud")
                 return
             coordinator = self.canvas_controls_coordinator
-            if coordinator is not None and coordinator.selection_state.edit_mode:
+            if (was_reconstruction and coordinator is not None
+                    and coordinator.selection_state.edit_mode):
                 self._set_reconstruction_mask_painting(False)
             if callable(set_context):
                 set_context(False)

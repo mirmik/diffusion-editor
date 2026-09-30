@@ -473,12 +473,12 @@ def test_real_offscreen_canvas_renders_and_routes_image_space_paint(
             == GenerationPanelKind.LAMA
         )
         assert root.generation_panels.lama_group.widget.visible
-        root.generation_panels.mask_eraser.checked = True
+        root.canvas_controls.activate_tool("mask_eraser")
         assert (
             root.canvas.controller.brush_tool_mode
             == BrushToolMode.MASK_ERASER
         )
-        model, command_id = root.canvas_controls.brush.tool_commands[
+        model, command_id = root.canvas_controls.tool_commands[
             BrushToolMode.MASK_ERASER]
         assert model.command(command_id).data.checked
         root.layer_tree_coordinator.handle_intent(LayerTreeIntent(
@@ -501,7 +501,7 @@ def test_real_offscreen_canvas_renders_and_routes_image_space_paint(
             == GenerationPanelKind.TEXT_TO_IMAGE
         )
         assert root.generation_panels.text_to_image_group.widget.visible
-        assert not root.generation_panels.mask_group.widget.visible
+        assert root.generation_panels.mask_group.widget.visible
         root.layer_tree_coordinator.handle_intent(LayerTreeIntent(
             LayerTreeAction.DETACH_TOOL,
             layer_id=active_id,
@@ -523,18 +523,12 @@ def test_real_offscreen_canvas_renders_and_routes_image_space_paint(
             LayerTreeAction.DETACH_TOOL,
             layer_id=active_id,
         ))
-        root.canvas_controls.selection.rect_mode.checked = True
+        root.canvas_controls.activate_tool("select_rect")
         assert root.canvas.widget.cursor_intent == CursorIntent.Crosshair
-        model, command_id = root.canvas_controls.brush.tool_commands[
-            BrushToolMode.SMUDGE]
-        root.canvas_controls.brush._on_tool_activated(
-            0, command_id, model.command(command_id).data)
+        root.canvas_controls.activate_tool("smudge")
         assert root.canvas.controller.brush_tool_mode == BrushToolMode.SMUDGE
         assert root.canvas.widget.cursor_intent == CursorIntent.Default
-        model, command_id = root.canvas_controls.brush.tool_commands[
-            BrushToolMode.PAINT]
-        root.canvas_controls.brush._on_tool_activated(
-            0, command_id, model.command(command_id).data)
+        root.canvas_controls.activate_tool("paint")
         root.canvas_controls.brush.size.value = 5
         assert root.canvas.controller.brush.size == 5
         root.canvas.controller.brush.set_hardness(1.0)
@@ -834,6 +828,7 @@ def test_latest_depth_cloud_is_uploaded_directly_and_keeps_3d_context() -> None:
     root.view = View()
     root.canvas = None
     root.canvas_controls_coordinator = None
+    root._selection_reconstruction_context = False
     root._presented_reconstruction_id = "old-reconstruction"
     root._presented_depth_point_cloud_layer_id = None
     root._ensure_reconstruction_viewport = lambda: Viewport()
