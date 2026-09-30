@@ -58,6 +58,7 @@ class EditorCanvasController:
             request_repaint: Callable[[], None] | None = None,
             set_cursor: Callable[[str], None] | None = None):
         self._layer_stack = layer_stack
+        self.transform = None
         self._request_repaint = request_repaint or (lambda: None)
         self._set_cursor = set_cursor or (lambda _cursor: None)
         self._composite_bridge = CanvasCompositeBridge(
@@ -131,7 +132,8 @@ class EditorCanvasController:
 
     @property
     def pointer_interaction_active(self) -> bool:
-        return self._edit_session.active or self._rect_drags.dragging
+        return (self._edit_session.active or self._rect_drags.dragging
+                or (self.transform is not None and self.transform.dragging))
 
     def refresh(self) -> None:
         if self._layer_stack.width <= 0 or self._layer_stack.height <= 0:
@@ -245,6 +247,10 @@ class EditorCanvasController:
 
     def pointer_down(
             self, ix: float, iy: float, button: int, modifiers: int = 0) -> None:
+        if self.transform is not None and self.transform.active:
+            if button == self.LEFT_BUTTON:
+                self.transform.pointer_down(ix, iy)
+            return
         x, y = int(ix), int(iy)
         if button == self.RIGHT_BUTTON or (
                 button == self.LEFT_BUTTON
@@ -279,6 +285,9 @@ class EditorCanvasController:
         self._begin_tool_edit(self._active_stroke_tool, layer, x, y)
 
     def pointer_move(self, ix: float, iy: float) -> None:
+        if self.transform is not None and self.transform.active:
+            self.transform.pointer_move(ix, iy)
+            return
         x, y = int(ix), int(iy)
         if self._rect_drags.move(x, y):
             self._request_repaint()
@@ -288,6 +297,9 @@ class EditorCanvasController:
             self.on_mouse_moved(x, y)
 
     def pointer_up(self, ix: float, iy: float) -> None:
+        if self.transform is not None and self.transform.active:
+            self.transform.pointer_up(ix, iy)
+            return
         x, y = int(ix), int(iy)
         rect_result = self._rect_drags.finish(x, y)
         if rect_result.handled:
@@ -307,6 +319,8 @@ class EditorCanvasController:
             self._finish_tool_edit()
 
     def pointer_cancel(self) -> None:
+        if self.transform is not None:
+            self.transform.cancel_drag()
         rect_cancelled = self._rect_drags.cancel()
         edit_cancelled = self._edit_session.active
         errors: list[tuple[BaseException, object]] = []
@@ -342,6 +356,8 @@ class EditorCanvasController:
             raise error.with_traceback(traceback)
 
     def annotations(self) -> tuple[CanvasAnnotation, ...]:
+        if self.transform is not None and self.transform.active:
+            return (CanvasAnnotation("transform", self.transform.session.rect),)
         result: list[CanvasAnnotation] = []
         layer = self._layer_stack.active_layer
         if (

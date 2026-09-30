@@ -10,6 +10,7 @@ from termin.gui_native import (
     CanvasTextureLayer,
     CursorIntent,
     DynamicTextureOwnership,
+    KeyCode,
     Point,
     PointerEventType,
     Rect,
@@ -127,6 +128,25 @@ class NativeEditorCanvas:
     def dispatch_shortcut(self, key: int, modifiers: int) -> bool:
         if modifiers != 0:
             return False
+        transform = self.controller.transform
+        if transform is not None and transform.active:
+            if key == KeyCode.Enter.value:
+                transform.apply()
+                self._sync_gpu_image()
+                return True
+            if key == KeyCode.Escape.value:
+                transform.cancel()
+                self._sync_gpu_image()
+                return True
+            nudges = {
+                KeyCode.Left.value: (-1, 0), KeyCode.Right.value: (1, 0),
+                KeyCode.Up.value: (0, -1), KeyCode.Down.value: (0, 1),
+            }
+            if key in nudges:
+                dx, dy = nudges[key]
+                x0, y0, x1, y1 = transform.session.rect
+                transform.set_rect((x0+dx, y0+dy, x1+dx, y1+dy))
+                return True
         if key == ord("["):
             self.controller.adjust_brush_size(-5)
             return True
@@ -277,6 +297,8 @@ class NativeEditorCanvas:
 
     def _sync_gpu_image(self) -> None:
         bridge = self.controller.composite_bridge
+        if bridge.preview_active:
+            return
         if not bridge.using_gpu:
             return
         texture = bridge.display_tex
@@ -293,6 +315,10 @@ class NativeEditorCanvas:
         if self._closed:
             return
         if event.type == PointerEventType.Down:
+            if self.controller.transform is not None:
+                p0 = self.canvas.image_to_widget(Point(0, 0))
+                p1 = self.canvas.image_to_widget(Point(1, 0))
+                self.controller.transform.hit_radius = 8.0 / max(abs(p1.x-p0.x), 0.001)
             self.controller.pointer_down(
                 image_point.x,
                 image_point.y,
@@ -354,7 +380,16 @@ class NativeEditorCanvas:
         )
         if rect.width <= 0 or rect.height <= 0:
             return
-        if annotation.kind == "active-layer":
+        if annotation.kind == "transform":
+            from .canvas_transform import rect_handles
+            color = SrgbColor(0.2, 0.55, 1.0, 1.0)
+            context.stroke_rect(rect, color, 1.5)
+            for x, y in rect_handles(annotation.rect).values():
+                p = self.canvas.image_to_widget(Point(x, y))
+                handle = Rect(p.x-4, p.y-4, 8, 8)
+                context.fill_rect(handle, SrgbColor(1, 1, 1, 1))
+                context.stroke_rect(handle, color, 1.5)
+        elif annotation.kind == "active-layer":
             context.stroke_rect(rect, SrgbColor(0.0, 0.0, 0.0, 0.85), 3.0)
             context.stroke_rect(rect, SrgbColor(1.0, 1.0, 1.0, 0.95), 1.0)
         elif annotation.kind == "selection":

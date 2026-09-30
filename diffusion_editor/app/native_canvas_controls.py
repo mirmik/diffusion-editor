@@ -417,6 +417,9 @@ class NativeCanvasControls:
         self.widget = document.create_vstack("NativeCanvasControls")
         self.widget.stable_id = "diffusion-editor.canvas-controls"
         self.widget.set_layout_spacing(6.0)
+        self.tools = document.create_vstack("NativeCanvasGeometryTools")
+        self.tools.stable_id = "diffusion-editor.geometry-tools"
+        self.widget.add_preferred_child(self.tools)
         self.brush = NativeBrushPanel(
             document,
             brush_state,

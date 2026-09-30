@@ -34,6 +34,18 @@ class CanvasCompositeBridge:
         )
         self._composite: np.ndarray | None = None
         self._composite_stale = True
+        self.preview_active = False
+
+    def show_preview(self, image: np.ndarray | None, dirty_rect: Rect | None = None) -> None:
+        was_preview = self.preview_active
+        self.preview_active = image is not None
+        # Owned display texture only; canonical caches and GPU layers stay intact.
+        if image is not None and was_preview and dirty_rect and self._update_image_region:
+            x0, y0, x1, y1 = dirty_rect
+            if x1 > x0 and y1 > y0:
+                self._update_image_region(x0, y0, np.ascontiguousarray(image[y0:y1, x0:x1]))
+        else:
+            self._set_image(image if image is not None else self._layer_stack.composite())
 
     @property
     def gpu_compositing(self) -> bool:

@@ -146,8 +146,19 @@ class CanvasControlsCoordinator:
         self._view = view
         self._publish()
 
+    def begin_transform(self, target="auto") -> bool:
+        transform = self._canvas.transform
+        if transform is None or not transform.begin(target):
+            return False
+        self._deactivate_selection_modes()
+        self._disable_patch_mode()
+        self._publish()
+        return True
+
     def handle_brush_intent(self, intent: BrushControlsIntent) -> None:
         self._require_open()
+        if self._canvas.transform is not None and self._canvas.transform.active:
+            return
         action, value = intent.action, intent.value
         state = self._brush_state
         if action == BrushControlAction.TOOL:
@@ -195,6 +206,8 @@ class CanvasControlsCoordinator:
 
     def handle_selection_intent(self, intent: SelectionControlsIntent) -> None:
         self._require_open()
+        if self._canvas.transform is not None and self._canvas.transform.active:
+            return
         action, value = intent.action, intent.value
         state = self._selection_state
         if action == SelectionControlAction.EDIT_MODE:
@@ -255,6 +268,8 @@ class CanvasControlsCoordinator:
             eraser: bool) -> None:
         """Synchronize generation-panel mask controls with Canvas controls."""
         self._require_open()
+        if self._canvas.transform is not None:
+            self._canvas.transform.cancel()
         size = max(1, min(int(size), 500))
         hardness = max(0.0, min(float(hardness), 1.0))
         flow = max(0.0, min(float(flow), 1.0))

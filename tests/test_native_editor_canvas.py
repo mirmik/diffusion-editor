@@ -50,6 +50,7 @@ def _native_canvas_shell():
     overlay_lease = _Lease("overlay", trace)
     bridge = SimpleNamespace(
         using_gpu=True,
+        preview_active=False,
         display_tex="gpu-display",
         composite=np.zeros((8, 10, 4), dtype=np.uint8),
         display_size=lambda: (10, 8),
@@ -106,6 +107,18 @@ def test_native_canvas_switches_borrowed_and_owned_textures_explicitly():
 
     operations = [item[1] for item in trace if item[0] == "image"]
     assert operations == ["borrow", "clear", "set", "update", "clear", "borrow"]
+
+
+def test_transform_preview_keeps_owned_texture_until_preview_finishes():
+    native, trace, _ = _native_canvas_shell()
+    native._sync_gpu_image()
+    native._replace_owned(native.image_lease, np.ones((8, 10, 4), dtype=np.uint8))
+    native.controller.composite_bridge.preview_active = True
+    native._sync_gpu_image()
+    assert native.image_lease.ownership == DynamicTextureOwnership.OWNED
+    native.controller.composite_bridge.preview_active = False
+    native._sync_gpu_image()
+    assert native.image_lease.ownership == DynamicTextureOwnership.BORROWED
 
 
 def test_native_canvas_reuses_same_size_owned_texture_for_full_update():

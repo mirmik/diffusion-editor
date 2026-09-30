@@ -461,6 +461,9 @@ class NativeEditorView:
         self.canvas_host = document.create_vstack(
             "DiffusionEditorCanvasHost")
         self.canvas_host.stable_id = "diffusion-editor.canvas-host"
+        self.transform_options_host = document.create_vstack("TransformOptionsHost")
+        self.transform_options_host.stable_id = "diffusion-editor.transform-options-host"
+        self.canvas_host.add_preferred_child(self.transform_options_host)
         self.canvas_placeholder = document.create_label(
             "Canvas", "DiffusionEditorCanvasHostLabel")
         self.canvas_placeholder.stable_id = "diffusion-editor.canvas-host.label"
@@ -761,6 +764,10 @@ class NativeEditorView:
         self.left_panel.remove_child(self.left_placeholder)
         self.left_panel.add_preferred_child(controls_view.widget)
         self.canvas_controls_view = controls_view
+        self._request_repaint()
+
+    def mount_transform_controls(self, transform_view) -> None:
+        self.transform_options_host.add_preferred_child(transform_view.widget)
         self._request_repaint()
 
     def mount_reconstruction_viewport(self, viewport_view) -> None:

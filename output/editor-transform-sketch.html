@@ -1,0 +1,212 @@
+<style>
+#de-sketch { --de-bg:light-dark(#f5f5f3,#232528); --de-panel:light-dark(#fff,#2c2e32); --de-ink:light-dark(#252932,#eceef1); --de-muted:light-dark(#626974,#a9afb8); --de-line:light-dark(#d9dce1,#42464d); --de-field:light-dark(#f0f1f3,#222428); --de-accent:light-dark(#2864cc,#85adff); --de-active:light-dark(#e8efff,#334260); color:var(--de-ink); background:var(--de-bg); border:1px solid var(--de-line); border-radius:10px; overflow:hidden; font:13px/1.4 system-ui,sans-serif; }
+#de-sketch * { box-sizing:border-box; }
+#de-sketch [hidden] { display:none !important; }
+#de-sketch button, #de-sketch input, #de-sketch select { font:inherit; color:inherit; }
+#de-sketch button { display:inline-flex; align-items:center; justify-content:center; gap:7px; padding:7px 9px; background:transparent; border:1px solid transparent; border-radius:5px; cursor:pointer; }
+#de-sketch button:hover { background:var(--de-field); }
+#de-sketch button:disabled { opacity:.4; cursor:default; }
+#de-sketch button svg { width:17px; height:17px; flex:none; }
+#de-sketch .de-top { display:flex; align-items:center; flex-wrap:wrap; gap:16px; padding:10px 14px; border-bottom:1px solid var(--de-line); background:var(--de-panel); }
+#de-sketch .de-brand { font-weight:600; letter-spacing:-.3px; }
+#de-sketch .de-menu { display:flex; gap:14px; color:var(--de-muted); font-size:12px; }
+#de-sketch .de-file { margin-left:auto; color:var(--de-muted); font-size:12px; }
+#de-sketch .de-options { min-height:78px; display:flex; flex-wrap:wrap; align-items:center; gap:10px 16px; padding:10px 12px; background:var(--de-panel); border-bottom:1px solid var(--de-line); }
+#de-sketch .de-target { display:flex; flex-direction:column; gap:3px; min-width:154px; }
+#de-sketch .de-muted { color:var(--de-muted); font-size:11px; }
+#de-sketch .de-fields { display:flex; align-items:center; gap:7px; flex-wrap:wrap; }
+#de-sketch label { display:inline-flex; align-items:center; gap:5px; }
+#de-sketch input[type=number] { width:59px; padding:5px; background:var(--de-field); border:1px solid var(--de-line); border-radius:4px; }
+#de-sketch input[type=checkbox] { accent-color:var(--de-accent); }
+#de-sketch .de-actions { margin-left:auto; display:flex; gap:4px; }
+#de-sketch .de-primary { background:var(--de-accent); color:light-dark(#fff,#14213a); }
+#de-sketch .de-primary:hover { background:var(--de-accent); filter:brightness(.94); }
+#de-sketch .de-body { display:grid; grid-template-columns:128px minmax(0,1fr) 205px; min-height:470px; }
+#de-sketch .de-tools { background:var(--de-panel); padding:10px 7px; border-right:1px solid var(--de-line); display:flex; flex-direction:column; gap:4px; }
+#de-sketch .de-tools button { justify-content:flex-start; text-align:left; width:100%; font-size:12px; }
+#de-sketch button[aria-pressed=true] { background:var(--de-active); color:var(--de-accent); }
+#de-sketch .de-key { margin-left:auto; color:var(--de-muted); font-size:11px; }
+#de-sketch .de-separator { border-top:1px solid var(--de-line); margin:9px 3px; }
+#de-sketch .de-workspace { min-width:0; padding:14px 20px 18px; display:flex; flex-direction:column; justify-content:center; gap:13px; background:light-dark(#e8eaed,#1c1e21); }
+#de-sketch .de-document { display:flex; justify-content:space-between; gap:8px; color:var(--de-muted); font-size:11px; }
+#de-sketch .de-art { position:relative; aspect-ratio:1.24; width:100%; overflow:hidden; background:#ebe4cf; box-shadow:0 3px 16px #0002; touch-action:none; }
+#de-sketch .de-landscape { display:block; width:100%; height:100%; }
+#de-sketch .de-fragment { position:absolute; left:65%; top:29%; width:21%; height:26.04%; transform:translate(-50%,-50%); cursor:move; touch-action:none; }
+#de-sketch .de-sun { width:100%; height:100%; background:#d86a40; border-radius:50%; }
+#de-sketch .de-box { position:absolute; inset:-6px; border:1.5px solid #3485ef; }
+#de-sketch .de-box button { position:absolute; width:11px; height:11px; padding:0; border:1.5px solid #3485ef; border-radius:1px; background:#fff; }
+#de-sketch .de-box button:hover { background:#dceaff; }
+#de-sketch .de-box [data-corner=nw] { left:-6px; top:-6px; cursor:nwse-resize; }
+#de-sketch .de-box [data-corner=ne] { right:-6px; top:-6px; cursor:nesw-resize; }
+#de-sketch .de-box [data-corner=sw] { left:-6px; bottom:-6px; cursor:nesw-resize; }
+#de-sketch .de-box [data-corner=se] { right:-6px; bottom:-6px; cursor:nwse-resize; }
+#de-sketch .de-rotation { position:absolute; left:50%; top:-28px; height:21px; border-left:1px solid #3485ef; }
+#de-sketch .de-rotation::before { content:''; position:absolute; left:-4px; top:-5px; width:8px; height:8px; background:white; border:1px solid #3485ef; border-radius:50%; }
+#de-sketch .de-hint { color:var(--de-muted); font-size:11px; text-align:center; min-height:16px; }
+#de-sketch .de-right { background:var(--de-panel); border-left:1px solid var(--de-line); padding:13px 10px; }
+#de-sketch .de-panel-title { font-weight:600; display:flex; align-items:center; justify-content:space-between; margin-bottom:13px; }
+#de-sketch .de-layer { display:flex; align-items:center; gap:8px; padding:9px 6px; margin:5px 0; border-radius:5px; font-size:12px; }
+#de-sketch .de-layer-active { background:var(--de-active); }
+#de-sketch .de-thumb { flex:none; width:30px; height:30px; background:#e5dec9; border:1px solid #0002; border-radius:3px; position:relative; overflow:hidden; }
+#de-sketch .de-thumb-sun::after { content:''; position:absolute; inset:5px; border-radius:50%; background:#d86a40; }
+#de-sketch .de-thumb-hill { background:linear-gradient(155deg,#e5dec9 48%,#4b6c60 49%); }
+#de-sketch .de-layer-text { min-width:0; }
+#de-sketch .de-layer-sub { color:var(--de-muted); font-size:11px; margin-top:2px; }
+#de-sketch .de-destination { font-size:11px; color:var(--de-muted); padding:8px 6px 12px; }
+#de-sketch .de-check { display:flex; font-size:11px; align-items:flex-start; }
+#de-sketch .de-ai { margin-top:23px; border-top:1px solid var(--de-line); padding-top:14px; }
+#de-sketch .de-ai summary { cursor:pointer; font-size:12px; }
+#de-sketch .de-ai p { font-size:12px; color:var(--de-muted); }
+#de-sketch .de-status { display:flex; flex-wrap:wrap; justify-content:space-between; gap:8px; padding:7px 12px; border-top:1px solid var(--de-line); color:var(--de-muted); font-size:11px; background:var(--de-panel); }
+#de-sketch.de-side-options .de-body { grid-template-columns:128px minmax(0,1fr) 205px; }
+#de-sketch.de-side-options .de-options { border-bottom:1px solid var(--de-line); margin:-13px -10px 16px; padding:12px 10px; }
+#de-sketch.de-side-options .de-actions { margin-left:0; flex-wrap:wrap; }
+#de-sketch.de-icon-tools .de-body { grid-template-columns:47px minmax(0,1fr) 205px; }
+#de-sketch.de-icon-tools .de-tool-name, #de-sketch.de-icon-tools .de-key { display:none; }
+@media(max-width:760px) { #de-sketch .de-body, #de-sketch.de-side-options .de-body { grid-template-columns:47px minmax(0,1fr) 168px; } #de-sketch .de-tool-name, #de-sketch .de-key { display:none; } #de-sketch .de-workspace { padding:12px; } #de-sketch .de-file { display:none; } #de-sketch .de-menu { gap:10px; } }
+@media(max-width:540px) { #de-sketch .de-body, #de-sketch.de-side-options .de-body, #de-sketch.de-icon-tools .de-body { grid-template-columns:42px minmax(0,1fr); min-height:0; } #de-sketch .de-right { grid-column:1/-1; border-left:0; border-top:1px solid var(--de-line); } #de-sketch .de-workspace { min-height:310px; padding:10px; } #de-sketch .de-menu { display:none; } #de-sketch .de-actions { margin-left:0; } #de-sketch .de-ai { margin-top:10px; } }
+@media(pointer:coarse) { #de-sketch button { min-height:44px; } #de-sketch input { font-size:16px; } #de-sketch .de-box button { min-height:11px; } #de-sketch .de-box button::after { content:''; position:absolute; inset:-15px; } }
+</style>
+<div id="de-sketch" aria-label="Эскиз интерфейса Diffusion Editor">
+  <div class="de-top"><span class="de-brand">Diffusion Editor</span><nav class="de-menu" aria-label="Меню редактора"><span>Файл</span><span>Правка</span><span>Изображение</span><span>Вид</span></nav><span class="de-file">coast.deproj · Эскиз интерфейса</span></div>
+  <div class="de-options" id="de-options">
+    <div class="de-target"><strong id="de-tool-title">Трансформация</strong><span class="de-muted" id="de-target">Пиксели выделения · Пейзаж</span></div>
+    <div class="de-fields" id="de-fields"><label>Ш <input id="de-width" type="number" value="100" min="30" max="180" aria-label="Ширина в процентах">%</label><label><input id="de-lock" type="checkbox" checked aria-label="Сохранить пропорции"><i data-lucide="link" aria-hidden="true"></i></label><label>В <input id="de-height" type="number" value="100" min="30" max="180" aria-label="Высота в процентах">%</label><label>∠ <input id="de-angle" type="number" value="0" min="-180" max="180" aria-label="Угол поворота">°</label></div>
+    <div class="de-actions"><button id="de-cancel" type="button">Отмена</button><button id="de-apply" type="button" class="de-primary"><i data-lucide="check" aria-hidden="true"></i>Применить</button></div>
+  </div>
+  <div class="de-body">
+    <nav class="de-tools" aria-label="Инструменты">
+      <button type="button" data-tool="Выделение" aria-label="Выделение" aria-pressed="false"><i data-lucide="scan" aria-hidden="true"></i><span class="de-tool-name">Выделение</span><span class="de-key">M</span></button>
+      <button type="button" data-tool="Перемещение" aria-label="Перемещение" aria-pressed="false"><i data-lucide="move" aria-hidden="true"></i><span class="de-tool-name">Перемещение</span></button>
+      <button type="button" data-tool="Трансформация" aria-label="Трансформация" aria-pressed="true"><i data-lucide="scaling" aria-hidden="true"></i><span class="de-tool-name">Трансформация</span></button>
+      <div class="de-separator"></div>
+      <button type="button" data-tool="Кисть" aria-label="Кисть" aria-pressed="false"><i data-lucide="paintbrush" aria-hidden="true"></i><span class="de-tool-name">Кисть</span><span class="de-key">B</span></button>
+      <button type="button" data-tool="Ластик" aria-label="Ластик" aria-pressed="false"><i data-lucide="eraser" aria-hidden="true"></i><span class="de-tool-name">Ластик</span><span class="de-key">E</span></button>
+      <div class="de-separator"></div>
+      <button type="button" data-tool="Навигация" aria-label="Навигация по холсту" aria-pressed="false"><i data-lucide="hand" aria-hidden="true"></i><span class="de-tool-name">Холст</span><span class="de-key">H</span></button>
+    </nav>
+    <main class="de-workspace">
+      <div class="de-document"><span>Пейзаж · 1200 × 960</span><span>Холст</span></div>
+      <div class="de-art" id="de-art" aria-label="Пейзаж с выделенным солнцем; фрагмент можно перемещать и масштабировать">
+        <svg class="de-landscape" viewBox="0 0 600 484" preserveAspectRatio="none" role="img" aria-label="Графический пейзаж с холмами и морем">
+          <defs><pattern id="de-checker" width="12" height="12" patternUnits="userSpaceOnUse"><rect width="12" height="12" fill="#e2e2df"/><path d="M0 0H6V6H0ZM6 6H12V12H6Z" fill="#c6c9ca"/></pattern></defs>
+          <rect width="600" height="484" fill="#ebe4cf"/>
+          <circle id="de-hole" cx="330" cy="126" r="63" fill="url(#de-checker)"/>
+          <path d="M0 286Q80 180 175 254T340 241T600 280V484H0Z" fill="#9ba88f"/>
+          <path d="M0 340Q138 245 246 304T430 281T600 320V484H0Z" fill="#587c6e"/>
+          <path d="M0 405Q170 316 320 354T600 359V484H0Z" fill="#294f50"/>
+          <path d="M600 292Q360 312 366 360T245 484H600Z" fill="#a5c1b8"/>
+          <path d="M600 300Q388 323 386 356T270 484" fill="none" stroke="#d8dfc9" stroke-width="4"/>
+          <text x="32" y="433" fill="#f4efdd" font-family="system-ui,sans-serif" font-size="24" letter-spacing="4">ТИХИЙ БЕРЕГ</text>
+          <text x="34" y="457" fill="#c0d0c5" font-family="system-ui,sans-serif" font-size="11" letter-spacing="2">ЭТЮД  /  07</text>
+        </svg>
+        <div class="de-fragment" id="de-fragment"><div class="de-sun"></div><div class="de-box" id="de-box"><span class="de-rotation" aria-hidden="true"></span><button type="button" data-corner="nw" aria-label="Верхний левый угол"></button><button type="button" data-corner="ne" aria-label="Верхний правый угол"></button><button type="button" data-corner="sw" aria-label="Нижний левый угол"></button><button type="button" data-corner="se" aria-label="Нижний правый угол"></button></div></div>
+      </div>
+      <div class="de-hint" id="de-hint">Внутри рамки — сдвиг · За угол — масштаб</div>
+    </main>
+    <aside class="de-right" id="de-right">
+      <div class="de-panel-title">Слои <i data-lucide="layers" aria-hidden="true"></i></div>
+      <div class="de-layer de-layer-active" id="de-floating"><span class="de-thumb de-thumb-sun"></span><div class="de-layer-text"><span id="de-fragment-label">Фрагмент</span><div class="de-layer-sub" id="de-fragment-sub">Временный · трансформация</div></div></div>
+      <div class="de-destination" id="de-destination">↳ Применить в слой «Пейзаж»</div>
+      <label class="de-check" id="de-keep-label"><input type="checkbox" id="de-keep">Оставить отдельным слоем</label>
+      <div class="de-separator"></div>
+      <div class="de-layer"><i data-lucide="eye" aria-hidden="true"></i><span class="de-thumb de-thumb-hill"></span><div>Пейзаж<div class="de-layer-sub">Исходный слой</div></div></div>
+      <div class="de-layer"><i data-lucide="eye" aria-hidden="true"></i><span class="de-thumb"></span><span>Фон</span></div>
+      <details class="de-ai"><summary>AI · Обработка изображения</summary><p>Область обработки, модель и генерация — в отдельной панели.</p></details>
+    </aside>
+  </div>
+  <footer class="de-status"><span id="de-status-text" aria-live="polite">Редактируется фрагмент слоя «Пейзаж»</span><span>Масштаб просмотра · 42%</span></footer>
+</div>
+<script>
+(() => {
+  const root = document.getElementById('de-sketch');
+  const get = id => root.querySelector('#de-' + id);
+  const art = get('art'), fragment = get('fragment');
+  const state = { x:65, y:29, w:100, h:100, angle:0, active:true, tool:'Трансформация' };
+  const design = { placement:'top', labels:true };
+  function draw() {
+    fragment.style.left = state.x + '%'; fragment.style.top = state.y + '%';
+    fragment.style.width = 21 * state.w / 100 + '%'; fragment.style.height = 26.04 * state.h / 100 + '%';
+    fragment.style.transform = 'translate(-50%,-50%) rotate(' + state.angle + 'deg)';
+    get('width').value = Math.round(state.w); get('height').value = Math.round(state.h); get('angle').value = state.angle;
+    get('box').hidden = !state.active || !['Трансформация','Перемещение'].includes(state.tool);
+  }
+  ['width','height','angle'].forEach(id => get(id).addEventListener('input', () => {
+    if (!state.active) return;
+    const value = Number(get(id).value); if (!Number.isFinite(value)) return;
+    if (id === 'angle') state.angle = Math.max(-180,Math.min(180,value));
+    else { const v = Math.max(30,Math.min(180,value)); state[id === 'width' ? 'w' : 'h'] = v; if (get('lock').checked) state.w = state.h = v; }
+    draw();
+  }));
+  let drag = null;
+  fragment.addEventListener('pointerdown', e => {
+    if (!state.active || !['Трансформация','Перемещение'].includes(state.tool)) return;
+    e.preventDefault(); const rect = art.getBoundingClientRect();
+    drag = { px:e.clientX, py:e.clientY, x:state.x,y:state.y,w:state.w,h:state.h,rect,corner:e.target.dataset.corner };
+    fragment.setPointerCapture(e.pointerId);
+  });
+  fragment.addEventListener('pointermove', e => {
+    if (!drag) return;
+    const dx=(e.clientX-drag.px)/drag.rect.width*100, dy=(e.clientY-drag.py)/drag.rect.height*100;
+    if (drag.corner) {
+      const sx=drag.corner.includes('e')?1:-1, sy=drag.corner.includes('s')?1:-1;
+      state.w=Math.max(30,Math.min(180,drag.w+dx*sx/21*200));
+      state.h=get('lock').checked?state.w:Math.max(30,Math.min(180,drag.h+dy*sy/26.04*200));
+    } else { state.x=Math.max(5,Math.min(95,drag.x+dx)); state.y=Math.max(5,Math.min(95,drag.y+dy)); }
+    draw();
+  });
+  ['pointerup','pointercancel','lostpointercapture'].forEach(name => fragment.addEventListener(name, () => {drag=null;}));
+  root.querySelectorAll('[data-corner]').forEach(button => button.addEventListener('keydown', e => {
+    if (!state.active || !['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)) return;
+    e.preventDefault(); state.w=state.h=Math.max(30,Math.min(180,state.w+(['ArrowUp','ArrowRight'].includes(e.key)?5:-5))); draw();
+  }));
+  get('keep').addEventListener('change', () => { get('destination').textContent=get('keep').checked?'↳ Создать слой «Фрагмент»':'↳ Применить в слой «Пейзаж»'; });
+  function finish(cancel) {
+    if (!state.active) {
+      Object.assign(state,{x:65,y:29,w:100,h:100,angle:0,active:true,tool:'Трансформация'});
+      get('floating').hidden=false; get('destination').hidden=false; get('keep-label').hidden=false;
+      get('fragment-sub').textContent='Временный · трансформация';
+      get('apply').textContent='Применить'; get('cancel').disabled=false;
+      get('hint').textContent='Внутри рамки — сдвиг · За угол — масштаб';
+      get('status-text').textContent='Редактируется фрагмент слоя «Пейзаж»';
+      get('tool-title').textContent='Трансформация'; get('target').textContent='Пиксели выделения · Пейзаж';
+      get('fields').style.display='flex';
+      root.querySelectorAll('[data-tool]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.tool==='Трансформация')));
+    } else {
+      state.active=false;
+      if(cancel) Object.assign(state,{x:55,y:126/484*100,w:100,h:100,angle:0});
+      get('floating').hidden=cancel || !get('keep').checked;
+      get('fragment-sub').textContent='Растровый слой';
+      get('destination').hidden=true; get('keep-label').hidden=true;
+      get('apply').textContent='Повторить эскиз'; get('cancel').disabled=true;
+      get('hint').textContent=cancel?'Исходное положение восстановлено':'Операция завершена · Один шаг в истории';
+      get('status-text').textContent=cancel?'Трансформация отменена':get('keep').checked?'Фрагмент сохранён отдельным слоем':'Фрагмент встроен в слой «Пейзаж»';
+    }
+    ['width','height','angle','lock'].forEach(id=>get(id).disabled=!state.active); draw();
+  }
+  get('apply').addEventListener('click',()=>finish(false)); get('cancel').addEventListener('click',()=>finish(true));
+  root.querySelectorAll('[data-tool]').forEach(button=>button.addEventListener('click',()=>{
+    if(state.active && button.dataset.tool!=='Трансформация' && button.dataset.tool!=='Перемещение') {
+      get('status-text').textContent='Сначала примените или отмените трансформацию'; return;
+    }
+    state.tool=button.dataset.tool;
+    root.querySelectorAll('[data-tool]').forEach(b=>b.setAttribute('aria-pressed',String(b===button)));
+    get('tool-title').textContent=state.tool;
+    get('fields').style.display=['Трансформация','Перемещение'].includes(state.tool)?'flex':'none';
+    get('target').textContent=state.tool==='Выделение'?'Прямоугольник · Новое выделение':state.tool==='Кисть'?'Размер 40 px · Жёсткость 60%':state.tool==='Ластик'?'Размер 40 px · Непрозрачность 100%':state.tool==='Навигация'?'Перемещение вида холста':'Пиксели выделения · Пейзаж';
+    draw();
+  }));
+  function renderDesign() {
+    root.classList.toggle('de-side-options',design.placement==='side');
+    root.classList.toggle('de-icon-tools',!design.labels);
+    if(design.placement==='side') get('right').prepend(get('options'));
+    else root.insertBefore(get('options'),root.querySelector('.de-body'));
+  }
+  draw(); renderDesign();
+  if(globalThis.Tweak) {
+    const tweak=new Tweak({container:root,onChange:renderDesign});
+    tweak.addSelect(design,'placement',{label:'Параметры инструмента',options:[{label:'Над холстом',value:'top'},{label:'Справа',value:'side'}]});
+    tweak.addToggle(design,'labels',{label:'Подписи инструментов'});
+  }
+})();
+</script>

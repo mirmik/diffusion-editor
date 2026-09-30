@@ -78,6 +78,8 @@ from .canvas_status import CanvasStatusCoordinator
 from .editor_commands import EditorCommandCoordinator
 from .generation_panels import GenerationPanelsCoordinator
 from .native_canvas_controls import NativeCanvasControls
+from .native_transform_controls import NativeTransformControls
+from ..canvas.canvas_transform import CanvasTransformController
 from .native_generation_panels import NativeGenerationPanels
 from .dialogs import ApplicationDialogCoordinator
 from .native_dialogs import NativeApplicationDialogs
@@ -341,6 +343,8 @@ class NativeEditorRoot:
             handlers.update(command_handlers)
         self.canvas = None
         self.canvas_controls = None
+        self.transform_controller = None
+        self.transform_controls = None
         self.canvas_controls_coordinator = None
         self.canvas_status_coordinator = None
         self.canvas_edit_coordinator = None
@@ -510,6 +514,29 @@ class NativeEditorRoot:
                     )
                     self.canvas_controls_coordinator.bind_view(
                         self.canvas_controls)
+                    self.transform_controller = CanvasTransformController(
+                        application.layer_stack, application.document,
+                        self.canvas.controller,
+                        on_committed=self._on_canvas_history_changed,
+                    )
+                    self.transform_controls = NativeTransformControls(
+                        composition.document, self.transform_controller,
+                        begin=self.canvas_controls_coordinator.begin_transform,
+                        controls=self.canvas_controls,
+                    )
+                    # The entry point belongs to tools on the left; its options
+                    # live above the canvas throughout the multi-gesture session.
+                    self.canvas_controls.tools.add_preferred_child(
+                        self.transform_controls.launcher.widget)
+                    mount_transform = getattr(self.view, "mount_transform_controls", None)
+                    if mount_transform is not None:
+                        mount_transform(self.transform_controls)
+                    application.register_shutdown_resource(
+                        ShutdownPhase.VIEW_WORKERS, "native-transform-controls",
+                        self.transform_controls.close)
+                    application.register_shutdown_resource(
+                        ShutdownPhase.VIEW_WORKERS, "native-transform",
+                        self.transform_controller.close)
                     mount_controls(self.canvas_controls)
                     application.register_shutdown_resource(
                         ShutdownPhase.VIEW_WORKERS,
@@ -674,6 +701,10 @@ class NativeEditorRoot:
                 )
             composition.request_repaint()
         except Exception:
+            if self.transform_controls is not None:
+                self.transform_controls.close()
+            if self.transform_controller is not None:
+                self.transform_controller.close()
             if self.automation is not None:
                 self.automation.close()
             if self.canvas_edit_coordinator is not None:
