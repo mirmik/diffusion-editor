@@ -1,0 +1,387 @@
+{
+  "experiment_date": "2026-10-02",
+  "task_id": 2787,
+  "quality_followup_task_id": 2788,
+  "timing_note": "Observed CPU wall times; some runs overlapped; sample counts and resolutions vary.",
+  "runs": {
+    "01-draft": {
+      "grid_shape": [
+        265,
+        161,
+        319
+      ],
+      "voxel_metres": 0.0025,
+      "sampling_seconds": 3.656092457999989,
+      "extraction_and_smoothing_seconds": 0.3371705860000702,
+      "geometry_sha256": "e4222e40f113b8d5c663f65339e80be854c8f80a4c5f69db0c18edc8c4cbdac5",
+      "bounds_metres": [
+        [
+          -0.24803009629249573,
+          -0.11068135499954224,
+          0.05496155470609665
+        ],
+        [
+          0.24803009629249573,
+          0.09722933173179626,
+          0.7179831862449646
+        ]
+      ],
+      "topology": {
+        "vertices": 119290,
+        "faces": 119296,
+        "boundary_edges": 0,
+        "non_manifold_edges": 0,
+        "degenerate_faces": 0,
+        "components": [
+          119290
+        ],
+        "volume_m3": 0.018181459312209807
+      },
+      "parameters": {
+        "shoulder_width": 1.0,
+        "neck_extension": 0.0,
+        "jaw_width": 1.0,
+        "head_yaw_degrees": 0.0
+      },
+      "blender_version": "5.2.1 LTS",
+      "numpy_version": "2.3.4",
+      "samples": 24,
+      "resolution": 640,
+      "renders": {
+        "front": {
+          "seconds": 1.428338986999961,
+          "file": "front.png"
+        },
+        "side": {
+          "seconds": 1.2846100770000248,
+          "file": "side.png"
+        },
+        "back": {
+          "seconds": 1.327989443999968,
+          "file": "back.png"
+        },
+        "three-quarter": {
+          "seconds": 1.3413408510000409,
+          "file": "three-quarter.png"
+        }
+      },
+      "total_seconds": 9.648152872999958
+    },
+    "02-refined": {
+      "grid_shape": [
+        441,
+        269,
+        531
+      ],
+      "voxel_metres": 0.0015,
+      "sampling_seconds": 25.47952942300003,
+      "extraction_and_smoothing_seconds": 0.850134756999978,
+      "geometry_sha256": "a648f1e0f8154a720ab8a87c9bd0fb75307f403e1fb0901b29024f3f66f25c45",
+      "bounds_metres": [
+        [
+          -0.24178120493888855,
+          -0.09684333205223083,
+          0.05499264970421791
+        ],
+        [
+          0.24178120493888855,
+          0.09740646183490753,
+          0.6830032467842102
+        ]
+      ],
+      "topology": {
+        "vertices": 303906,
+        "faces": 303908,
+        "boundary_edges": 0,
+        "non_manifold_edges": 0,
+        "degenerate_faces": 0,
+        "components": [
+          303906
+        ],
+        "volume_m3": 0.018144195635388105
+      },
+      "parameters": {
+        "shoulder_width": 1.0,
+        "neck_extension": 0.0,
+        "jaw_width": 1.0,
+        "head_yaw_degrees": 0.0
+      },
+      "blender_version": "5.2.1 LTS",
+      "numpy_version": "2.3.4",
+      "samples": 40,
+      "resolution": 800,
+      "renders": {
+        "front": {
+          "seconds": 3.141485092000039,
+          "file": "front.png"
+        },
+        "side": {
+          "seconds": 2.930274094999959,
+          "file": "side.png"
+        },
+        "back": {
+          "seconds": 3.072542651000049,
+          "file": "back.png"
+        },
+        "three-quarter": {
+          "seconds": 3.0442652300000645,
+          "file": "three-quarter.png"
+        }
+      },
+      "total_seconds": 39.095812937999995
+    },
+    "03-final": {
+      "grid_shape": [
+        553,
+        335,
+        665
+      ],
+      "voxel_metres": 0.0012,
+      "sampling_seconds": 59.676590028999954,
+      "extraction_and_smoothing_seconds": 1.7924672110000301,
+      "removed_voxel_fragments": [
+        {
+          "vertices": 16,
+          "bounds_metres": [
+            [
+              -0.0012971169780939817,
+              -0.044480081647634506,
+              0.321564257144928
+            ],
+            [
+              0.0012341340770944953,
+              -0.04431091994047165,
+              0.3216566741466522
+            ]
+          ]
+        }
+      ],
+      "geometry_sha256": "453542bacce3becb04571c4db110b8af562fbfe39bf67852023c9197b7dcdc49",
+      "bounds_metres": [
+        [
+          -0.2417854368686676,
+          -0.09690320491790771,
+          0.05499369651079178
+        ],
+        [
+          0.24178546667099,
+          0.09740688651800156,
+          0.6830033659934998
+        ]
+      ],
+      "topology": {
+        "vertices": 476162,
+        "faces": 476160,
+        "euler_characteristic": 2,
+        "boundary_edges": 0,
+        "non_manifold_edges": 0,
+        "degenerate_faces": 0,
+        "components": [
+          476162
+        ],
+        "volume_m3": 0.01817819866104435
+      },
+      "parameters": {
+        "shoulder_width": 1.0,
+        "neck_extension": 0.0,
+        "jaw_width": 1.0,
+        "head_yaw_degrees": 0.0
+      },
+      "blender_version": "5.2.1 LTS",
+      "numpy_version": "2.3.4",
+      "samples": 48,
+      "resolution": 1000,
+      "renders": {
+        "front": {
+          "seconds": 5.610009612000113,
+          "file": "front.png"
+        },
+        "side": {
+          "seconds": 5.503518030999885,
+          "file": "side.png"
+        },
+        "back": {
+          "seconds": 5.8447363410000435,
+          "file": "back.png"
+        },
+        "three-quarter": {
+          "seconds": 5.533750772999838,
+          "file": "three-quarter.png"
+        }
+      },
+      "total_seconds": 84.86689041199998
+    },
+    "04-turned": {
+      "grid_shape": [
+        441,
+        269,
+        531
+      ],
+      "voxel_metres": 0.0015,
+      "sampling_seconds": 50.02998792900007,
+      "extraction_and_smoothing_seconds": 1.1679300779999267,
+      "geometry_sha256": "0c576a8733ffd2748417caedf1f19d6ac3c6dee07c2edf8865a76cce2e145d3b",
+      "bounds_metres": [
+        [
+          -0.2127675563097,
+          -0.08866935968399048,
+          0.05499237775802612
+        ],
+        [
+          0.2127675563097,
+          0.09740623831748962,
+          0.7080073356628418
+        ]
+      ],
+      "topology": {
+        "vertices": 289454,
+        "faces": 289452,
+        "euler_characteristic": 2,
+        "boundary_edges": 0,
+        "non_manifold_edges": 0,
+        "degenerate_faces": 0,
+        "components": [
+          289454
+        ],
+        "volume_m3": 0.016685622298368542
+      },
+      "parameters": {
+        "shoulder_width": 0.88,
+        "neck_extension": 0.025,
+        "jaw_width": 0.86,
+        "head_yaw_degrees": 25.0
+      },
+      "blender_version": "5.2.1 LTS",
+      "numpy_version": "2.3.4",
+      "samples": 40,
+      "resolution": 800,
+      "renders": {
+        "front": {
+          "seconds": 5.9527825939999275,
+          "file": "front.png"
+        },
+        "side": {
+          "seconds": 5.6850132080001,
+          "file": "side.png"
+        },
+        "back": {
+          "seconds": 5.8888965150001695,
+          "file": "back.png"
+        },
+        "three-quarter": {
+          "seconds": 5.8784837339999285,
+          "file": "three-quarter.png"
+        }
+      },
+      "total_seconds": 75.43521635499997
+    },
+    "05-replay-a": {
+      "grid_shape": [
+        265,
+        161,
+        319
+      ],
+      "voxel_metres": 0.0025,
+      "sampling_seconds": 6.406231317999982,
+      "extraction_and_smoothing_seconds": 0.587231365000207,
+      "removed_voxel_fragments": [],
+      "geometry_sha256": "602986137c35e8801186ecff1744c81a7ecf3644eefc58d14dbea7aaf04648db",
+      "bounds_metres": [
+        [
+          -0.24175821244716644,
+          -0.09667085111141205,
+          0.05496152862906456
+        ],
+        [
+          0.24175821244716644,
+          0.09740236401557922,
+          0.6829870939254761
+        ]
+      ],
+      "topology": {
+        "vertices": 109444,
+        "faces": 109442,
+        "euler_characteristic": 2,
+        "boundary_edges": 0,
+        "non_manifold_edges": 0,
+        "degenerate_faces": 0,
+        "components": [
+          109444
+        ],
+        "volume_m3": 0.018171552436695305
+      },
+      "parameters": {
+        "shoulder_width": 1.0,
+        "neck_extension": 0.0,
+        "jaw_width": 1.0,
+        "head_yaw_degrees": 0.0
+      },
+      "blender_version": "5.2.1 LTS",
+      "numpy_version": "2.3.4",
+      "samples": 32,
+      "resolution": 720,
+      "renders": {},
+      "source_sha256": {
+        "build.py": "dba0a105d0630f3785bff76d92a8941761328735ee411520b57b30edaa86b9dd",
+        "anatomy.py": "6ab1711598dcd0cf4a29a87dcc1cc9c4284a9c628f79b05a1cc156061ae9729c",
+        "sdf.py": "ad474ab03a01a966b60de50a984b0e3b5f1def56576836304ba7faed939c3e46",
+        "neutral.json": "9a66fd3cffd5cad63e1ca5edb9712a38f3466d0db9dc2180bde1b708fb6ed626"
+      },
+      "total_seconds": 7.365762904999883
+    },
+    "06-replay-b": {
+      "grid_shape": [
+        265,
+        161,
+        319
+      ],
+      "voxel_metres": 0.0025,
+      "sampling_seconds": 5.182914450999988,
+      "extraction_and_smoothing_seconds": 0.4182410850000906,
+      "removed_voxel_fragments": [],
+      "geometry_sha256": "602986137c35e8801186ecff1744c81a7ecf3644eefc58d14dbea7aaf04648db",
+      "bounds_metres": [
+        [
+          -0.24175821244716644,
+          -0.09667085111141205,
+          0.05496152862906456
+        ],
+        [
+          0.24175821244716644,
+          0.09740236401557922,
+          0.6829870939254761
+        ]
+      ],
+      "topology": {
+        "vertices": 109444,
+        "faces": 109442,
+        "euler_characteristic": 2,
+        "boundary_edges": 0,
+        "non_manifold_edges": 0,
+        "degenerate_faces": 0,
+        "components": [
+          109444
+        ],
+        "volume_m3": 0.018171552436695305
+      },
+      "parameters": {
+        "shoulder_width": 1.0,
+        "neck_extension": 0.0,
+        "jaw_width": 1.0,
+        "head_yaw_degrees": 0.0
+      },
+      "blender_version": "5.2.1 LTS",
+      "numpy_version": "2.3.4",
+      "samples": 32,
+      "resolution": 720,
+      "renders": {},
+      "source_sha256": {
+        "build.py": "dba0a105d0630f3785bff76d92a8941761328735ee411520b57b30edaa86b9dd",
+        "anatomy.py": "6ab1711598dcd0cf4a29a87dcc1cc9c4284a9c628f79b05a1cc156061ae9729c",
+        "sdf.py": "ad474ab03a01a966b60de50a984b0e3b5f1def56576836304ba7faed939c3e46",
+        "neutral.json": "9a66fd3cffd5cad63e1ca5edb9712a38f3466d0db9dc2180bde1b708fb6ed626"
+      },
+      "total_seconds": 5.887507156000083
+    }
+  }
+}

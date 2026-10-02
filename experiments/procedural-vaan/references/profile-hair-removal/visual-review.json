@@ -1,0 +1,13 @@
+{
+  "reviewer": "assistant visual inspection",
+  "status": "usable as supplementary scalp references",
+  "basis": "Hair removal on the original accepted right/left views, not new multiangle rotations of the bare front.",
+  "preserved": "Direction, framing, nose/lip/chin silhouette, neck and clothes remain close to the original profiles.",
+  "limitations": [
+    "Qwen changed the eyebrows substantially; do not use generated eyebrows or eye styling to fit the model.",
+    "Exposed scalp and formerly occluded ear regions are inferred; these are not ground-truth anatomy or calibrated projections.",
+    "Right and left originals are themselves generated pictures with small pose inconsistencies."
+  ],
+  "model_fitting": "Use original front and both original profiles for identity; use these edited profiles only to assess plausible vault, occiput and ear/scalp relationships.",
+  "user_feedback": "User considers the inferred scalp a little too large, but sufficiently good as a reference. Use it as a broad volumetric guide; keep scalp size constrained by the original front and original hair silhouettes."
+}

@@ -1,0 +1,29 @@
+{
+  "reviewer": "assistant visual inspection",
+  "source_front": "Body.png",
+  "crop": "source.json",
+  "orientation": "Both profiles, front-right three-quarter and rear view visually match the requested directions. Full scalp, ears, jaw and neck are visible.",
+  "consistency": "Broad cranial proportions agree across opposing profiles. Generated views are artistic hypotheses, not calibrated photographs or exact 3D ground truth.",
+  "findings": [
+    "Model revision-2 lacked cranial depth. The 205 mm preliminary revision-3 estimate overshot the hair-free profile references slightly.",
+    "Model ears sit about 13 mm too low relative to brows/eyes; raise ear volumes and cartilage together.",
+    "Support the maxilla/upper-lip region to reduce the deep notch below the nose.",
+    "Keep frontal width; fit rounded cranial vault and hair foundation together."
+  ],
+  "generation": {
+    "model_snapshot": "6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9",
+    "seed": 20261002,
+    "steps": 4,
+    "elapsed_seconds": 118.35153263599932,
+    "automatic_verifier": "not run; direct visual review used"
+  },
+  "images": {
+    "mv-eye-045.png": "560664d464552a422f21a39e499d16eb2711ca125f0c1e57217c61588e24e93a",
+    "mv-eye-270.png": "ca8e1271d1bf0ca0586e23698fbe71b28d725422e4dc165a991e529a21449cf5",
+    "mv-eye-090.png": "a9206d049d5c03c1aad31402ce5c49e2288fa6d9f8b201938b8445840a792e5d",
+    "mv-eye-180.png": "b01d0bf2e3406076b04241a7f6526ed35c6e7e8a50842d718ade5daa1ce7c253"
+  },
+  "status": "rejected_by_user",
+  "use_for_model_fitting": false,
+  "rejection_reason": "User found the regenerated rotations inconsistent with the original character. Replace them with hair removal on the pre-existing accepted profiles. Earlier provisional fitting findings below are superseded."
+}

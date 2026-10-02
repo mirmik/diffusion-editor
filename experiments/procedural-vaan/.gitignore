@@ -1,0 +1,4 @@
+output/
+references/**/*.png
+references/**/*.jpg
+references/**/*.log

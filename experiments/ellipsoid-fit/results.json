@@ -1,0 +1,34 @@
+{
+  "status": "experiment_ended_by_user_without_visual_acceptance",
+  "current": "output/head-06-sculpt/head.blend",
+  "comparison": "output/head-06-sculpt/before-after.jpg",
+  "reference_review": "output/head-06-sculpt/reference-review.jpg",
+  "baseline": "output/head-01/fitted.json",
+  "csg_not_used_for_sculpt": true,
+  "sculpt_verification": {
+    "reopened_scene_matches": true,
+    "vertices": 547298,
+    "faces": 547296,
+    "nonmanifold_edges": 0,
+    "degenerate_faces": 0,
+    "components": 1,
+    "euler": 2,
+    "volume": 0.28348883327510493,
+    "baseline_unchanged": true,
+    "sculpt_shape_key": 1,
+    "packed_references": 3,
+    "reference_hashes_match": true,
+    "source_hash_matches": true,
+    "limits": "Head surface topology verified; eye/brow patches are separate open surfaces. No global self-intersection proof or likeness claim."
+  },
+  "user_visual_acceptance": "rejected",
+  "remaining": [
+    "Facial likeness remains approximate.",
+    "Heavy eyelid margins, soft cheek and ear planes.",
+    "Short neck cut remains irregular.",
+    "Eye and brow patches are separate surfaces; no animation retopology, UV or rig."
+  ],
+  "prior_fit_visual_feedback": "User judged the fit/CSG result weak; clarified that ellipsoids were only intended as a modelling base.",
+  "final_feedback": "User compared the sculpt to a vampire awakening after a thousand years, then explicitly ended the experiments. No further modelling or artistic review is pending.",
+  "ended_on": "2026-10-03"
+}

@@ -1,0 +1,102 @@
+{
+  "profile": "qwen-image-edit-2511",
+  "front": "/home/mirmik/project/diffusion-editor/experiments/procedural-vaan/references/bare-head/front.png",
+  "back": null,
+  "reference_dir": null,
+  "seed": 20261002,
+  "initial_seed": 20261002,
+  "seed_attempt": 1,
+  "max_seed_attempts": 1,
+  "steps": 4,
+  "distance": "close-up",
+  "multiple_angles_enabled": true,
+  "fixed_prompt": null,
+  "lora_adapters": [
+    {
+      "stable_id": "lightning",
+      "label": "Lightning 4-step",
+      "source": "/home/mirmik/soft/ComfyUI/models/loras/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+      "weight": 1.0,
+      "enabled": true
+    },
+    {
+      "stable_id": "multiple-angles",
+      "label": "Multiple Angles",
+      "source": "/home/mirmik/soft/ComfyUI/models/loras/qwen-image-edit-2511-multiple-angles-lora.safetensors",
+      "weight": 1.0,
+      "enabled": true
+    }
+  ],
+  "attempt_elapsed_seconds": 109.95936975400036,
+  "elapsed_seconds": 118.35153263599932,
+  "rejected_batches": [],
+  "jobs": [
+    {
+      "elevation": "eye",
+      "elevation_degrees": 0,
+      "azimuth_degrees": 90,
+      "prompt": "<sks> right side view eye-level shot close-up",
+      "raw_output_size": [
+        1024,
+        1024
+      ],
+      "saved_output_size": [
+        1024,
+        1024
+      ],
+      "result_seed": 20261002,
+      "output": "/home/mirmik/project/diffusion-editor/experiments/procedural-vaan/references/bare-head/qwen/mv-eye-090.png"
+    },
+    {
+      "elevation": "eye",
+      "elevation_degrees": 0,
+      "azimuth_degrees": 270,
+      "prompt": "<sks> left side view eye-level shot close-up",
+      "raw_output_size": [
+        1024,
+        1024
+      ],
+      "saved_output_size": [
+        1024,
+        1024
+      ],
+      "result_seed": 20261002,
+      "output": "/home/mirmik/project/diffusion-editor/experiments/procedural-vaan/references/bare-head/qwen/mv-eye-270.png"
+    },
+    {
+      "elevation": "eye",
+      "elevation_degrees": 0,
+      "azimuth_degrees": 45,
+      "prompt": "<sks> front-right quarter view eye-level shot close-up",
+      "raw_output_size": [
+        1024,
+        1024
+      ],
+      "saved_output_size": [
+        1024,
+        1024
+      ],
+      "result_seed": 20261002,
+      "output": "/home/mirmik/project/diffusion-editor/experiments/procedural-vaan/references/bare-head/qwen/mv-eye-045.png"
+    },
+    {
+      "elevation": "eye",
+      "elevation_degrees": 0,
+      "azimuth_degrees": 180,
+      "prompt": "<sks> back view eye-level shot close-up",
+      "raw_output_size": [
+        1024,
+        1024
+      ],
+      "saved_output_size": [
+        1024,
+        1024
+      ],
+      "result_seed": 20261002,
+      "output": "/home/mirmik/project/diffusion-editor/experiments/procedural-vaan/references/bare-head/qwen/mv-eye-180.png"
+    }
+  ],
+  "batch_status": "rejected_by_user",
+  "use_for_model_fitting": false,
+  "visual_review": "../visual-review.json"
+}

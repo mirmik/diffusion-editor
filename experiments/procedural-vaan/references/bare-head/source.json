@@ -1,0 +1,20 @@
+{
+  "source": "/home/mirmik/Vaan/Body.png",
+  "source_sha256": "e06a748fa1705fdbfd310c72534f0b19a5eb0678ed9710b66121993bf630720e",
+  "crop_xyxy": [
+    440,
+    46,
+    724,
+    330
+  ],
+  "raw_crop_size": [
+    284,
+    284
+  ],
+  "qwen_input_size": [
+    1024,
+    1024
+  ],
+  "resize": "LANCZOS",
+  "purpose": "User-provided hair-free anatomy reference; cropped head/shoulders for Qwen camera rotation. Original front pixels preserved in Body.png and front-crop.png."
+}

@@ -1,0 +1,148 @@
+{
+  "experiment_date": "2026-10-02",
+  "task_id": 2789,
+  "visual_followup_task_id": 2790,
+  "build": {
+    "references": {
+      "front": {
+        "path": "/home/mirmik/Vaan/Front.png",
+        "sha256": "288135ed8654418d324876616458f68d140e8deaa61500346dfdfa2ae7e92e14"
+      },
+      "right": {
+        "path": "/home/mirmik/Vaan/views/mv-eye-090.png",
+        "sha256": "b3ee3fe622ebbd2257aaf0552b6ade7b2c18f492b3fc99cddfc42fb9c662cbd5"
+      },
+      "left": {
+        "path": "/home/mirmik/Vaan/views/mv-eye-270.png",
+        "sha256": "b87a85c50e4fb910cb8e1cfadf65487bd9a5df5b1fade5861cdae35476b1116f"
+      },
+      "back": {
+        "path": "/home/mirmik/Vaan/Back.png",
+        "sha256": "4fa7a1273c6369405c0587cebd79e797aa3e1cf85cf2c65ec3aed93e88e33f38"
+      }
+    },
+    "sdf": {
+      "body": {
+        "vertices": 155758,
+        "quads": 155756,
+        "voxel": 0.0025,
+        "seconds": 7.5643383199999334,
+        "non_manifold_edges": 0,
+        "euler_characteristic": 2,
+        "volume_m3": 0.02132229629167008,
+        "components": [
+          155758
+        ]
+      },
+      "head": {
+        "vertices": 209622,
+        "quads": 209620,
+        "voxel": 0.0008,
+        "seconds": 2.9478482900003655,
+        "non_manifold_edges": 0,
+        "euler_characteristic": 2,
+        "volume_m3": 0.002261740698431559,
+        "components": [
+          209622
+        ]
+      },
+      "pants": {
+        "vertices": 202684,
+        "quads": 202682,
+        "voxel": 0.0025,
+        "seconds": 1.4936884360004115,
+        "non_manifold_edges": 0,
+        "euler_characteristic": 2,
+        "volume_m3": 0.03689517800049926,
+        "components": [
+          202684
+        ]
+      }
+    },
+    "scene": {
+      "meshes": 136,
+      "curves": 111,
+      "vertices": 619752,
+      "faces": 617992,
+      "nonfinite_objects": [],
+      "empty_objects": [],
+      "out_of_bounds_objects": [],
+      "world_bounds_metres": [
+        [
+          -0.5463657379150391,
+          -0.19099999964237213,
+          0.012000000104308128
+        ],
+        [
+          0.5463657379150391,
+          0.13477306067943573,
+          1.8085931539535522
+        ]
+      ]
+    },
+    "blender": "5.2.1 LTS",
+    "renders": {
+      "front": {
+        "seconds": 4.875876073999734,
+        "file": "front.png"
+      },
+      "right": {
+        "seconds": 3.5435739660001673,
+        "file": "right.png"
+      },
+      "back": {
+        "seconds": 4.8366456150001795,
+        "file": "back.png"
+      },
+      "left": {
+        "seconds": 3.4767417389998627,
+        "file": "left.png"
+      },
+      "three-quarter": {
+        "seconds": 10.818247170999712,
+        "file": "three-quarter.png"
+      },
+      "face": {
+        "seconds": 6.943293694000204,
+        "file": "face.png"
+      },
+      "face-side": {
+        "seconds": 5.8040450660000715,
+        "file": "face-side.png"
+      }
+    },
+    "source_sha256": {
+      "build.py": "e92c4d867c135e197fe96c6475a0ec35deb510ed03bb0d63a1ef9a89a6c81e66",
+      "sdf.py": "ad474ab03a01a966b60de50a984b0e3b5f1def56576836304ba7faed939c3e46",
+      "preview.py": "fea33fcf4097bb3df6cf837ea3aee6b33190a04bb285b93ce503338d8c4735fa",
+      "geometry.py": "7f5d79e72d747d355908540f5fe26a8715ed46c3f1f4ef19e746f4b0343fda78",
+      "verify.py": "22a7bd6068266083a7a1accc0bf50cb1f24d508f12afcdea114a81da5183f47b",
+      "details.py": "ce17100ef1c51c13fb9957e4b69fb3ee0dbeef6f5edbcd1098860e3de5d1df74",
+      "anatomy.py": "08259f0ed7be8e0f6b784bfbba942d1375950938da12eb91c7aea7492e62891b"
+    },
+    "total_seconds": 54.2103161670002
+  },
+  "verification": {
+    "reopened_scene_matches": true,
+    "topology": {
+      "Skin | torso arms hands": {
+        "non_manifold_edges": 0,
+        "euler": 2,
+        "volume_local_m3": 0.02132229629167008
+      },
+      "Skin | head ears nose": {
+        "non_manifold_edges": 0,
+        "euler": 2,
+        "volume_local_m3": 0.002261740698431559
+      },
+      "Navy cargo trousers": {
+        "non_manifold_edges": 0,
+        "euler": 2,
+        "volume_local_m3": 0.03689517800049926
+      }
+    },
+    "vest_probe_count": 672,
+    "minimum_skin_clearance_m": 0.0005373489663921151,
+    "packed_reference_images": 4
+  }
+}

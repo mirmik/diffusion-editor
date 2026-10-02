@@ -1,0 +1,110 @@
+{
+  "operation": "remove hair from pre-existing profile references; preserve pose and identity",
+  "profile": "qwen-image-edit-2511",
+  "parameters": {
+    "prompt": "Remove the white scalp hair completely, making this same character bald. Reveal a natural smooth scalp and the ear where the hair was. Preserve the exact existing side-view camera angle and head pose. Preserve this exact character identity, face silhouette, nose, lips, chin, eyes, eyebrows, ear position, neck and expression. Keep the eyebrows. Preserve the blue clothing, background, framing, lighting, skin colour and illustration style. Do not rotate the head. Do not redesign or beautify the face. Change only the scalp hair.",
+    "negative_prompt": "",
+    "true_cfg_scale": 1.0,
+    "guidance_scale": 1.0,
+    "steps": 4,
+    "seed": 20261003,
+    "width": 0,
+    "height": 0,
+    "sigmas": "",
+    "max_sequence_length": 512,
+    "transformer_checkpoint": "/home/mirmik/soft/ComfyUI/models/diffusion_models/qwen_image_edit_2511_fp8mixed.safetensors",
+    "text_encoder_variant": "standard-scaled-fp8",
+    "text_encoder_checkpoint": "/home/mirmik/soft/ComfyUI/models/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors",
+    "model": "/home/mirmik/.cache/huggingface/hub/models--Qwen--Qwen-Image-Edit-2511/snapshots/6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9",
+    "revision": "",
+    "local_files_only": false,
+    "dtype": "bfloat16",
+    "device": "cuda",
+    "cpu_offload": true,
+    "vae_tiling": false,
+    "attention_kwargs": ""
+  },
+  "lora_adapters": [
+    {
+      "stable_id": "lightning",
+      "label": "Lightning 4-step",
+      "source": "/home/mirmik/soft/ComfyUI/models/loras/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+      "weight": 1.0,
+      "enabled": true
+    }
+  ],
+  "multiangle_lora": false,
+  "jobs": [
+    {
+      "name": "right",
+      "source": "/home/mirmik/Vaan/views/mv-eye-090.png",
+      "source_sha256": "b3ee3fe622ebbd2257aaf0552b6ade7b2c18f492b3fc99cddfc42fb9c662cbd5",
+      "crop_xyxy": [
+        478,
+        43,
+        725,
+        290
+      ],
+      "input": "right-input.png",
+      "output": "right-hairless.png",
+      "output_size": [
+        1024,
+        1024
+      ],
+      "output_sha256": "0fa5a42e556ff8b71912eee7df1e9f205dd11487c4b368c7969bc5672860a968"
+    },
+    {
+      "name": "left",
+      "source": "/home/mirmik/Vaan/views/mv-eye-270.png",
+      "source_sha256": "b87a85c50e4fb910cb8e1cfadf65487bd9a5df5b1fade5861cdae35476b1116f",
+      "crop_xyxy": [
+        452,
+        43,
+        699,
+        290
+      ],
+      "input": "left-input.png",
+      "output": "left-hairless.png",
+      "output_size": [
+        1024,
+        1024
+      ],
+      "output_sha256": "ee579ba9a7a7c1fbf7669e1ced9ee768b18755f3e779d438bd6250abf525cb8a"
+    }
+  ],
+  "status": "reviewed_supplementary_reference",
+  "loaded": {
+    "loaded": true,
+    "profile_id": "qwen-image-edit-2511",
+    "profile_title": "Qwen Image Edit 2511",
+    "device": "cuda",
+    "dtype": "bfloat16",
+    "pipeline": "QwenImageEditPlusPipeline",
+    "component_mode": "local-scaled-fp8",
+    "active_lora_adapters": [
+      "image_edit_0_lightning"
+    ],
+    "active_lora_weights": [
+      1.0
+    ],
+    "model_identity": {
+      "text_encoder": {
+        "source": "/home/mirmik/soft/ComfyUI/models/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors",
+        "variant": "standard-scaled-fp8"
+      },
+      "provider": "local-directory",
+      "repository": "6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9",
+      "revision": null,
+      "content_hash": null,
+      "local_override": "/home/mirmik/.cache/huggingface/hub/models--Qwen--Qwen-Image-Edit-2511/snapshots/6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9",
+      "status": "floating",
+      "warning": "Model identity local-directory/6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9 is floating because no confirmed content hash is available"
+    },
+    "warnings": [
+      "Model identity local-directory/6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9 is floating because no confirmed content hash is available"
+    ]
+  },
+  "elapsed_seconds": 89.01200966700162,
+  "visual_review": "visual-review.json",
+  "user_acceptance": "Sufficiently good as a reference; inferred scalp considered slightly too large."
+}

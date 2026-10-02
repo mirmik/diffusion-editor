@@ -1,0 +1,179 @@
+{
+  "experiment_date": "2026-10-02",
+  "revision": 2,
+  "task_id": 2790,
+  "previous_result": "results-v1.json",
+  "artifact_directory": "output/revision-2",
+  "build": {
+    "revision": 2,
+    "references": {
+      "front": {
+        "path": "/home/mirmik/Vaan/Front.png",
+        "sha256": "288135ed8654418d324876616458f68d140e8deaa61500346dfdfa2ae7e92e14"
+      },
+      "right": {
+        "path": "/home/mirmik/Vaan/views/mv-eye-090.png",
+        "sha256": "b3ee3fe622ebbd2257aaf0552b6ade7b2c18f492b3fc99cddfc42fb9c662cbd5"
+      },
+      "left": {
+        "path": "/home/mirmik/Vaan/views/mv-eye-270.png",
+        "sha256": "b87a85c50e4fb910cb8e1cfadf65487bd9a5df5b1fade5861cdae35476b1116f"
+      },
+      "back": {
+        "path": "/home/mirmik/Vaan/Back.png",
+        "sha256": "4fa7a1273c6369405c0587cebd79e797aa3e1cf85cf2c65ec3aed93e88e33f38"
+      }
+    },
+    "sdf": {
+      "body": {
+        "vertices": 155654,
+        "quads": 155652,
+        "voxel": 0.0025,
+        "seconds": 7.027639493000606,
+        "non_manifold_edges": 0,
+        "euler_characteristic": 2,
+        "volume_m3": 0.021312865666126196,
+        "components": [
+          155654
+        ]
+      },
+      "head": {
+        "vertices": 237262,
+        "quads": 237260,
+        "voxel": 0.0008,
+        "seconds": 2.051359644000513,
+        "non_manifold_edges": 0,
+        "euler_characteristic": 2,
+        "volume_m3": 0.0026512604657876163,
+        "components": [
+          237262
+        ]
+      },
+      "pants": {
+        "vertices": 215810,
+        "quads": 215808,
+        "voxel": 0.0025,
+        "seconds": 4.462183883000762,
+        "non_manifold_edges": 0,
+        "euler_characteristic": 2,
+        "volume_m3": 0.0422326766017917,
+        "components": [
+          215810
+        ]
+      }
+    },
+    "scene": {
+      "meshes": 223,
+      "curves": 122,
+      "curve_splines": 649,
+      "curve_points": 12294,
+      "vertices": 805176,
+      "faces": 800450,
+      "nonfinite_objects": [],
+      "empty_objects": [],
+      "out_of_bounds_objects": [],
+      "world_bounds_metres": [
+        [
+          -0.5463657379150391,
+          -0.19099999964237213,
+          0.012000000104308128
+        ],
+        [
+          0.5463657379150391,
+          0.13444893062114716,
+          1.8390014171600342
+        ]
+      ]
+    },
+    "blender": "5.2.1 LTS",
+    "renders": {
+      "front": {
+        "seconds": 8.32116678300008,
+        "file": "front.png"
+      },
+      "right": {
+        "seconds": 5.73813494299975,
+        "file": "right.png"
+      },
+      "back": {
+        "seconds": 8.282587965999483,
+        "file": "back.png"
+      },
+      "left": {
+        "seconds": 5.731674805000694,
+        "file": "left.png"
+      },
+      "three-quarter": {
+        "seconds": 18.553790023000147,
+        "file": "three-quarter.png"
+      },
+      "face": {
+        "seconds": 11.18101744500018,
+        "file": "face.png"
+      },
+      "face-side": {
+        "seconds": 9.641799598999569,
+        "file": "face-side.png"
+      },
+      "face-left": {
+        "seconds": 9.153113223000219,
+        "file": "face-left.png"
+      },
+      "face-three-quarter": {
+        "seconds": 11.316729447999933,
+        "file": "face-three-quarter.png"
+      },
+      "head-back": {
+        "seconds": 11.026474061000044,
+        "file": "head-back.png"
+      }
+    },
+    "source_sha256": {
+      "build.py": "0a040640a0b550ac6b25a5df188cd1422aff3d7bc92665d9eaa1cb8aa4cea52d",
+      "sdf.py": "ad474ab03a01a966b60de50a984b0e3b5f1def56576836304ba7faed939c3e46",
+      "preview.py": "22f7a467662c3cc43e5451865f7c85bfd8079bee98b9d346191ef7db2f24e5ff",
+      "geometry.py": "3c290747ed8a3f5db9f6172acb0e919f65562a8e56ae11d17aea27dd46424a19",
+      "portrait.py": "1c5a81c8a6469fe2dd17841f6db584df8d672b33464a51fe377d3cbb32ba5ad7",
+      "verify.py": "14869fc5871279b20ec3973128bc74790f91b7b605b3c1dfeebd443f4004219d",
+      "details.py": "caa9cea3eb274a5aef07a8846dea1cab8a85df65012a98a54c82f102dbfc4512",
+      "anatomy.py": "368cdf624b67980cadcbbb8e7ecca23eab779414672f18d5678ea3082900810c"
+    },
+    "total_seconds": 116.96273584200026
+  },
+  "verification": {
+    "reopened_scene_matches": true,
+    "topology": {
+      "Skin | torso arms hands": {
+        "non_manifold_edges": 0,
+        "euler": 2,
+        "volume_local_m3": 0.021312865666126196
+      },
+      "Skin | head ears nose": {
+        "non_manifold_edges": 0,
+        "euler": 2,
+        "volume_local_m3": 0.0026512604657876163
+      },
+      "Navy cargo trousers": {
+        "non_manifold_edges": 0,
+        "euler": 2,
+        "volume_local_m3": 0.0422326766017917
+      }
+    },
+    "vest_probe_count": 672,
+    "minimum_skin_clearance_m": 0.0005373489663921151,
+    "eye_aperture_probe_count": 306,
+    "minimum_eye_aperture_clearance_m": 0.0008314521864037179,
+    "packed_reference_images": 4
+  },
+  "review": {
+    "same_camera_baseline": "output/final",
+    "reviewed_sheets": [
+      "likeness-review.jpg",
+      "turnaround.jpg",
+      "portrait-turnaround.jpg",
+      "before-after-body.jpg"
+    ],
+    "user_visual_acceptance": "pending"
+  },
+  "blend_bytes": 29412055
+}
