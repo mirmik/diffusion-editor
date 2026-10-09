@@ -39,7 +39,9 @@ from ..generation.image_edit_profiles import (
     resolve_qwen_text_encoder_source,
 )
 from ..generation.text_to_image_profiles import text_to_image_profile
-from ..generation.qwen_image21_config import QWEN_IMAGE_21_PROVIDER
+from ..generation.qwen_image21_config import (
+    QWEN_IMAGE_21_PROVIDER, QWEN_IMAGE_21_TURBO8_PROFILE_ID,
+)
 
 
 from ..sdxl_sampling import guess_prediction_type, resolve_prediction_type
@@ -432,6 +434,8 @@ class RealMlBackend:
         from .qwen_image21_process import QwenImage21Pipeline
 
         parameters = profile.normalize(data.get("parameters"))
+        parameters["sampling_mode"] = (
+            "turbo8" if profile.stable_id == QWEN_IMAGE_21_TURBO8_PROFILE_ID else "base")
         adapters = tuple(a.to_dict() for a in profile.normalize_lora_adapters(
             data.get("lora_adapters")))
         identity, warnings = resolve_local_model_identity(

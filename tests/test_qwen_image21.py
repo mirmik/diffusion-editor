@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import sys
 from types import SimpleNamespace
 
@@ -17,6 +18,59 @@ from diffusion_editor.workers.ml_backend import RealMlBackend
 from diffusion_editor.workers.qwen_image21_process import QwenImage21Pipeline
 
 PROFILE = "qwen-image-2.1"
+TURBO8 = "qwen-image-2.1-turbo8"
+
+
+@pytest.mark.parametrize("get_profile", [text_to_image_profile, image_edit_profile])
+def test_turbo8_profile_has_fixed_sampling_and_enabled_adapter(get_profile):
+    profile = get_profile(TURBO8)
+    assert profile.supports_alpha
+    p = profile.normalize({"steps": 40, "true_cfg_scale": 4})
+    assert p["steps"] == 8 and p["true_cfg_scale"] == 1
+    adapter, = profile.normalize_lora_adapters(None)
+    assert adapter.stable_id == "turbo8" and adapter.enabled and adapter.weight == 1
+    assert adapter.source.endswith(".safetensors")
+    assert get_profile(PROFILE).defaults()["steps"] == 40
+
+
+def test_turbo8_settings_and_adapters_survive_profile_switch():
+    tool = TextToImageTool()
+    tool.set_profile(TURBO8)
+    tool.set_parameter("prompt", "transparent vase")
+    assert tool.lora_adapters[0].stable_id == "turbo8"
+    tool.set_profile(PROFILE)
+    assert tool.parameters["steps"] == 40 and not tool.lora_adapters
+    tool.set_profile(TURBO8)
+    assert tool.parameters["steps"] == 8
+    assert tool.parameters["prompt"] == "transparent vase"
+    assert tool.lora_adapters[0].enabled
+
+
+def test_turbo8_sampling_repatches_each_resolution_without_mutating_base(monkeypatch):
+    from diffusion_editor.workers.qwen_image21_runner import Runtime
+
+    calls = []
+
+    class ModelSamplingFlux:
+        def patch(self, model, **kwargs):
+            calls.append((model, kwargs))
+            return (object(),)
+
+    monkeypatch.setitem(sys.modules, "comfy_extras.nodes_model_advanced",
+                        SimpleNamespace(ModelSamplingFlux=ModelSamplingFlux))
+    runtime = Runtime.__new__(Runtime)
+    runtime.model = object()
+    runtime.sampling_mode = "turbo8"
+    a = runtime.sampling_model(512, 768)
+    b = runtime.sampling_model(2048, 1024)
+    assert a is not b and a is not runtime.model
+    assert calls == [(runtime.model, dict(max_shift=0.6935, base_shift=0.5,
+                                         width=512, height=768)),
+                     (runtime.model, dict(max_shift=0.6935, base_shift=0.5,
+                                         width=2048, height=1024))]
+    runtime.sampling_mode = "base"
+    assert runtime.sampling_model(512, 512) is runtime.model
+    assert len(calls) == 2
 
 
 def test_new_profile_keeps_independent_settings_and_load_keys():
@@ -68,6 +122,17 @@ def _fake_runtime(tmp_path, body):
     return p, runner
 
 
+@pytest.mark.parametrize("adapters", [[], [{"stable_id": "turbo8", "source": "x",
+                                         "enabled": False, "weight": 1}],
+                                    [{"stable_id": "turbo8", "source": "x",
+                                      "enabled": True, "weight": 0.5}]])
+def test_turbo8_refuses_missing_or_disabled_distillation_adapter(tmp_path, adapters):
+    p, runner = _fake_runtime(tmp_path, "raise AssertionError('must not start')")
+    p["sampling_mode"] = "turbo8"
+    with pytest.raises(ValueError, match="Turbo8 requires its enabled LoRA"):
+        QwenImage21Pipeline(p, adapters, runner_path=runner)
+
+
 def test_real_child_ipc_preserves_rgba_and_closes(tmp_path):
     p, runner = _fake_runtime(tmp_path, '''
 import json, sys
@@ -98,6 +163,54 @@ for line in sys.stdin:
     pipe.close()
 
 
+def test_child_progress_reaches_terminal_before_response(tmp_path, monkeypatch):
+    p, runner = _fake_runtime(tmp_path, r'''
+import json, os, pathlib, sys, time
+request = json.loads(sys.stdin.readline())
+os.write(2, '\rШаг 1/2'.encode('utf-8'))
+ack = pathlib.Path(request['parameters']['runtime_root']) / 'progress-seen'
+deadline = time.monotonic() + 3
+while not ack.exists() and time.monotonic() < deadline:
+    time.sleep(0.01)
+assert ack.exists(), 'progress was buffered until the response'
+os.write(2, '\rШаг 2/2\n'.encode('utf-8'))
+print(json.dumps({'ok': True, 'result': {}}), flush=True)
+sys.stdin.read()
+''')
+
+    class Terminal(io.StringIO):
+        def flush(self):
+            if '\rШаг 1/2' in self.getvalue():
+                (tmp_path / 'progress-seen').touch()
+
+    terminal = Terminal()
+    monkeypatch.setattr(sys, 'stderr', terminal)
+    pipe = QwenImage21Pipeline(p, runner_path=runner, timeout=5)
+    try:
+        pipe._stop_process()
+        expected = '\rШаг 1/2\rШаг 2/2\n'
+        assert terminal.getvalue() == expected
+        assert (pipe._directory / 'runtime.log').read_bytes() == expected.encode('utf-8')
+        assert not pipe._stderr_thread.is_alive()
+    finally:
+        pipe.close()
+
+
+def test_child_error_keeps_diagnostic_tail_with_closed_terminal(tmp_path, monkeypatch):
+    p, runner = _fake_runtime(tmp_path, r'''
+import json, os, sys
+sys.stdin.readline()
+os.write(2, b'diagnostic detail without a newline')
+print(json.dumps({'ok': False, 'error': 'bad checkpoint'}), flush=True)
+sys.stdin.read()
+''')
+    terminal = io.StringIO()
+    terminal.close()
+    monkeypatch.setattr(sys, 'stderr', terminal)
+    with pytest.raises(RuntimeError, match='bad checkpoint\ndiagnostic detail without a newline'):
+        QwenImage21Pipeline(p, runner_path=runner, timeout=5)
+
+
 @pytest.mark.parametrize("body,message", [
     ("import json\nprint(json.dumps({'ok':False,'error':'bad checkpoint'}),flush=True)\n", "bad checkpoint"),
     ("pass\n", "exited unexpectedly"),
@@ -120,7 +233,8 @@ def test_child_errors_are_reported_and_reaped(tmp_path, monkeypatch, body, messa
     assert children and children[0].poll() is not None
 
 
-def test_backend_routes_new_model_sizes_alpha_and_lifecycle(tmp_path, monkeypatch):
+@pytest.mark.parametrize("profile_id", [PROFILE, TURBO8])
+def test_backend_routes_new_model_sizes_alpha_and_lifecycle(tmp_path, monkeypatch, profile_id):
     import diffusion_editor.workers.qwen_image21_process as module
     p, _ = _fake_runtime(tmp_path, "")
     events = []
@@ -131,6 +245,7 @@ def test_backend_routes_new_model_sizes_alpha_and_lifecycle(tmp_path, monkeypatc
 
         def __init__(self, parameters, adapters):
             self.parameters = parameters
+            assert parameters["sampling_mode"] == ("turbo8" if profile_id == TURBO8 else "base")
             events.append("load")
 
         def generate(self, parameters, seed, width, height, **kwargs):
@@ -148,7 +263,7 @@ def test_backend_routes_new_model_sizes_alpha_and_lifecycle(tmp_path, monkeypatc
     monkeypatch.setitem(sys.modules, "torch", SimpleNamespace())
     backend = RealMlBackend()
     p.update(seed=123)
-    data = dict(profile_id=PROFILE, parameters=p, lora_adapters=[])
+    data = dict(profile_id=profile_id, parameters=p)
     backend.load_text_to_image(data)
     result, seed, provenance = backend.text_to_image(dict(data, width=33, height=65))
     assert result.size == (33, 65) and result.mode == "RGBA" and seed == 123

@@ -6,6 +6,7 @@ editor or the shared Diffusers worker; Comfy owns its process-global settings.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -63,6 +64,8 @@ def import_runtime(parameters):
 class Runtime:
     def __init__(self, parameters, adapters):
         self.info = import_runtime(parameters)
+        self.sampling_mode = parameters.get("sampling_mode", "base")
+        self.info["sampling_mode"] = self.sampling_mode
         import torch
         import comfy.sd as sd
         import comfy.utils
@@ -87,10 +90,48 @@ class Runtime:
         for adapter in adapters:
             if adapter["enabled"] and adapter["source"]:
                 weights = comfy.utils.load_torch_file(adapter["source"], safe_load=True)
+                if self.sampling_mode == "turbo8" and adapter["stable_id"] == "turbo8":
+                    self._load_turbo8(adapter, weights)
+                    continue
                 self.model, self.clip = sd.load_lora_for_models(
                     self.model, self.clip, weights,
                     float(adapter["weight"]), float(adapter["weight"]),
                 )
+
+    def _load_turbo8(self, adapter, weights):
+        import comfy.lora
+        import comfy.lora_convert
+
+        # The published adapter affects only the transformer. Reject partial
+        # mappings rather than silently sampling eight steps with missing layers.
+        key_map = comfy.lora.model_lora_keys_unet(self.model.model, {})
+        patches = comfy.lora.load_lora(comfy.lora_convert.convert_lora(weights), key_map)
+        model = self.model.clone()
+        applied = set(model.add_patches(patches, 1.0))
+        if len(patches) != 227 or applied != set(patches):
+            raise ValueError(f"Turbo8 LoRA mapping incomplete: {len(applied)}/227 layers")
+        self.model = model
+        digest = hashlib.sha256()
+        with open(adapter["source"], "rb") as stream:
+            for chunk in iter(lambda: stream.read(4 * 1024 * 1024), b""):
+                digest.update(chunk)
+        self.info["turbo8"] = {
+            "source": adapter["source"], "sha256": digest.hexdigest(),
+            "mapped_layers": len(applied), "strength": 1.0,
+            "max_shift": 0.6935, "base_shift": 0.5,
+        }
+        print(f"Turbo8: mapped {len(applied)}/227 LoRA layers", file=sys.stderr, flush=True)
+
+    def sampling_model(self, width, height):
+        if self.sampling_mode == "turbo8":
+            from comfy_extras.nodes_model_advanced import ModelSamplingFlux
+
+            # Recompute for every output size, without altering the loaded model.
+            return ModelSamplingFlux().patch(
+                self.model, max_shift=0.6935, base_shift=0.5,
+                width=width, height=height,
+            )[0]
+        return self.model
 
     def generate(self, request):
         import numpy as np
@@ -101,6 +142,9 @@ class Runtime:
         from comfy_extras.nodes_qwen import TextEncodeQwenImage21
 
         p = request["parameters"]
+        if self.sampling_mode == "turbo8" and (
+                int(p["steps"]) != 8 or float(p["true_cfg_scale"]) != 1.0):
+            raise ValueError("Turbo8 requires 8 steps and CFG 1.0")
         width, height = int(request["width"]), int(request["height"])
         if width < 32 or height < 32 or width % 32 or height % 32:
             raise ValueError("Qwen Image 2.1 inference dimensions must be positive multiples of 32")
@@ -125,10 +169,11 @@ class Runtime:
             positive, negative = encoded[0], encoded[1]
             latent = {"samples": torch.zeros(
                 [1, 64, height // 16, width // 16], device=mm.intermediate_device())}
-            # Match the official Comfy workflow: native sampling configuration,
-            # Euler/simple, CFG 1.0. Do not reuse the old 2511 Lightning schedule.
+            # Turbo8 needs its resolution-dependent shift; base uses the
+            # checkpoint's native configuration. Both use Euler/simple.
+            model = self.sampling_model(width, height)
             sampled = nodes.common_ksampler(
-                self.model, int(request["seed"]), int(p["steps"]),
+                model, int(request["seed"]), int(p["steps"]),
                 float(p["true_cfg_scale"]), "euler", "simple",
                 positive, negative, latent,
             )[0]["samples"]
@@ -145,7 +190,15 @@ class Runtime:
                 background = Image.new("RGBA", image.size, "white")
                 image = Image.alpha_composite(background, image).convert("RGB")
             image.save(request["output"], format="PNG")
-        return {"width": image.width, "height": image.height, "mode": image.mode}
+        return {
+            "width": image.width, "height": image.height, "mode": image.mode,
+            "sampling": {
+                "mode": self.sampling_mode, "sampler": "euler", "scheduler": "simple",
+                "steps": int(p["steps"]), "cfg": float(p["true_cfg_scale"]),
+                "width": width, "height": height,
+                "shift": float(model.get_model_object("model_sampling").shift),
+            },
+        }
 
 
 def main():

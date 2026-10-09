@@ -149,7 +149,7 @@ class NativeGenerationPanels:
                 text_to_image.profile_description)
             self.text_to_image_output_size.text = text_to_image.output_size
             active_parameters = {
-                parameter.stable_id
+                parameter.stable_id: parameter
                 for parameter in text_to_image.parameters
             }
             values = text_to_image.parameter_values or {}
@@ -159,14 +159,18 @@ class NativeGenerationPanels:
                 widget.widget.enabled = supported
                 if not supported:
                     continue
-                spec = self._text_to_image_specs[parameter_id]
+                spec = active_parameters[parameter_id]
                 value = values.get(parameter_id, spec.default)
                 if parameter_id == "seed":
                     widget.text = str(value)
                 elif spec.kind in {ParameterKind.TEXT, ParameterKind.STRING}:
                     widget.text = str(value)
                 elif spec.kind in {ParameterKind.INTEGER, ParameterKind.FLOAT}:
+                    widget.set_range(float(spec.minimum), float(spec.maximum))
+                    widget.set_step(float(spec.step))
+                    widget.set_decimals(spec.decimals)
                     widget.value = float(value)
+                    widget.widget.enabled = spec.minimum != spec.maximum
                 elif spec.kind == ParameterKind.BOOLEAN:
                     widget.checked = bool(value)
                 elif spec.kind == ParameterKind.CHOICE:
@@ -282,7 +286,7 @@ class NativeGenerationPanels:
             )
             self.image_edit_reference_label.text = instruct.reference_label
             active_parameters = {
-                parameter.stable_id for parameter in instruct.parameters}
+                parameter.stable_id: parameter for parameter in instruct.parameters}
             values = instruct.parameter_values or {}
             instruct_busy = instruct.phase in {
                 GenerationPhase.LOADING,
@@ -302,14 +306,18 @@ class NativeGenerationPanels:
                 widget.widget.enabled = supported
                 if not supported:
                     continue
-                spec = self._image_edit_specs[parameter_id]
+                spec = active_parameters[parameter_id]
                 value = values.get(parameter_id, spec.default)
                 if parameter_id == "seed":
                     widget.text = str(value)
                 elif spec.kind in {ParameterKind.TEXT, ParameterKind.STRING}:
                     widget.text = str(value)
                 elif spec.kind in {ParameterKind.INTEGER, ParameterKind.FLOAT}:
+                    widget.set_range(float(spec.minimum), float(spec.maximum))
+                    widget.set_step(float(spec.step))
+                    widget.set_decimals(spec.decimals)
                     widget.value = float(value)
+                    widget.widget.enabled = spec.minimum != spec.maximum
                 elif spec.kind == ParameterKind.BOOLEAN:
                     widget.checked = bool(value)
                 elif spec.kind == ParameterKind.CHOICE:

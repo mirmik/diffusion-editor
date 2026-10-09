@@ -1,11 +1,13 @@
 """Persistent, explicitly owned child process for Qwen Image 2.1."""
 from __future__ import annotations
 
+import codecs
 import json
 import os
 from pathlib import Path
 from queue import Empty, Queue
 import subprocess
+import sys
 import tempfile
 import threading
 
@@ -19,6 +21,7 @@ class QwenImage21Pipeline:
         self._process = None
         self._temporary = None
         self._log = None
+        self._stderr_thread = None
         self._timeout = timeout
         self._responses = Queue()
         self.parameters = dict(parameters)
@@ -30,6 +33,11 @@ class QwenImage21Pipeline:
             if not valid:
                 raise FileNotFoundError(f"Qwen Image 2.1 {key} not found: {path}")
         self.adapters = [dict(adapter) for adapter in adapters]
+        if self.parameters.get("sampling_mode") == "turbo8":
+            turbo = [a for a in self.adapters if a.get("stable_id") == "turbo8"]
+            if (len(turbo) != 1 or not turbo[0]["enabled"] or not turbo[0]["source"]
+                    or float(turbo[0]["weight"]) != 1.0):
+                raise ValueError("Turbo8 requires its enabled LoRA at strength 1.0")
         for adapter in self.adapters:
             if adapter["enabled"] and adapter["source"]:
                 path = Path(adapter["source"]).expanduser().absolute()
@@ -39,7 +47,7 @@ class QwenImage21Pipeline:
         try:
             self._temporary = tempfile.TemporaryDirectory(prefix="diffusion-editor-qwen21-")
             self._directory = Path(self._temporary.name)
-            self._log = (self._directory / "runtime.log").open("w+b")
+            self._log = (self._directory / "runtime.log").open("wb", buffering=0)
             env = os.environ.copy()
             # The outer worker's Python paths must not override the dedicated env.
             env.pop("PYTHONPATH", None)
@@ -48,11 +56,16 @@ class QwenImage21Pipeline:
             self._process = subprocess.Popen(
                 [self.parameters["runtime_python"], "-u",
                  str(runner_path or Path(__file__).with_name("qwen_image21_runner.py"))],
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self._log,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, encoding="utf-8", env=env, cwd=self._directory,
             )
             threading.Thread(target=self._read_responses,
                              args=(self._process.stdout, self._responses), daemon=True).start()
+            self._stderr_thread = threading.Thread(
+                target=self._relay_stderr,
+                args=(self._process.stderr, self._log, sys.stderr), daemon=True,
+            )
+            self._stderr_thread.start()
             self.runtime_info = self._request({
                 "operation": "check" if check_only else "load",
                 "parameters": self.parameters, "adapters": self.adapters,
@@ -60,6 +73,26 @@ class QwenImage21Pipeline:
         except BaseException:
             self.close()
             raise
+
+    @staticmethod
+    def _relay_stderr(stream, log, terminal):
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        while True:
+            # tqdm updates have carriage returns, not newlines. Read bytes to
+            # forward each update immediately and preserve split UTF-8 characters.
+            chunk = os.read(stream.fileno(), 4096)
+            if chunk:
+                log.write(chunk)
+            text = decoder.decode(chunk, final=not chunk)
+            if terminal is not None and text:
+                try:
+                    terminal.write(text)
+                    terminal.flush()
+                except (OSError, ValueError, UnicodeError):
+                    # A closed/unavailable terminal must not block the runtime.
+                    terminal = None
+            if not chunk:
+                break
 
     @staticmethod
     def _read_responses(stream, responses):
@@ -85,7 +118,7 @@ class QwenImage21Pipeline:
             return response["result"]
         except (Empty, OSError, ValueError, RuntimeError) as exc:
             # Include a bounded diagnostic tail, then dispose of broken state.
-            self._log.flush()
+            self._stop_process()
             with (self._directory / "runtime.log").open("rb") as log:
                 log.seek(max(0, log.seek(0, 2) - 6000))
                 tail = log.read().decode("utf-8", errors="replace")
@@ -104,14 +137,16 @@ class QwenImage21Pipeline:
                 images.append(str(path))
         output = self._directory / "result.png"
         output.unlink(missing_ok=True)
-        self._request({
+        response = self._request({
             "operation": "generate", "parameters": parameters, "seed": seed,
             "width": width, "height": height, "images": images, "output": str(output),
         })
+        if "sampling" in response:
+            self.runtime_info["sampling"] = response["sampling"]
         with Image.open(output) as result:
             return result.copy()
 
-    def close(self):
+    def _stop_process(self):
         process, self._process = self._process, None
         if process is not None:
             if process.poll() is None:
@@ -121,9 +156,14 @@ class QwenImage21Pipeline:
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait(timeout=5)
-            for stream in (process.stdin, process.stdout):
+            if self._stderr_thread is not None:
+                self._stderr_thread.join(timeout=5)
+            for stream in (process.stdin, process.stdout, process.stderr):
                 if stream is not None:
                     stream.close()
+
+    def close(self):
+        self._stop_process()
         if self._log is not None:
             self._log.close()
             self._log = None

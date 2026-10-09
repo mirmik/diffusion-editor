@@ -18,10 +18,17 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, default=Path("/tmp/diffusion-editor-qwen21-smoke"))
     parser.add_argument("--steps", type=int, default=4)
+    parser.add_argument("--turbo8", action="store_true")
     parser.add_argument("--size", type=int, default=512)
+    parser.add_argument("--repeat-size", type=int, default=0,
+                        help="generate again at this size without reloading")
     parser.add_argument("--check-only", action="store_true")
     args = parser.parse_args()
-    p = text_to_image_profile("qwen-image-2.1").defaults()
+    profile_id = "qwen-image-2.1-turbo8" if args.turbo8 else "qwen-image-2.1"
+    profile = text_to_image_profile(profile_id)
+    p = profile.defaults()
+    if args.turbo8:
+        args.steps = 8
     if args.check_only:
         from diffusion_editor.workers.qwen_image21_process import QwenImage21Pipeline
         p["device"] = "cpu"
@@ -35,7 +42,8 @@ def main():
     p.update(steps=args.steps, seed=42,
              prompt="This is an RGBA image with transparency. A red ceramic teapot. The image has alpha channel and the background is transparent.")
     backend = RealMlBackend()
-    data = {"profile_id": "qwen-image-2.1", "parameters": p, "lora_adapters": []}
+    data = {"profile_id": profile_id, "parameters": p,
+            "lora_adapters": [a.to_dict() for a in profile.default_lora_adapters]}
     started = time.monotonic()
     try:
         print("Loading Qwen Image 2.1", flush=True)
@@ -44,10 +52,22 @@ def main():
         result, seed, provenance = backend.text_to_image(dict(data, width=args.size, height=args.size))
         assert result.size == (args.size, args.size) and result.mode == "RGBA"
         result.save(args.output / "text-to-image.png")
-        if args.steps >= 30:
+        if args.steps >= 30 or args.turbo8:
             assert result.getextrema()[3][0] < 32, "No transparent background generated"
         (args.output / "text-to-image.json").write_text(json.dumps(provenance, indent=2))
         print("Text-to-image:", result.size, result.getextrema(), flush=True)
+        if args.repeat_size:
+            size = args.repeat_size
+            result, seed, provenance = backend.text_to_image(dict(data, width=size, height=size))
+            assert result.size == (size, size) and result.mode == "RGBA"
+            if args.turbo8:
+                sampling = provenance["runtime"]["provider_runtime"]["sampling"]
+                expected_shift = 0.5 + (size * size / 256 - 256) * (0.6935 - 0.5) / 3840
+                assert abs(sampling["shift"] - expected_shift) < 1e-8
+                assert sampling["steps"] == 8 and sampling["width"] == size
+            result.save(args.output / "text-to-image-repeat.png")
+            (args.output / "text-to-image-repeat.json").write_text(json.dumps(provenance, indent=2))
+            print("Repeated generation:", result.size, result.getextrema(), flush=True)
         # Switch tools: verify explicit disposal/reload, primary alpha and ref IPC.
         backend.unload_text_to_image()
         source = Image.new("RGBA", (args.size, args.size), (0, 0, 0, 0))

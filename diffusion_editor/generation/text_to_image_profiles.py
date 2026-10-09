@@ -9,6 +9,7 @@ from typing import Any, Iterable
 
 from .qwen_image21_config import (
     QWEN_IMAGE_21_PROFILE_ID, QWEN_IMAGE_21_PROVIDER, qwen_image21_parameters,
+    QWEN_IMAGE_21_TURBO8_PROFILE_ID, qwen_image21_turbo8_adapters,
 )
 
 from .image_edit_profiles import (
@@ -291,6 +292,18 @@ _PROFILES += (TextToImageProfile(
     model_id="Qwen/Qwen-Image-2.1",
     description="Generate images with native transparency. Output follows the target layer size.",
     parameters=qwen_image21_parameters(),
+    dimension_multiple=32,
+    supports_alpha=True,
+),)
+
+_PROFILES += (TextToImageProfile(
+    stable_id=QWEN_IMAGE_21_TURBO8_PROFILE_ID,
+    title="Qwen Image 2.1 Turbo8",
+    provider=QWEN_IMAGE_21_PROVIDER,
+    model_id="Qwen/Qwen-Image-2.1",
+    description="Fast generation with transparency. Uses Turbo8 LoRA at 8 steps and CFG 1.",
+    parameters=qwen_image21_parameters(turbo8=True),
+    default_lora_adapters=qwen_image21_turbo8_adapters(),
     dimension_multiple=32,
     supports_alpha=True,
 ),)

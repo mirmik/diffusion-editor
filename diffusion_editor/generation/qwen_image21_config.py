@@ -5,13 +5,24 @@ import os
 from pathlib import Path
 
 QWEN_IMAGE_21_PROFILE_ID = "qwen-image-2.1"
+QWEN_IMAGE_21_TURBO8_PROFILE_ID = "qwen-image-2.1-turbo8"
 QWEN_IMAGE_21_PROVIDER = "comfy.qwen_image21"
 # The existing main ComfyUI checkout predates 2.1. Use its separate runtime.
 _ROOT = Path("~/soft/ComfyUI").expanduser()
 _EXPERIMENT = _ROOT / "experiments/qwen-image-2.1"
 
 
-def qwen_image21_parameters():
+def qwen_image21_turbo8_adapters():
+    from .image_edit_profiles import ImageEditLoraAdapter
+
+    return (ImageEditLoraAdapter(
+        "turbo8", "Turbo8 8-step", os.environ.get(
+            "DIFFUSION_EDITOR_QWEN21_TURBO8_LORA",
+            str(_ROOT / "models/loras/turbo8_lora_step2500.safetensors")),
+    ),)
+
+
+def qwen_image21_parameters(*, turbo8=False):
     from .image_edit_profiles import (
         ImageEditParameter as P, ParameterChoice as C, ParameterKind as K,
     )
@@ -23,8 +34,10 @@ def qwen_image21_parameters():
     return (
         P("prompt", "Prompt", K.TEXT, "", "Conditioning"),
         P("negative_prompt", "Negative prompt", K.TEXT, "", "Conditioning"),
-        P("steps", "Steps", K.INTEGER, 40, "Sampling", 1, 100, 1),
-        P("true_cfg_scale", "CFG scale", K.FLOAT, 1.0, "Sampling", 1, 20, 0.1, 2),
+        P("steps", "Steps", K.INTEGER, 8 if turbo8 else 40, "Sampling",
+          8 if turbo8 else 1, 8 if turbo8 else 100, 1),
+        P("true_cfg_scale", "CFG scale", K.FLOAT, 1.0, "Sampling",
+          1, 1 if turbo8 else 20, 0.1, 2),
         P("seed", "Seed", K.INTEGER, -1, "Sampling", -1, 2**32 - 1, 1),
         P("output_mode", "Output", K.CHOICE, "RGBA", "Output",
           choices=(C("RGBA", "Preserve transparency"), C("RGB", "Opaque RGB"))),

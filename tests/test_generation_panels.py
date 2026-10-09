@@ -451,6 +451,7 @@ def test_text_to_image_panel_switches_to_original_qwen_profile(tmp_path):
         QWEN_IMAGE_2512_PROFILE_ID,
         QWEN_IMAGE_PROFILE_ID,
         "qwen-image-2.1",
+        "qwen-image-2.1-turbo8",
     ]
     coordinator.handle_intent(GenerationIntent(
         GenerationAction.SELECT_TEXT_TO_IMAGE_PROFILE,
@@ -756,6 +757,45 @@ def test_native_generation_programmatic_apply_is_feedback_free(tmp_path):
     panel.close()
     coordinator.close()
     tc_ui_document_destroy(document)
+
+
+@pytest.mark.parametrize("tool_type,action,widgets_name", [
+    (TextToImageTool, GenerationAction.SELECT_TEXT_TO_IMAGE_PROFILE, "_text_to_image_widgets"),
+    (InstructTool, GenerationAction.SELECT_IMAGE_EDIT_PROFILE, "_image_edit_widgets"),
+])
+def test_native_turbo8_sampling_is_fixed_and_base_controls_restore(
+    tmp_path, tool_type, action, widgets_name,
+):
+    application, *_ = _application(tmp_path)
+    tool = TextToImageTool() if tool_type is TextToImageTool else _qwen_edit_tool()
+    tool.set_profile("qwen-image-2.1-turbo8")
+    _insert_tool_layer(application, "Turbo8", tool)
+    coordinator = GenerationPanelsCoordinator(application, _Canvas())
+    document = tc_ui_document_create()
+    panel = NativeGenerationPanels(document, coordinator.state,
+                                   coordinator.handle_intent, lambda: None)
+    coordinator.bind_view(panel)
+    try:
+        widgets = getattr(panel, widgets_name)
+        assert widgets["steps"].value == 8
+        assert widgets["true_cfg_scale"].value == 1
+        assert not widgets["steps"].widget.enabled
+        assert not widgets["true_cfg_scale"].widget.enabled
+        coordinator.handle_intent(GenerationIntent(action, "qwen-image-2.1"))
+        assert widgets["steps"].widget.enabled
+        assert widgets["true_cfg_scale"].widget.enabled
+        assert widgets["steps"].value == 40
+        widgets["steps"].value = 55
+        state = (coordinator.state.text_to_image if tool_type is TextToImageTool
+                 else coordinator.state.instruct)
+        assert state.parameter_values["steps"] == 55
+        coordinator.handle_intent(GenerationIntent(action, "qwen-image-2.1-turbo8"))
+        assert widgets["steps"].value == 8
+        assert not widgets["steps"].widget.enabled
+    finally:
+        panel.close()
+        coordinator.close()
+        tc_ui_document_destroy(document)
 
 
 def test_ai_edit_panel_exposes_complete_schema_without_advanced_sections(

@@ -64,6 +64,7 @@ def test_original_qwen_image_is_an_independent_txt2img_profile():
         QWEN_IMAGE_2512_PROFILE_ID,
         QWEN_IMAGE_PROFILE_ID,
         "qwen-image-2.1",
+        "qwen-image-2.1-turbo8",
     ]
     assert profile.title == "Qwen Image (August 2025)"
     assert profile.provider == "diffusers.qwen_image"
