@@ -8,6 +8,7 @@ import numpy as np
 from PIL import Image
 
 from ..grounding.types import GroundingResult
+from .image_edit_profiles import image_edit_profile
 from ..document.layer import Layer
 from ..document.tool import DiffusionTool, LamaTool, InstructTool
 from ..document.commands import (
@@ -49,6 +50,8 @@ def map_instruct_result(layer: Layer | None, result_image: Image.Image, used_see
                 layer=layer,
                 result_image=result_image,
                 label="Apply Instruct Result",
+                preserve_alpha=image_edit_profile(
+                    layer.tool.model_profile_id).supports_alpha,
             ),
             f"Instruction applied (seed={used_seed})",
         )

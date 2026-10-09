@@ -712,7 +712,7 @@ class GenerationPanelsCoordinator:
                 profile_lora_adapters=copy.deepcopy(
                     tool.profile_lora_adapters),
                 supports_lora_adapters=profile.provider.startswith(
-                    "diffusers."),
+                    ("diffusers.", "comfy.qwen_image21")),
                 lora_catalog=self._lora_catalog,
                 supports_reference_image=(profile.max_input_images > 1),
                 reference_layer_id=tool.reference_layer_id,
@@ -728,7 +728,8 @@ class GenerationPanelsCoordinator:
             supports_reference_image=(
                 image_edit_profile(draft.model_profile_id).max_input_images > 1),
             supports_lora_adapters=image_edit_profile(
-                draft.model_profile_id).provider.startswith("diffusers."),
+                draft.model_profile_id).provider.startswith(
+                    ("diffusers.", "comfy.qwen_image21")),
             lora_catalog=self._lora_catalog,
             reference_layer_id=tool.reference_layer_id,
             reference_label=self._image_edit_reference_label(tool),
@@ -812,7 +813,7 @@ class GenerationPanelsCoordinator:
                 seed_text=str(values.get("seed", -1)),
                 supports_reference_image=(profile.max_input_images > 1),
                 supports_lora_adapters=profile.provider.startswith(
-                    "diffusers."),
+                    ("diffusers.", "comfy.qwen_image21")),
             )
         elif action == GenerationAction.SET_IMAGE_EDIT_PARAMETER:
             if not isinstance(value, (tuple, list)) or len(value) != 2:
@@ -1295,7 +1296,10 @@ class GenerationPanelsCoordinator:
             return
         try:
             with Image.open(path) as opened:
-                reference = opened.convert("RGB").copy()
+                mode = "RGBA" if (
+                    "A" in opened.getbands() or "transparency" in opened.info
+                ) else "RGB"
+                reference = opened.convert(mode).copy()
         except (OSError, ValueError) as exc:
             self._application.set_status(
                 f"Could not load AI Edit reference: {exc}")

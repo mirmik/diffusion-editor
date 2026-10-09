@@ -100,3 +100,10 @@ downloading models:
 Real feature smokes are documented in
 [LaMa](lama-worker.md), [segmentation](segmentation-worker.md), and
 [Diffusers/Transformers](ml-worker.md).
+
+## Qwen Image 2.1
+
+Qwen Image 2.1 reuses a separate local Comfy inference environment through a
+private subprocess owned by the ML worker. It does not change the shared
+Diffusers dependency lock or require a running Comfy server. See
+[Qwen Image 2.1](qwen-image-2.1.md) for model paths, configuration and GPU smokes.

@@ -146,7 +146,8 @@ class TextToImageGenerationController:
             document_state=self._document_state(),
             layer=layer,
             job_id=self._job_id_factory(),
-            paste=FrozenPasteContext.capture_layer(layer),
+            paste=FrozenPasteContext.capture_layer(
+                layer, preserve_alpha=profile.supports_alpha),
             model_provenance=(
                 ("model_profile_id", profile.stable_id),
                 ("provider", profile.provider),

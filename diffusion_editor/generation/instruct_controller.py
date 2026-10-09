@@ -205,10 +205,12 @@ class InstructGenerationController:
         composite = self._composite_below(layer)
         if composite is None:
             return InstructControllerEvent()
+        profile = image_edit_profile(tool.model_profile_id)
         patch = resolve_source_patch(
             layer,
             composite,
             default_to_full=True,
+            preserve_alpha=profile.supports_alpha,
         )
         if isinstance(patch, GenerationError):
             log.error(patch.log_message or patch.message)
@@ -235,7 +237,8 @@ class InstructGenerationController:
                 reference_image = resolve_image_edit_reference(
                     tool, self._layer_stack)
             elif tool.reference_image is not None:
-                reference_image = tool.reference_image.copy().convert("RGB")
+                reference_image = tool.reference_image.copy().convert(
+                    "RGBA" if profile.supports_alpha else "RGB")
             if isinstance(reference_image, GenerationError):
                 log.error(reference_image.log_message or reference_image.message)
                 return InstructControllerEvent(status=reference_image.message)
@@ -258,7 +261,8 @@ class InstructGenerationController:
             reference_image=(
                 frozen_reference.to_image()
                 if frozen_reference is not None else None),
-            paste=FrozenPasteContext.capture(layer, tool),
+            paste=FrozenPasteContext.capture(
+                layer, tool, preserve_alpha=profile.supports_alpha),
             model_provenance=(
                 ("model_profile_id", profile.stable_id),
                 ("provider", profile.provider),

@@ -10,7 +10,8 @@ from PIL import Image
 
 def paste_result(layer_image: np.ndarray, result_pil: Image.Image,
                  paste_x: int, paste_y: int, patch_w: int, patch_h: int,
-                 mask: np.ndarray = None) -> bool:
+                 mask: np.ndarray = None, *,
+                 preserve_alpha: bool = False) -> bool:
     """Paste a generated patch back onto a layer image.
 
     Coordinates are layer-local.  The source and destination are clipped as a
@@ -85,8 +86,13 @@ def paste_result(layer_image: np.ndarray, result_pil: Image.Image,
             mask_slice = np.rint(mask_slice * 255).astype(np.uint8)
         else:
             mask_slice = np.clip(mask_slice, 0, 255).astype(np.uint8)
-        result_slice[:, :, 3] = mask_slice
-    else:
+        if preserve_alpha:
+            result_slice[:, :, 3] = np.rint(
+                result_slice[:, :, 3].astype(np.float32) * mask_slice / 255.0
+            ).astype(np.uint8)
+        else:
+            result_slice[:, :, 3] = mask_slice
+    elif not preserve_alpha:
         result_slice[:, :, 3] = 255
 
     layer_image[dst_y0:dst_y1, dst_x0:dst_x1] = result_slice

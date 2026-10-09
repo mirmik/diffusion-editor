@@ -7,6 +7,10 @@ import os
 from pathlib import Path
 from typing import Any, Iterable
 
+from .qwen_image21_config import (
+    QWEN_IMAGE_21_PROFILE_ID, QWEN_IMAGE_21_PROVIDER, qwen_image21_parameters,
+)
+
 from .image_edit_profiles import (
     ImageEditLoraAdapter as TextToImageLoraAdapter,
     ImageEditParameter as TextToImageParameter,
@@ -39,6 +43,7 @@ class TextToImageProfile:
     parameters: tuple[TextToImageParameter, ...]
     default_lora_adapters: tuple[TextToImageLoraAdapter, ...] = ()
     dimension_multiple: int = 1
+    supports_alpha: bool = False
 
     def parameter(self, stable_id: str) -> TextToImageParameter:
         for parameter in self.parameters:
@@ -278,6 +283,17 @@ _PROFILES += (
         default_lora_adapters=(),
     ),
 )
+
+_PROFILES += (TextToImageProfile(
+    stable_id=QWEN_IMAGE_21_PROFILE_ID,
+    title="Qwen Image 2.1",
+    provider=QWEN_IMAGE_21_PROVIDER,
+    model_id="Qwen/Qwen-Image-2.1",
+    description="Generate images with native transparency. Output follows the target layer size.",
+    parameters=qwen_image21_parameters(),
+    dimension_multiple=32,
+    supports_alpha=True,
+),)
 
 _PROFILE_BY_ID = {profile.stable_id: profile for profile in _PROFILES}
 

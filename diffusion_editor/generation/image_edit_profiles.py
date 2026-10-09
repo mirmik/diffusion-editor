@@ -10,6 +10,10 @@ from pathlib import Path
 import re
 from typing import Any, Iterable
 
+from .qwen_image21_config import (
+    QWEN_IMAGE_21_PROFILE_ID, QWEN_IMAGE_21_PROVIDER, qwen_image21_parameters,
+)
+
 
 LEGACY_INSTRUCT_PROFILE_ID = "instruct-pix2pix"
 QWEN_IMAGE_EDIT_PROFILE_ID = "qwen-image-edit-2511"
@@ -121,6 +125,7 @@ class ImageEditProfile:
     primary: bool = False
     fast: bool = False
     max_input_images: int = 1
+    supports_alpha: bool = False
 
     def parameter(self, stable_id: str) -> ImageEditParameter:
         for parameter in self.parameters:
@@ -832,6 +837,17 @@ _PROFILES = (
         ) + _runtime_parameters("timbrooks/instruct-pix2pix"),
     ),
 )
+
+_PROFILES += (ImageEditProfile(
+    stable_id=QWEN_IMAGE_21_PROFILE_ID,
+    title="Qwen Image 2.1",
+    provider=QWEN_IMAGE_21_PROVIDER,
+    model_id="Qwen/Qwen-Image-2.1",
+    description="Edit images and transparent layers, with an optional reference image.",
+    parameters=qwen_image21_parameters(),
+    max_input_images=2,
+    supports_alpha=True,
+),)
 
 _PROFILE_BY_ID = {profile.stable_id: profile for profile in _PROFILES}
 

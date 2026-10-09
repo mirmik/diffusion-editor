@@ -1534,6 +1534,7 @@ class ApplyGeneratedResultCommand:
     layer: Layer
     result_image: Image.Image
     label: str
+    preserve_alpha: bool = False
 
     def apply(self, layer_stack: LayerStack) -> None:
         if not self.layer.accepts_pixel_edits:
@@ -1558,6 +1559,7 @@ class ApplyGeneratedResultCommand:
             tool.patch_w,
             tool.patch_h,
             mask=mask_arg,
+            preserve_alpha=self.preserve_alpha,
         )
         if not intersects:
             return

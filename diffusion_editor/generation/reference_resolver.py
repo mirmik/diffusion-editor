@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 from PIL import Image
 
+from .image_edit_profiles import image_edit_profile
 from .types import (
     GenerationError,
     ReferenceImage,
@@ -51,6 +52,7 @@ def layer_reference_image(
         layer: Layer,
         *,
         purpose: str = "IP-Adapter",
+        preserve_alpha: bool = False,
 ) -> ReferenceImage | GenerationError:
     raw_rect, source = reference_rect_for_layer(layer)
     rect = _clip_local_rect(layer, raw_rect)
@@ -69,7 +71,8 @@ def layer_reference_image(
     rgb = rgba[:, :, :3] * alpha + 255.0 * (1.0 - alpha)
     rgb = np.clip(rgb, 0, 255).astype(np.uint8)
     return ReferenceImage(
-        image=Image.fromarray(rgb, "RGB"),
+        image=(Image.fromarray(rgba.astype(np.uint8), "RGBA")
+               if preserve_alpha else Image.fromarray(rgb, "RGB")),
         layer_id=layer.id,
         layer_name=layer.name,
         local_rect=rect,
@@ -102,6 +105,7 @@ def resolve_image_edit_reference(
         layer_stack: LayerStack,
 ) -> Image.Image | GenerationError | None:
     """Resolve the optional second AI Edit image from a layer or embedded file."""
+    preserve_alpha = image_edit_profile(tool.model_profile_id).supports_alpha
     if tool.reference_layer_id is not None:
         layer = layer_stack.find_layer_by_id(tool.reference_layer_id)
         if layer is None:
@@ -110,10 +114,11 @@ def resolve_image_edit_reference(
                 message=f"AI Edit reference missing: {hint}",
                 log_message=f"AI Edit reference layer not found: {hint}",
             )
-        resolved = layer_reference_image(layer, purpose="AI Edit")
+        resolved = layer_reference_image(
+            layer, purpose="AI Edit", preserve_alpha=preserve_alpha)
         if isinstance(resolved, GenerationError):
             return resolved
         return resolved.image
     if tool.reference_image is not None:
-        return tool.reference_image.copy().convert("RGB")
+        return tool.reference_image.copy().convert("RGBA" if preserve_alpha else "RGB")
     return None

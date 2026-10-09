@@ -53,6 +53,7 @@ def test_builtin_profiles_are_stable_and_declarative():
         FLUX2_KLEIN_PROFILE_ID,
         SENSENOVA_U15_PROFILE_ID,
         LEGACY_INSTRUCT_PROFILE_ID,
+        "qwen-image-2.1",
     ]
     assert profiles[0].primary
     assert image_edit_profile(FLUX2_KLEIN_PROFILE_ID).fast
@@ -62,7 +63,7 @@ def test_builtin_profiles_are_stable_and_declarative():
         assert {"prompt", "steps", "seed", "model", "dtype", "device"} <= set(ids)
         assert set(profile.normalize({})) == set(ids)
     assert [profile.max_input_images for profile in profiles] == [
-        2, 2, 2, 2, 1,
+        2, 2, 2, 2, 1, 2,
     ]
 
 

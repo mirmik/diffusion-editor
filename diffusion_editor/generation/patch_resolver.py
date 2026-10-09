@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Literal
 
 import numpy as np
@@ -134,18 +135,19 @@ def resolve_source_patch(
         *,
         fallback_canvas_rect: Rect | None = None,
         default_to_full: bool = False,
+        preserve_alpha: bool = False,
         ) -> PatchSource | GenerationError | None:
     patch = source_patch_from_layer_patch(layer, composite)
-    if patch is not None:
-        return patch
-    patch = source_patch_from_mask(layer, composite)
-    if patch is not None:
-        return patch
-    if fallback_canvas_rect is not None:
-        return source_patch_from_existing_rect(composite, fallback_canvas_rect)
-    if default_to_full:
-        return source_patch_from_full_composite(composite)
-    return None
+    if patch is None:
+        patch = source_patch_from_mask(layer, composite)
+    if patch is None and fallback_canvas_rect is not None:
+        patch = source_patch_from_existing_rect(composite, fallback_canvas_rect)
+    if patch is None and default_to_full:
+        patch = source_patch_from_full_composite(composite)
+    if preserve_alpha and isinstance(patch, PatchSource):
+        rgba = Image.fromarray(composite).convert("RGBA").crop(patch.canvas_rect)
+        patch = replace(patch, image=rgba)
+    return patch
 
 
 def apply_patch_source_to_tool(

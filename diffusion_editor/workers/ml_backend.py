@@ -39,6 +39,7 @@ from ..generation.image_edit_profiles import (
     resolve_qwen_text_encoder_source,
 )
 from ..generation.text_to_image_profiles import text_to_image_profile
+from ..generation.qwen_image21_config import QWEN_IMAGE_21_PROVIDER
 
 
 from ..sdxl_sampling import guess_prediction_type, resolve_prediction_type
@@ -218,6 +219,9 @@ class RealMlBackend:
         self._instruct_dtype = None
         self._image_edit_profile_id = None
         self._image_edit_lora_adapters = ()
+        close = getattr(pipe, "close", None)
+        if callable(close):
+            close()
         del pipe
         self._release_accelerator_memory()
 
@@ -232,6 +236,9 @@ class RealMlBackend:
         self._text_to_image_component_mode = None
         self._text_to_image_profile_id = None
         self._text_to_image_lora_adapters = ()
+        close = getattr(pipe, "close", None)
+        if callable(close):
+            close()
         del pipe
         self._release_accelerator_memory()
 
@@ -421,7 +428,66 @@ class RealMlBackend:
             raise ValueError("seed must be -1 or an unsigned 32-bit integer")
         return request_seed
 
+    def _load_qwen_image21(self, data, profile, *, edit):
+        from .qwen_image21_process import QwenImage21Pipeline
+
+        parameters = profile.normalize(data.get("parameters"))
+        adapters = tuple(a.to_dict() for a in profile.normalize_lora_adapters(
+            data.get("lora_adapters")))
+        identity, warnings = resolve_local_model_identity(
+            str(Path(parameters["model"]).expanduser()),
+            policy=ModelIdentityPolicy.WARN,
+        )
+        # Both tools share the GPU budget, even though they have separate state.
+        self._unload_depth()
+        self.unload_diffusion()
+        self.unload_image_edit()
+        self.unload_text_to_image()
+        pipe = QwenImage21Pipeline(parameters, adapters)
+        extensions = identity.extensions.to_dict()
+        extensions.update({
+            "text_encoder": pipe.parameters["text_encoder_checkpoint"],
+            "vae": pipe.parameters["vae_checkpoint"],
+            "provider_runtime": pipe.runtime_info,
+        })
+        identity = replace(identity, extensions=FrozenJsonObject.capture(extensions))
+        if edit:
+            self._instruct_pipe = pipe
+            self._instruct_identity = identity
+            self._instruct_warnings = warnings
+            self._instruct_device = parameters["device"]
+            self._instruct_dtype = parameters["dtype"]
+            self._image_edit_profile_id = profile.stable_id
+            self._image_edit_lora_adapters = adapters
+        else:
+            self._text_to_image_pipe = pipe
+            self._text_to_image_identity = identity
+            self._text_to_image_warnings = warnings
+            self._text_to_image_device = parameters["device"]
+            self._text_to_image_dtype = parameters["dtype"]
+            self._text_to_image_profile_id = profile.stable_id
+            self._text_to_image_lora_adapters = adapters
+            self._text_to_image_offload_mode = parameters["memory_mode"]
+            self._text_to_image_component_mode = "local-comfy-qwen21"
+        return {
+            "loaded": True, "profile_id": profile.stable_id,
+            "profile_title": profile.title, "device": parameters["device"],
+            "dtype": parameters["dtype"], "pipeline": type(pipe).__name__,
+            "component_mode": "local-comfy-qwen21",
+            "offload_mode": parameters["memory_mode"],
+            "active_lora_adapters": [
+                a["stable_id"] for a in adapters if a["enabled"] and a["source"]],
+            "active_lora_weights": [
+                a["weight"] for a in adapters if a["enabled"] and a["source"]],
+            "model_identity": identity.to_dict(), "warnings": list(warnings),
+            "provider_runtime": pipe.runtime_info,
+        }
+
     def load_image_edit(self, data: dict[str, Any]) -> dict[str, Any]:
+        profile = image_edit_profile(str(data["profile_id"]))
+        if profile.provider == QWEN_IMAGE_21_PROVIDER:
+            return self._load_qwen_image21(data, profile, edit=True)
+
         from diffusers import (
             EulerAncestralDiscreteScheduler,
             Flux2KleinPipeline,
@@ -692,6 +758,10 @@ class RealMlBackend:
         }
 
     def load_text_to_image(self, data: dict[str, Any]) -> dict[str, Any]:
+        profile = text_to_image_profile(str(data["profile_id"]))
+        if profile.provider == QWEN_IMAGE_21_PROVIDER:
+            return self._load_qwen_image21(data, profile, edit=False)
+
         from diffusers import QwenImagePipeline
 
         profile_id = str(data["profile_id"])
@@ -855,26 +925,30 @@ class RealMlBackend:
         inference_width, inference_height = profile.inference_size(
             width, height)
         seed = self._resolve_seed(int(parameters["seed"]))
-        generator = torch.Generator(device="cpu").manual_seed(seed)
-        true_cfg_scale = float(parameters["true_cfg_scale"])
-        kwargs: dict[str, Any] = {
-            "prompt": str(parameters["prompt"]),
-            "true_cfg_scale": true_cfg_scale,
-            "num_inference_steps": int(parameters["steps"]),
-            "max_sequence_length": int(parameters["max_sequence_length"]),
-            "width": inference_width,
-            "height": inference_height,
-            "generator": generator,
-        }
-        if true_cfg_scale > 1.0:
-            kwargs["negative_prompt"] = str(parameters["negative_prompt"])
-        attention = str(parameters.get("attention_kwargs", "")).strip()
-        if attention:
-            parsed = json.loads(attention)
-            if not isinstance(parsed, dict):
-                raise ValueError("attention_kwargs must be a JSON object")
-            kwargs["attention_kwargs"] = parsed
-        result = self._text_to_image_pipe(**kwargs).images[0]
+        if profile.provider == QWEN_IMAGE_21_PROVIDER:
+            result = self._text_to_image_pipe.generate(
+                parameters, seed, inference_width, inference_height)
+        else:
+            generator = torch.Generator(device="cpu").manual_seed(seed)
+            true_cfg_scale = float(parameters["true_cfg_scale"])
+            kwargs: dict[str, Any] = {
+                "prompt": str(parameters["prompt"]),
+                "true_cfg_scale": true_cfg_scale,
+                "num_inference_steps": int(parameters["steps"]),
+                "max_sequence_length": int(parameters["max_sequence_length"]),
+                "width": inference_width,
+                "height": inference_height,
+                "generator": generator,
+            }
+            if true_cfg_scale > 1.0:
+                kwargs["negative_prompt"] = str(parameters["negative_prompt"])
+            attention = str(parameters.get("attention_kwargs", "")).strip()
+            if attention:
+                parsed = json.loads(attention)
+                if not isinstance(parsed, dict):
+                    raise ValueError("attention_kwargs must be a JSON object")
+                kwargs["attention_kwargs"] = parsed
+            result = self._text_to_image_pipe(**kwargs).images[0]
         if result.size != (width, height):
             result = result.resize((width, height), Image.Resampling.LANCZOS)
         request = RequestProvenance.capture("text_to_image", {
@@ -901,6 +975,8 @@ class RealMlBackend:
                 "dtype": self._text_to_image_dtype,
                 "offload_mode": self._text_to_image_offload_mode,
                 "component_mode": self._text_to_image_component_mode,
+                "provider_runtime": getattr(
+                    self._text_to_image_pipe, "runtime_info", {}),
                 "torch_version": self._package_version("torch"),
                 "diffusers_version": self._package_version("diffusers"),
                 "transformers_version": self._package_version(
@@ -1210,6 +1286,18 @@ class RealMlBackend:
             raise RuntimeError(
                 "Image edit LoRA configuration is not loaded")
         seed = self._resolve_seed(int(parameters["seed"]))
+        if profile.provider == QWEN_IMAGE_21_PROVIDER:
+            width = max(32, ((image.width + 31) // 32) * 32)
+            height = max(32, ((image.height + 31) // 32) * 32)
+            result = self._instruct_pipe.generate(
+                parameters, seed, width, height,
+                image=image, reference_image=reference_image,
+            )
+            if result.size != image.size:
+                result = result.resize(image.size, Image.Resampling.LANCZOS)
+            provenance = self._image_edit_provenance(
+                profile_id, parameters, requested_adapters, seed, result.size)
+            return result, seed, provenance.to_dict()
         if profile_id == SENSENOVA_U15_PROFILE_ID:
             result = self._instruct_pipe.edit(
                 image,

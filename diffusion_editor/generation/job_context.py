@@ -117,9 +117,11 @@ class FrozenPasteContext:
     layer_local_rect: Rect
     layer_mask: FrozenArray | None
     geometry_source: Literal["tool_patch", "layer"] = "tool_patch"
+    preserve_alpha: bool = False
 
     @classmethod
-    def capture(cls, layer: Layer, tool: Tool) -> "FrozenPasteContext":
+    def capture(cls, layer: Layer, tool: Tool, *,
+                preserve_alpha: bool = False) -> "FrozenPasteContext":
         patch_x = int(getattr(tool, "patch_x"))
         patch_y = int(getattr(tool, "patch_y"))
         patch_w = int(getattr(tool, "patch_w"))
@@ -146,10 +148,12 @@ class FrozenPasteContext:
                 local_y + patch_h,
             ),
             layer_mask=layer_mask,
+            preserve_alpha=preserve_alpha,
         )
 
     @classmethod
-    def capture_layer(cls, layer: Layer) -> "FrozenPasteContext":
+    def capture_layer(cls, layer: Layer, *,
+                      preserve_alpha: bool = False) -> "FrozenPasteContext":
         """Capture full-layer replacement geometry without a source patch."""
 
         return cls(
@@ -157,6 +161,7 @@ class FrozenPasteContext:
             layer_local_rect=(0, 0, layer.width, layer.height),
             layer_mask=None,
             geometry_source="layer",
+            preserve_alpha=preserve_alpha,
         )
 
     @property
@@ -341,6 +346,7 @@ class ApplyFrozenGeneratedResultCommand:
             x1 - x0,
             y1 - y0,
             mask=mask_arg,
+            preserve_alpha=self.paste.preserve_alpha,
         )
         if not intersects:
             return

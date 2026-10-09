@@ -88,3 +88,16 @@ def test_paste_result_validation_does_not_mutate_target(kwargs, message):
         paste_result(target, result, **arguments)
 
     assert np.array_equal(target, before)
+
+
+def test_transparent_result_keeps_alpha_and_multiplies_selection_mask():
+    target = np.zeros((2, 2, 4), dtype=np.uint8)
+    result = Image.new("RGBA", (2, 2), (40, 80, 120, 128))
+    paste_result(target, result, 0, 0, 2, 2, preserve_alpha=True)
+    assert np.all(target[:, :, 3] == 128)
+    mask = np.array([[0, 128], [255, 64]], dtype=np.uint8)
+    paste_result(target, result, 0, 0, 2, 2, mask=mask, preserve_alpha=True)
+    assert np.array_equal(target[:, :, 3], [[0, 64], [128, 32]])
+    # Legacy generated RGB/opaque patches retain their previous behavior.
+    paste_result(target, result, 0, 0, 2, 2)
+    assert np.all(target[:, :, 3] == 255)

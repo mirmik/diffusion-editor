@@ -450,6 +450,7 @@ def test_text_to_image_panel_switches_to_original_qwen_profile(tmp_path):
             coordinator.state.text_to_image.model_profiles] == [
         QWEN_IMAGE_2512_PROFILE_ID,
         QWEN_IMAGE_PROFILE_ID,
+        "qwen-image-2.1",
     ]
     coordinator.handle_intent(GenerationIntent(
         GenerationAction.SELECT_TEXT_TO_IMAGE_PROFILE,
@@ -966,3 +967,18 @@ def test_ai_edit_lora_catalog_scans_deduplicates_and_selects_source(
         panel.close()
         coordinator.close()
         tc_ui_document_destroy(document)
+
+
+def test_qwen21_panel_keeps_transparent_reference_file(tmp_path):
+    application, _diffusion, _instruct, _lama = _application(tmp_path)
+    layer = _insert_tool_layer(application, "AI Edit", _qwen_edit_tool())
+    layer.tool.set_profile("qwen-image-2.1")
+    coordinator = GenerationPanelsCoordinator(application, _Canvas())
+    assert coordinator.state.instruct.supports_reference_image
+    assert coordinator.state.instruct.supports_lora_adapters
+    path = tmp_path / "transparent-reference.png"
+    Image.new("RGBA", (9, 7), (11, 22, 33, 64)).save(path)
+    coordinator.set_reference_file_picker(lambda selected: selected(str(path)))
+    coordinator.handle_intent(GenerationIntent(GenerationAction.PICK_IMAGE_EDIT_REFERENCE))
+    assert layer.tool.reference_image.mode == "RGBA"
+    assert layer.tool.reference_image.getpixel((0, 0)) == (11, 22, 33, 64)
