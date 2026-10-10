@@ -16,6 +16,24 @@ import time
 import traceback
 
 
+# Qwen/Qwen-Image-2.1-Turbo model_index.json at d65dbc9a7e8f6b5479e33dee6030eaab2a906509.
+# Scheduler uses shift=1, no dynamic shifting and no terminal stretching.
+TURBO_SIGMAS = (1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0.0)
+
+
+def prepare_reference(image, size, *, reference_only=False):
+    from PIL import Image, ImageOps
+
+    if image.size == size:
+        return image
+    if reference_only:
+        # The runtime needs the first reference to match output geometry.
+        # Letterboxing keeps its proportions and all of its content intact.
+        return ImageOps.pad(image, size, method=Image.Resampling.LANCZOS,
+                            color=(255, 255, 255, 0))
+    return image.resize(size, Image.Resampling.LANCZOS)
+
+
 def _watch_parent(parent_pid):
     # Cancellation kills the outer ML worker. Do not leave its GPU child alive,
     # including while the child is busy loading weights or denoising.
@@ -133,23 +151,45 @@ class Runtime:
             )[0]
         return self.model
 
+    def sample(self, model, seed, steps, cfg, positive, negative, latent):
+        import nodes
+        if self.sampling_mode != "turbo":
+            return nodes.common_ksampler(
+                model, seed, steps, cfg, "euler", "simple", positive, negative, latent,
+            )[0]["samples"]
+        import torch
+        import comfy.sample
+        import comfy.utils
+        import latent_preview
+
+        samples = latent["samples"]
+        noise = comfy.sample.prepare_noise(samples, seed)
+        return comfy.sample.sample(
+            model, noise, 8, 1.0, "euler", "simple", positive, negative, samples,
+            sigmas=torch.tensor(TURBO_SIGMAS, dtype=torch.float32),
+            callback=latent_preview.prepare_callback(model, 8),
+            disable_pbar=not comfy.utils.PROGRESS_BAR_ENABLED, seed=seed,
+        )
+
     def generate(self, request):
         import numpy as np
         import torch
         from PIL import Image
         import comfy.model_management as mm
-        import nodes
         from comfy_extras.nodes_qwen import TextEncodeQwenImage21
 
         p = request["parameters"]
-        if self.sampling_mode == "turbo8" and (
+        if self.sampling_mode in {"turbo8", "turbo"} and (
                 int(p["steps"]) != 8 or float(p["true_cfg_scale"]) != 1.0):
-            raise ValueError("Turbo8 requires 8 steps and CFG 1.0")
+            raise ValueError("Accelerated Qwen profiles require 8 steps and CFG 1.0")
         width, height = int(request["width"]), int(request["height"])
         if width < 32 or height < 32 or width % 32 or height % 32:
             raise ValueError("Qwen Image 2.1 inference dimensions must be positive multiples of 32")
+        paths = request.get("images", [])
+        if len(paths) > 10:
+            raise ValueError("Qwen Image 2.1 accepts at most 10 reference images")
         images = {}
-        for i, path in enumerate(request.get("images", [])):
+        for i, path in enumerate(paths):
             with Image.open(path) as source:
                 image = source.convert("RGBA")
             # The first reference and output must use the same geometry.
@@ -157,8 +197,8 @@ class Runtime:
                 max(32, round(image.width / 32) * 32),
                 max(32, round(image.height / 32) * 32),
             )
-            if image.size != size:
-                image = image.resize(size, Image.Resampling.LANCZOS)
+            image = prepare_reference(
+                image, size, reference_only=i == 0 and request.get("reference_only", False))
             images[f"image_{i + 1}"] = torch.from_numpy(
                 np.array(image, dtype=np.float32) / 255.0).unsqueeze(0)
         with torch.inference_mode():
@@ -170,13 +210,12 @@ class Runtime:
             latent = {"samples": torch.zeros(
                 [1, 64, height // 16, width // 16], device=mm.intermediate_device())}
             # Turbo8 needs its resolution-dependent shift; base uses the
-            # checkpoint's native configuration. Both use Euler/simple.
+            # checkpoint's native configuration. Official Turbo supplies exact sigmas.
             model = self.sampling_model(width, height)
-            sampled = nodes.common_ksampler(
+            sampled = self.sample(
                 model, int(request["seed"]), int(p["steps"]),
-                float(p["true_cfg_scale"]), "euler", "simple",
-                positive, negative, latent,
-            )[0]["samples"]
+                float(p["true_cfg_scale"]), positive, negative, latent,
+            )
             pixels = (self.vae.decode_tiled(sampled) if p["vae_tiling"]
                       else self.vae.decode(sampled))
             # VAE may expose a singleton frame dimension.
@@ -193,7 +232,11 @@ class Runtime:
         return {
             "width": image.width, "height": image.height, "mode": image.mode,
             "sampling": {
-                "mode": self.sampling_mode, "sampler": "euler", "scheduler": "simple",
+                "mode": self.sampling_mode, "sampler": "euler",
+                "scheduler": "qwen_official_turbo" if self.sampling_mode == "turbo" else "simple",
+                "sigmas": list(TURBO_SIGMAS) if self.sampling_mode == "turbo" else None,
+                "reference_count": len(images),
+                "reference_fit": "contain" if request.get("reference_only") and images else "resize",
                 "steps": int(p["steps"]), "cfg": float(p["true_cfg_scale"]),
                 "width": width, "height": height,
                 "shift": float(model.get_model_object("model_sampling").shift),

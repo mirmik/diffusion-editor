@@ -126,11 +126,20 @@ class QwenImage21Pipeline:
             self.close()
             raise RuntimeError(f"{message}\n{tail}") from exc
 
-    def generate(self, parameters, seed, width, height, *, image=None, reference_image=None):
+    def generate(self, parameters, seed, width, height, *, image=None, reference_image=None,
+                 reference_images=None):
         if self._process is None:
             raise RuntimeError("Qwen Image 2.1 process is closed; reload the model")
+        if reference_images is not None:
+            if image is not None or reference_image is not None:
+                raise ValueError("Cannot combine reference_images with legacy editing inputs")
+            sources = tuple(reference_images)
+        else:
+            sources = tuple(source for source in (image, reference_image) if source is not None)
+        if len(sources) > 10:
+            raise ValueError("Qwen Image 2.1 accepts at most 10 reference images")
         images = []
-        for i, source in enumerate((image, reference_image)):
+        for i, source in enumerate(sources):
             if source is not None:
                 path = self._directory / f"input-{i}.png"
                 source.save(path, format="PNG")
@@ -140,6 +149,7 @@ class QwenImage21Pipeline:
         response = self._request({
             "operation": "generate", "parameters": parameters, "seed": seed,
             "width": width, "height": height, "images": images, "output": str(output),
+            "reference_only": image is None,
         })
         if "sampling" in response:
             self.runtime_info["sampling"] = response["sampling"]

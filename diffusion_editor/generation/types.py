@@ -659,6 +659,18 @@ class TextToImageRequest:
     width: int
     height: int
     lora_adapters: tuple[dict[str, object], ...] | None = None
+    reference_image: Image.Image | None = None
+
+    reference_images: tuple[Image.Image, ...] = ()
+
+    def __post_init__(self):
+        images = tuple(self.reference_images)
+        if self.reference_image is not None:
+            if images:
+                raise ValueError("Use reference_images or reference_image, not both")
+            images = (self.reference_image,)
+        object.__setattr__(self, "reference_images", images)
+        object.__setattr__(self, "reference_image", images[0] if images else None)
 
 
 @dataclass(frozen=True)

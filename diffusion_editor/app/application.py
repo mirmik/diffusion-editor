@@ -231,6 +231,7 @@ class EditorApplication:
         )
         self.text_to_image_controller = TextToImageGenerationController(
             engine=self.text_to_image_engine,
+            layer_stack=self.layer_stack,
             document_state=document_state,
         )
         self.segmentation_controller = SegmentationGenerationController(

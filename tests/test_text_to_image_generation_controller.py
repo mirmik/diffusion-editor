@@ -109,3 +109,39 @@ def test_result_must_match_the_frozen_layer_size():
     assert seed == 123
     assert controller.pending_context is None
 
+
+
+def test_reference_is_frozen_before_model_load_and_identified_in_provenance():
+    from diffusion_editor.generation.provenance import capture_tool_state
+    layer = _layer()
+    layer.tool.set_profile("qwen-image-2.1")
+    layer.tool.reference_image = Image.new("RGBA", (9, 7), (10, 20, 30, 64))
+    engine = _Engine(loaded=False)
+    controller = TextToImageGenerationController(engine=engine)
+    assert controller.start(layer).model_loading
+    context = controller.pending_context
+    assert context.reference_image.to_image().getpixel((0, 0)) == (10, 20, 30, 64)
+    assert context.request_provenance.parameters.to_dict()["reference_image_hash"] == context.reference_image.content_hash
+    before = capture_tool_state(layer.tool).fingerprint
+    layer.tool.reference_image.paste((0, 0, 0, 0), (0, 0, 9, 7))
+    assert capture_tool_state(layer.tool).fingerprint != before
+    engine.is_loaded = True
+    engine.loaded_profile_id = "qwen-image-2.1"
+    engine.poll_result = EnginePollEvent(task_type="load", result=True)
+    controller.poll()
+    request = engine.calls[-1][1]
+    assert request.reference_image.getpixel((0, 0)) == (10, 20, 30, 64)
+    assert not hasattr(request, "image")
+
+
+def test_missing_reference_fails_before_submitting_and_old_profiles_ignore_reference():
+    layer = _layer()
+    layer.tool.reference_layer_id = "missing"
+    layer.tool.set_profile("qwen-image-2.1")
+    engine = _Engine()
+    controller = TextToImageGenerationController(engine=engine)
+    assert "unavailable" in controller.start(layer).status
+    assert not engine.calls
+    layer.tool.set_profile("qwen-image-2512")
+    controller.start(layer)
+    assert engine.calls[-1][1].reference_image is None

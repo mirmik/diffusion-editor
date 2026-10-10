@@ -24,6 +24,7 @@ from ..generation.provenance import (
     RequestProvenance,
     enforce_model_identity_policy,
     floating_model_identity,
+    image_content_hash,
     resolve_local_model_identity,
 )
 from ..generation.image_edit_profiles import (
@@ -150,7 +151,8 @@ class _Backend:
         if operation == "text_to_image":
             profile = text_to_image_profile(str(data["profile_id"]))
             progress(f"Running {profile.title}...")
-            result, seed, provenance = self._real.text_to_image(data)
+            references = self._text_to_image_references(data, profile)
+            result, seed, provenance = self._real.text_to_image(data, reference_images=references)
             output = output_dir / "result.png"
             result.save(output, format="PNG")
             return {
@@ -167,6 +169,15 @@ class _Backend:
             detections = self._real.grounding(data, image, progress)
             return self._write_detections(output_dir, detections)
         raise RuntimeError(f"Unknown ML operation: {operation}")
+
+    def _text_to_image_references(self, data, profile):
+        if "reference_count" not in data:
+            return ((self._open_required(data, "reference_image"),)
+                    if data.get("reference_image_path") else ())
+        count = data["reference_count"]
+        if type(count) is not int or not 0 <= count <= profile.max_reference_images:
+            raise ValueError("Invalid Text to Image reference count")
+        return tuple(self._open_required(data, f"reference_{i}") for i in range(count))
 
     def _fake(
         self,
@@ -473,6 +484,7 @@ class _Backend:
                 raise RuntimeError(
                     f"Text-to-image profile is not loaded: "
                     f"{profile.stable_id}")
+            references = self._text_to_image_references(data, profile)
             parameters = profile.normalize(data.get("parameters"))
             adapters = tuple(
                 adapter.to_dict()
@@ -501,6 +513,8 @@ class _Backend:
                     "lora_adapters": list(adapters),
                     "width": width,
                     "height": height,
+                    "reference_image_hashes": [image_content_hash(image.mode, image.size, image.tobytes())
+                                               for image in references],
                 }),
                 seed=seed,
                 width=width,

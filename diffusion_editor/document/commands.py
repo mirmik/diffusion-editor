@@ -24,7 +24,7 @@ from ..generation.types import (
     ReconstructionStageStatus,
 )
 from .change_event import DocumentChangeKind
-from .tool import DiffusionTool, InstructTool, TextToImageTool, Tool
+from .tool import DiffusionTool, InstructTool, TextToImageTool, TextToImageReference, Tool
 from .layer_stack import LayerStack
 from .result_paste import paste_result
 from .mask import Selection, coerce_mask_data
@@ -996,6 +996,34 @@ class ClearIpAdapterReferenceLayerCommand:
 
 
 @dataclass(frozen=True)
+class SetTextToImageReferencesCommand:
+    layer: Layer
+    references: tuple[TextToImageReference, ...] = ()
+    label: str = "Set Text to Image References"
+
+    def apply(self, layer_stack: LayerStack) -> None:
+        if isinstance(self.layer.tool, TextToImageTool):
+            self.layer.tool.set_references(self.references)
+            layer_stack.publish_change(DocumentChangeKind.METADATA, layers=(self.layer,))
+
+    def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
+        tool = self.layer.tool
+        if not isinstance(tool, TextToImageTool):
+            return None
+        old = tuple(ref.copy() for ref in tool.references)
+        self.apply(layer_stack)
+        new = tuple(ref.copy() for ref in tool.references)
+
+        def assign(refs):
+            tool.set_references(refs)
+            layer_stack.publish_change(DocumentChangeKind.METADATA, layers=(self.layer,))
+
+        size = sum(len(ref.image.tobytes()) if ref.image is not None else 0
+                   for refs in (old, new) for ref in refs)
+        return CommandDelta(lambda: assign(old), lambda: assign(new), size + 256 * (len(old) + len(new)))
+
+
+@dataclass(frozen=True)
 class SetImageEditReferenceCommand:
     layer: Layer
     reference_layer_id: str | None = None
@@ -1016,9 +1044,18 @@ class SetImageEditReferenceCommand:
             "reference_image_name_hint": self.reference_image_name_hint,
         }
 
+    def _text_to_image_command(self):
+        refs = ((TextToImageReference(
+            layer_id=self.reference_layer_id, layer_name_hint=self.reference_layer_name_hint,
+            image=self.reference_image, image_name_hint=self.reference_image_name_hint),)
+            if self.reference_layer_id is not None or self.reference_image is not None else ())
+        return SetTextToImageReferencesCommand(self.layer, refs, self.label)
+
     def apply(self, layer_stack: LayerStack) -> None:
+        if isinstance(self.layer.tool, TextToImageTool):
+            return self._text_to_image_command().apply(layer_stack)
         tool = self.layer.tool
-        if not isinstance(tool, InstructTool):
+        if not isinstance(tool, (InstructTool, TextToImageTool)):
             return
         for name, value in self._values().items():
             setattr(tool, name, value)
@@ -1026,8 +1063,10 @@ class SetImageEditReferenceCommand:
             DocumentChangeKind.METADATA, layers=(self.layer,))
 
     def apply_with_history(self, layer_stack: LayerStack) -> CommandDelta | None:
+        if isinstance(self.layer.tool, TextToImageTool):
+            return self._text_to_image_command().apply_with_history(layer_stack)
         tool = self.layer.tool
-        if not isinstance(tool, InstructTool):
+        if not isinstance(tool, (InstructTool, TextToImageTool)):
             return None
         old_values = {
             "reference_layer_id": tool.reference_layer_id,
@@ -1057,7 +1096,7 @@ class SetImageEditReferenceCommand:
             lambda: assign(old_values),
             lambda: assign(new_values),
             size,
-            coalesce_key=("image-edit-reference", self.layer.id),
+            # Choosing or clearing a reference is a discrete undo action.
         )
 
 

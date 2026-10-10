@@ -53,6 +53,8 @@ class NativeGenerationPanels:
         self._model_paths: list[str] = []
         self._reference_ids: list[str | None] = []
         self._image_edit_reference_ids: list[str | None] = []
+        self._text_to_image_reference_ids: list[str | None] = []
+        self._text_to_image_reference_rows: list[dict] = []
         self._image_edit_profile_ids: list[str] = []
         self._image_edit_widgets: dict[str, object] = {}
         self._image_edit_lora_rows: list[dict[str, object]] = []
@@ -199,6 +201,24 @@ class NativeGenerationPanels:
                 not text_to_image_busy)
             self.text_to_image_new_seed_button.widget.enabled = (
                 not text_to_image_busy)
+
+            self._sync_combo(
+                self.text_to_image_reference_combo,
+                ["Add layer reference…"] + [choice.name for choice in state.reference_layers],
+                [None] + [choice.stable_id for choice in state.reference_layers],
+                None,
+                self._set_text_to_image_reference_ids,
+            )
+            self.text_to_image_reference_label.text = (
+                f"{len(text_to_image.references)} / {text_to_image.max_reference_images} references"
+                if text_to_image.supports_reference_image else "References unavailable for this profile")
+            self._sync_text_to_image_reference_rows(text_to_image.references, enabled=not text_to_image_busy)
+            reference_enabled = (text_to_image.supports_reference_image and not text_to_image_busy
+                                 and len(text_to_image.references) < text_to_image.max_reference_images)
+            self.text_to_image_reference_combo.widget.enabled = reference_enabled
+            self.text_to_image_reference_browse.widget.enabled = reference_enabled
+            self.text_to_image_reference_clear.widget.enabled = (
+                not text_to_image_busy and bool(text_to_image.references))
 
             diffusion = state.diffusion
             self._sync_combo(
@@ -357,6 +377,9 @@ class NativeGenerationPanels:
         self._on_intent = lambda _intent: None
         self._image_edit_lora_rows.clear()
         self._text_to_image_lora_rows.clear()
+        for row in self._text_to_image_reference_rows:
+            row["connections"].clear()
+        self._text_to_image_reference_rows.clear()
         self._connections.clear()
 
     def _build_text_to_image(self, content) -> None:
@@ -374,6 +397,45 @@ class NativeGenerationPanels:
             content, "", "text-to-image.profile.description")
         self.text_to_image_output_size = self._label(
             content, "", "text-to-image.output-size")
+        self._caption(
+            content, "Reference images", "text-to-image.reference.caption")
+        self.text_to_image_reference_container = self._document.create_vstack("NativeTextToImageReferences")
+        content.add_preferred_child(self.text_to_image_reference_container)
+        self.text_to_image_reference_combo = self._combo(
+            content,
+            "text-to-image.reference.layer",
+            lambda index: self._emit(
+                GenerationAction.SELECT_TEXT_TO_IMAGE_REFERENCE,
+                self._item(
+                    self._text_to_image_reference_ids, index, None),
+            ),
+        )
+        reference_actions = self._document.create_hstack(
+            "NativeTextToImageReferenceActions")
+        reference_actions.set_layout_spacing(4.0)
+        self.text_to_image_reference_browse = self._button(
+            reference_actions,
+            "Add Image...",
+            "text-to-image.reference.open",
+            lambda: self._emit(
+                GenerationAction.PICK_TEXT_TO_IMAGE_REFERENCE),
+            add=False,
+        )
+        self.text_to_image_reference_clear = self._button(
+            reference_actions,
+            "Clear All",
+            "text-to-image.reference.clear",
+            lambda: self._emit(
+                GenerationAction.CLEAR_TEXT_TO_IMAGE_REFERENCE),
+            add=False,
+        )
+        reference_actions.add_flex_child(
+            self.text_to_image_reference_browse.widget, 1.0)
+        reference_actions.add_flex_child(
+            self.text_to_image_reference_clear.widget, 1.0)
+        content.add_preferred_child(reference_actions)
+        self.text_to_image_reference_label = self._label(
+            content, "None", "text-to-image.reference.label")
         self.text_to_image_status = self._label(
             content, "", "text-to-image.status")
         self.text_to_image_load_button = self._button(
@@ -916,6 +978,38 @@ class NativeGenerationPanels:
             ),
         )
 
+    def _sync_text_to_image_reference_rows(self, references, *, enabled):
+        if [row["stable_id"] for row in self._text_to_image_reference_rows] != [ref.stable_id for ref in references]:
+            for row in self._text_to_image_reference_rows:
+                row["connections"].clear()
+                self._document.destroy_widget_recursive(row["root"].handle)
+            self._text_to_image_reference_rows = [self._create_text_to_image_reference_row(ref) for ref in references]
+        for index, (row, ref) in enumerate(zip(self._text_to_image_reference_rows, references)):
+            row["label"].text = f"<image{index + 1}> {ref.name}"
+            row["up"].widget.enabled = enabled and index > 0
+            row["down"].widget.enabled = enabled and index + 1 < len(references)
+            row["remove"].widget.enabled = enabled
+
+    def _create_text_to_image_reference_row(self, ref):
+        root = self._document.create_hstack("NativeTextToImageReference")
+        root.set_layout_spacing(4.0)
+        suffix = f"text-to-image.reference.{ref.stable_id}"
+        root.stable_id = f"diffusion-editor.generation.{suffix}"
+        label = self._document.create_label("")
+        root.add_flex_child(label, 1.0)
+        up, down, remove = [self._document.create_button(text) for text in ("↑", "↓", "×")]
+        for name, button in (("up", up), ("down", down), ("remove", remove)):
+            button.widget.stable_id = f"diffusion-editor.generation.{suffix}.{name}"
+            root.add_fixed_child(button.widget, 28.0)
+        connections = [
+            up.connect_clicked(lambda: self._emit(GenerationAction.MOVE_TEXT_TO_IMAGE_REFERENCE, (ref.stable_id, -1))),
+            down.connect_clicked(lambda: self._emit(GenerationAction.MOVE_TEXT_TO_IMAGE_REFERENCE, (ref.stable_id, 1))),
+            remove.connect_clicked(lambda: self._emit(GenerationAction.REMOVE_TEXT_TO_IMAGE_REFERENCE, ref.stable_id)),
+        ]
+        self.text_to_image_reference_container.add_preferred_child(root)
+        return dict(stable_id=ref.stable_id, root=root, label=label, up=up, down=down,
+                    remove=remove, connections=connections)
+
     def _sync_text_to_image_lora_rows(
             self,
             adapters: tuple[TextToImageLoraAdapter, ...],
@@ -1354,6 +1448,9 @@ class NativeGenerationPanels:
 
     def _set_text_to_image_profile_ids(self, values) -> None:
         self._text_to_image_profile_ids = values
+
+    def _set_text_to_image_reference_ids(self, values) -> None:
+        self._text_to_image_reference_ids = values
 
     def _set_image_edit_reference_ids(self, values) -> None:
         self._image_edit_reference_ids = values

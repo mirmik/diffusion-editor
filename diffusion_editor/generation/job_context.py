@@ -20,6 +20,7 @@ from .provenance import (
     GenerationProvenance,
     RequestProvenance,
     capture_tool_state,
+    image_content_hash,
 )
 from .types import Rect
 
@@ -70,11 +71,7 @@ class FrozenImage:
 
     @property
     def content_hash(self) -> str:
-        digest = hashlib.sha256()
-        digest.update(self.mode.encode("utf-8"))
-        digest.update(f"{self.size[0]}x{self.size[1]}".encode("ascii"))
-        digest.update(self.data)
-        return f"sha256:{digest.hexdigest()}"
+        return image_content_hash(self.mode, self.size, self.data)
 
 
 @dataclass(frozen=True)
@@ -216,6 +213,7 @@ class InferenceJobContext:
     input_array: FrozenArray | None = None
     request_mask: FrozenImage | None = None
     reference_image: FrozenImage | None = None
+    reference_images: tuple[FrozenImage, ...] = ()
     target_mask: FrozenArray | None = None
     paste: FrozenPasteContext | None = None
     model_provenance: tuple[tuple[str, str], ...] = ()

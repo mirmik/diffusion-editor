@@ -18,16 +18,19 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, default=Path("/tmp/diffusion-editor-qwen21-smoke"))
     parser.add_argument("--steps", type=int, default=4)
-    parser.add_argument("--turbo8", action="store_true")
+    profiles = parser.add_mutually_exclusive_group()
+    profiles.add_argument("--turbo8", action="store_true")
+    profiles.add_argument("--turbo", action="store_true")
     parser.add_argument("--size", type=int, default=512)
     parser.add_argument("--repeat-size", type=int, default=0,
                         help="generate again at this size without reloading")
     parser.add_argument("--check-only", action="store_true")
     args = parser.parse_args()
-    profile_id = "qwen-image-2.1-turbo8" if args.turbo8 else "qwen-image-2.1"
+    profile_id = ("qwen-image-2.1-turbo" if args.turbo else
+                  "qwen-image-2.1-turbo8" if args.turbo8 else "qwen-image-2.1")
     profile = text_to_image_profile(profile_id)
     p = profile.defaults()
-    if args.turbo8:
+    if args.turbo8 or args.turbo:
         args.steps = 8
     if args.check_only:
         from diffusion_editor.workers.qwen_image21_process import QwenImage21Pipeline
@@ -52,7 +55,7 @@ def main():
         result, seed, provenance = backend.text_to_image(dict(data, width=args.size, height=args.size))
         assert result.size == (args.size, args.size) and result.mode == "RGBA"
         result.save(args.output / "text-to-image.png")
-        if args.steps >= 30 or args.turbo8:
+        if args.steps >= 30 or args.turbo8 or args.turbo:
             assert result.getextrema()[3][0] < 32, "No transparent background generated"
         (args.output / "text-to-image.json").write_text(json.dumps(provenance, indent=2))
         print("Text-to-image:", result.size, result.getextrema(), flush=True)
@@ -68,6 +71,28 @@ def main():
             result.save(args.output / "text-to-image-repeat.png")
             (args.output / "text-to-image-repeat.json").write_text(json.dumps(provenance, indent=2))
             print("Repeated generation:", result.size, result.getextrema(), flush=True)
+        # Reference-only generation: different subject, non-square reference,
+        # no source pixels from the target layer, exact non-multiple output size.
+        reference = Image.new("RGBA", (768, 384), (245, 226, 185, 255))
+        drawing = ImageDraw.Draw(reference)
+        drawing.rectangle((0, 256, 768, 384), fill=(20, 85, 91, 255))
+        drawing.ellipse((170, 36, 430, 296), fill=(221, 79, 36, 255), outline=(24, 39, 39, 255), width=12)
+        drawing.line((80, 310, 650, 80), fill=(24, 39, 39, 255), width=15)
+        reference.save(args.output / "style-reference.png")
+        for reference_seed in (42, 43):
+            ref_parameters = dict(p, seed=reference_seed,
+                prompt="Create a new illustration of a lighthouse on a rocky coast with ocean waves. Use <image1> only as an artistic style reference: flat geometric shapes, thick dark outlines, muted cream, burnt orange and deep teal palette. Create a new composition. Do not reproduce the circle or diagonal line from the reference.")
+            result, seed, provenance = backend.text_to_image(
+                dict(data, parameters=ref_parameters, width=args.size-13, height=args.size), reference)
+            assert result.size == (args.size-13, args.size) and result.mode == "RGBA"
+            assert provenance["request"]["parameters"]["reference_image_hash"]
+            sampling = provenance["runtime"]["provider_runtime"]["sampling"]
+            assert sampling["reference_count"] == 1 and sampling["reference_fit"] == "contain"
+            if args.turbo:
+                assert sampling["sigmas"] == [1., .978453, .95418, .926626, .89508, .845148, .704534, .414568, 0.]
+            result.save(args.output / f"reference-{seed}.png")
+            (args.output / f"reference-{seed}.json").write_text(json.dumps(provenance, indent=2))
+            print("Reference generation:", seed, result.size, flush=True)
         # Switch tools: verify explicit disposal/reload, primary alpha and ref IPC.
         backend.unload_text_to_image()
         source = Image.new("RGBA", (args.size, args.size), (0, 0, 0, 0))

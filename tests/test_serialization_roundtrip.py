@@ -350,3 +350,84 @@ def test_solo_parent_does_not_include_children():
     stack.toggle_solo_layer(child)
     child_solo = stack.composite()
     np.testing.assert_array_equal(child_solo[0, 0], np.array([0, 0, 255, 255], dtype=np.uint8))
+
+
+def test_text_to_image_references_roundtrip_in_project_and_snapshot(tmp_path):
+    stack = LayerStack()
+    stack.init_from_image(_solid_rgba(12, 10, (255, 255, 255, 255)))
+    reference = stack.active_layer
+    embedded = Layer("Embedded reference", 7, 5)
+    embedded.tool = TextToImageTool(
+        "qwen-image-2.1-turbo",
+        reference_image=Image.new("RGBA", (9, 4), (10, 20, 30, 64)),
+        reference_image_name_hint="style.png")
+    stack.insert_layer(embedded)
+    linked = Layer("Linked reference", 7, 5)
+    linked.tool = TextToImageTool("qwen-image-2.1", reference_layer_id=reference.id,
+                                  reference_layer_name_hint=reference.name)
+    stack.insert_layer(linked)
+    path = tmp_path / "refs.deproj"
+    stack.save_project(str(path))
+    for snapshot in (False, True):
+        restored = LayerStack()
+        if snapshot:
+            restored.load_state(stack.serialize_state())
+        else:
+            restored.load_project(str(path))
+        tool = restored.find_layer_by_id(embedded.id).tool
+        assert tool.model_profile_id == "qwen-image-2.1-turbo"
+        assert tool.parameters["steps"] == 8
+        assert tool.reference_image.mode == "RGBA"
+        assert tool.reference_image.getpixel((0, 0)) == (10, 20, 30, 64)
+        assert tool.reference_image_name_hint == "style.png"
+        assert restored.find_layer_by_id(linked.id).tool.reference_layer_id == reference.id
+
+
+def test_multiple_text_to_image_references_roundtrip_and_legacy_migration(tmp_path):
+    from diffusion_editor.document.tool import TextToImageReference
+    from diffusion_editor.document.tool_serialization import load_tool
+    stack = LayerStack()
+    stack.init_from_image(_solid_rgba(12, 10, (255, 255, 255, 255)))
+    linked_id = stack.active_layer.id
+    layer = Layer("Generated", 7, 5)
+    layer.tool = TextToImageTool("qwen-image-2.1-turbo", references=(
+        TextToImageReference(stable_id="first", image=Image.new("RGBA", (9, 4), (10, 20, 30, 64)), image_name_hint="style.png"),
+        TextToImageReference(stable_id="second", layer_id=linked_id),
+        TextToImageReference(stable_id="third", image=Image.new("RGBA", (3, 8), (60, 80, 90, 128))),
+    ))
+    stack.insert_layer(layer)
+    path = tmp_path / "multiple.deproj"
+    stack.save_project(str(path))
+    restored = LayerStack()
+    restored.load_project(str(path))
+    refs = restored.active_layer.tool.references
+    assert [r.stable_id for r in refs] == ["first", "second", "third"]
+    assert refs[0].image.getpixel((0, 0)) == (10, 20, 30, 64)
+    assert refs[1].layer_id == linked_id
+    assert refs[2].image.size == (3, 8)
+    assert refs[2].image.getpixel((0, 0))[3] == 128
+    with zipfile.ZipFile(path) as zf:
+        image_path = next(p for p in zf.namelist() if p.endswith('_reference_0.npy'))
+        legacy = load_tool(dict(tool_type="text_to_image", model_profile_id="qwen-image-2.1",
+                               reference_file=image_path, reference_image_name_hint="legacy.png"), zf).tool
+        assert len(legacy.references) == 1
+        assert legacy.references[0].image.getpixel((0, 0))[3] == 64
+        assert legacy.references[0].image_name_hint == "legacy.png"
+
+
+def test_missing_nonfirst_reference_asset_rejects_project(tmp_path):
+    import pytest
+    from diffusion_editor.document.tool import TextToImageReference
+    stack = LayerStack()
+    stack.init_from_image(_solid_rgba(8, 8, (255, 255, 255, 255)))
+    stack.active_layer.tool = TextToImageTool("qwen-image-2.1", references=tuple(
+        TextToImageReference(image=Image.new("RGBA", (8, 8))) for _ in range(2)))
+    path = tmp_path / "missing.deproj"
+    stack.save_project(str(path))
+    with zipfile.ZipFile(path) as zf:
+        entries = {n: zf.read(n) for n in zf.namelist() if not n.endswith('_reference_1.npy')}
+    with zipfile.ZipFile(path, 'w') as zf:
+        for name, content in entries.items():
+            zf.writestr(name, content)
+    with pytest.raises(ValueError, match="reference image entry is missing"):
+        LayerStack().load_project(str(path))

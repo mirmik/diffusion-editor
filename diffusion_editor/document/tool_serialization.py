@@ -20,6 +20,7 @@ from .tool import (
     InstructTool,
     LamaTool,
     TextToImageTool,
+    TextToImageReference,
     Tool,
 )
 
@@ -35,7 +36,7 @@ class ToolLoadResult:
 
 def serialize_tool(tool: Tool, file_key: str) -> dict:
     if isinstance(tool, TextToImageTool):
-        return _serialize_text_to_image_tool(tool)
+        return _serialize_text_to_image_tool(tool, file_key)
     if isinstance(tool, DiffusionTool):
         return _serialize_diffusion_tool(tool, file_key)
     if isinstance(tool, LamaTool):
@@ -46,15 +47,20 @@ def serialize_tool(tool: Tool, file_key: str) -> dict:
 
 
 def save_tool_assets(tool: Tool, zf: zipfile.ZipFile, file_key: str) -> None:
-    if not isinstance(tool, (DiffusionTool, LamaTool, InstructTool)):
+    if isinstance(tool, TextToImageTool):
+        for index, ref in enumerate(tool.references):
+            if ref.image is not None:
+                save_array_to_zip(zf, f"layers/{file_key}_reference_{index}.npy", np.array(ref.image))
         return
-    if tool.source_patch is not None:
+    if not isinstance(tool, (DiffusionTool, LamaTool, InstructTool, TextToImageTool)):
+        return
+    if getattr(tool, "source_patch", None) is not None:
         save_array_to_zip(
             zf,
             f"layers/{file_key}_source.npy",
             np.array(tool.source_patch),
         )
-    if isinstance(tool, InstructTool) and tool.reference_image is not None:
+    if isinstance(tool, (InstructTool, TextToImageTool)) and tool.reference_image is not None:
         save_array_to_zip(
             zf,
             f"layers/{file_key}_reference.npy",
@@ -70,7 +76,7 @@ def load_tool(d: dict, zf: zipfile.ZipFile) -> ToolLoadResult:
     """
     tool_type = d.get("tool_type") or d.get("type")
     if tool_type == "text_to_image":
-        return _load_text_to_image_tool(d)
+        return _load_text_to_image_tool(d, zf)
     if tool_type == "diffusion":
         return _load_diffusion_tool(d, zf)
     if tool_type == "lama":
@@ -117,13 +123,20 @@ def _serialize_diffusion_tool(tool: DiffusionTool, file_key: str) -> dict:
     return _with_generation_provenance(data, tool)
 
 
-def _serialize_text_to_image_tool(tool: TextToImageTool) -> dict:
+def _serialize_text_to_image_tool(tool: TextToImageTool, file_key: str) -> dict:
     return _with_generation_provenance({
         "tool_type": tool.tool_type,
         "model_profile_id": tool.model_profile_id,
         "profile_parameters": tool.profile_parameters,
         "profile_lora_adapters": tool.profile_lora_adapters,
         "profile_schema_version": tool.profile_schema_version,
+        "references": [{
+            "stable_id": ref.stable_id,
+            "layer_id": ref.layer_id,
+            "layer_name_hint": ref.layer_name_hint,
+            "image_name_hint": ref.image_name_hint,
+            "image_file": f"layers/{file_key}_reference_{index}.npy" if ref.image is not None else None,
+        } for index, ref in enumerate(tool.references)],
     }, tool)
 
 
@@ -235,8 +248,24 @@ def _load_lama_tool(d: dict, zf: zipfile.ZipFile) -> ToolLoadResult:
     return ToolLoadResult(tool=tool)
 
 
-def _load_text_to_image_tool(d: dict) -> ToolLoadResult:
+def _load_text_to_image_tool(d: dict, zf: zipfile.ZipFile) -> ToolLoadResult:
+    references = None
+    if "references" in d:
+        raw = d["references"]
+        if not isinstance(raw, list) or len(raw) > 10:
+            raise ValueError("Invalid Text to Image references list")
+        references = []
+        for ref in raw:
+            if not isinstance(ref, dict):
+                raise ValueError("Invalid Text to Image reference")
+            image_file = ref.get("image_file")
+            references.append(TextToImageReference(
+                stable_id=ref.get("stable_id"), layer_id=ref.get("layer_id"),
+                layer_name_hint=ref.get("layer_name_hint", ""),
+                image_name_hint=ref.get("image_name_hint", ""),
+                image=load_pil_from_zip(zf, image_file, mode="RGBA") if image_file else None))
     tool = TextToImageTool(
+        references=references,
         model_profile_id=d.get("model_profile_id", "qwen-image-2512"),
         profile_parameters=(
             d.get("profile_parameters")
@@ -247,6 +276,11 @@ def _load_text_to_image_tool(d: dict) -> ToolLoadResult:
             if isinstance(d.get("profile_lora_adapters"), dict) else None
         ),
         profile_schema_version=int(d.get("profile_schema_version", 1)),
+        reference_layer_id=d.get("reference_layer_id"),
+        reference_layer_name_hint=d.get("reference_layer_name_hint", ""),
+        reference_image=(load_pil_from_zip(zf, d["reference_file"], mode="RGBA")
+                         if d.get("reference_file") in zf.namelist() else None),
+        reference_image_name_hint=d.get("reference_image_name_hint", ""),
     )
     _load_generation_provenance(tool, d)
     return ToolLoadResult(tool=tool)

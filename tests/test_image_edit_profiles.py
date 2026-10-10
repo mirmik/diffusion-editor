@@ -55,6 +55,7 @@ def test_builtin_profiles_are_stable_and_declarative():
         LEGACY_INSTRUCT_PROFILE_ID,
         "qwen-image-2.1",
         "qwen-image-2.1-turbo8",
+        "qwen-image-2.1-turbo",
     ]
     assert profiles[0].primary
     assert image_edit_profile(FLUX2_KLEIN_PROFILE_ID).fast
@@ -64,7 +65,7 @@ def test_builtin_profiles_are_stable_and_declarative():
         assert {"prompt", "steps", "seed", "model", "dtype", "device"} <= set(ids)
         assert set(profile.normalize({})) == set(ids)
     assert [profile.max_input_images for profile in profiles] == [
-        2, 2, 2, 2, 1, 2, 2,
+        2, 2, 2, 2, 1, 2, 2, 2,
     ]
 
 

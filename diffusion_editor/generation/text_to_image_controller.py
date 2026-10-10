@@ -10,10 +10,12 @@ from PIL import Image
 from termin.base import log
 
 from ..document.layer import Layer
+from ..document.layer_stack import LayerStack
 from ..document.tool import TextToImageTool
 from ..engines.text_to_image_engine import TextToImageEngine
 from .job_context import (
     FrozenPasteContext,
+    FrozenImage,
     InferenceJobContext,
     JobDocumentState,
     cancel_engine,
@@ -25,7 +27,8 @@ from .job_context import (
 )
 from .provenance import RequestProvenance
 from .text_to_image_profiles import text_to_image_profile
-from .types import TextToImageInferenceResult, TextToImageRequest
+from .types import GenerationError, TextToImageInferenceResult, TextToImageRequest
+from .reference_resolver import resolve_text_to_image_references, layer_reference_image
 
 
 @dataclass(frozen=True)
@@ -44,14 +47,17 @@ class TextToImageControllerEvent:
 class _PendingTextToImageJob:
     context: InferenceJobContext
     request: TextToImageRequest
+    reference_layer_ids: tuple[str | None, ...] = ()
 
 
 class TextToImageGenerationController:
     def __init__(
             self, *, engine: TextToImageEngine,
+            layer_stack: LayerStack | None = None,
             document_state: Callable[[], JobDocumentState] | None = None,
             job_id_factory: Callable[[], str] = new_job_id):
         self._engine = engine
+        self._layer_stack = layer_stack
         self._document_state = document_state or standalone_document_state
         self._job_id_factory = job_id_factory
         self._pending_job: _PendingTextToImageJob | None = None
@@ -75,7 +81,7 @@ class TextToImageGenerationController:
 
     def invalidate_layer(self, layer_id: str, reason: str) -> bool:
         job = self._pending_job
-        if job is None or job.context.layer_id != layer_id:
+        if job is None or layer_id not in (job.context.layer_id, *job.reference_layer_ids):
             return False
         self._pending_job = None
         self._invalidate_active(reason)
@@ -134,15 +140,23 @@ class TextToImageGenerationController:
         parameters = copy.deepcopy(tool.parameters)
         adapters = tuple(
             adapter.to_dict() for adapter in tool.lora_adapters)
+        references = resolve_text_to_image_references(tool, self._layer_stack)
+        if isinstance(references, GenerationError):
+            return TextToImageControllerEvent(status=references.message, inference_error=references.message)
+        frozen_references = tuple(FrozenImage.capture(image) for image in references)
+        reference = references[0] if references else None
+        frozen_reference = frozen_references[0] if frozen_references else None
         request = TextToImageRequest(
             model_profile_id=profile.stable_id,
             parameters=parameters,
             width=layer.width,
             height=layer.height,
             lora_adapters=adapters,
+            reference_images=references,
         )
         context = capture_job_context(
             kind="text_to_image",
+            reference_image=reference,
             document_state=self._document_state(),
             layer=layer,
             job_id=self._job_id_factory(),
@@ -161,10 +175,17 @@ class TextToImageGenerationController:
                     "lora_adapters": list(adapters),
                     "width": layer.width,
                     "height": layer.height,
+                    "reference_image_hash": (frozen_reference.content_hash if frozen_reference else None),
+                    "reference_layer_id": tool.reference_layer_id if reference is not None else None,
+                    "references": [{"stable_id": ref.stable_id, "layer_id": ref.layer_id,
+                                    "image_hash": frozen.content_hash}
+                                   for ref, frozen in zip(tool.references, frozen_references)],
                 },
             ),
         )
-        job = _PendingTextToImageJob(context, request)
+        context = replace(context, reference_images=frozen_references)
+        job = _PendingTextToImageJob(
+            context, request, tuple(ref.layer_id for ref in tool.references) if references else ())
         matches = getattr(
             self._engine, "loaded_configuration_matches", None)
         needs_load = not self._engine.is_loaded
@@ -193,8 +214,27 @@ class TextToImageGenerationController:
             )
         return self._submit_job(job)
 
+    def _reference_is_current(self, job: _PendingTextToImageJob) -> bool:
+        for layer_id, frozen in zip(job.reference_layer_ids, job.context.reference_images):
+            if layer_id is None:
+                continue
+            layer = self._layer_stack.find_layer_by_id(layer_id)
+            if layer is None:
+                return False
+            reference = layer_reference_image(
+                layer, purpose="Text to Image", preserve_alpha=text_to_image_profile(
+                    job.request.model_profile_id).supports_alpha)
+            if isinstance(reference, GenerationError) or FrozenImage.capture(reference.image) != frozen:
+                return False
+        return True
+
     def _submit_job(
             self, job: _PendingTextToImageJob) -> TextToImageControllerEvent:
+        if not self._reference_is_current(job):
+            self._pending_job = None
+            return TextToImageControllerEvent(
+                status="Text to Image cancelled: reference changed",
+                inference_error="Text to Image reference changed")
         submitted = submit_with_job_id(
             self._engine, "submit_request", job.request,
             job_id=job.context.job_id)
@@ -249,6 +289,10 @@ class TextToImageGenerationController:
             if job is None or job.context.job_id != expected_id:
                 return TextToImageControllerEvent(
                     status="Text to Image result ignored: no matching job")
+            if not self._reference_is_current(job):
+                return TextToImageControllerEvent(
+                    status="Text to Image result ignored: reference changed",
+                    inference_error="Text to Image reference changed")
             result = event.result
             if not isinstance(result, TextToImageInferenceResult):
                 return TextToImageControllerEvent(

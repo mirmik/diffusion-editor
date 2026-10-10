@@ -9,7 +9,7 @@ from typing import Any, Iterable
 
 from .qwen_image21_config import (
     QWEN_IMAGE_21_PROFILE_ID, QWEN_IMAGE_21_PROVIDER, qwen_image21_parameters,
-    QWEN_IMAGE_21_TURBO8_PROFILE_ID, qwen_image21_turbo8_adapters,
+    QWEN_IMAGE_21_TURBO_PROFILE_ID, QWEN_IMAGE_21_TURBO8_PROFILE_ID, qwen_image21_turbo8_adapters,
 )
 
 from .image_edit_profiles import (
@@ -45,6 +45,11 @@ class TextToImageProfile:
     default_lora_adapters: tuple[TextToImageLoraAdapter, ...] = ()
     dimension_multiple: int = 1
     supports_alpha: bool = False
+    max_reference_images: int = 0
+
+    @property
+    def supports_reference_image(self) -> bool:
+        return self.max_reference_images > 0
 
     def parameter(self, stable_id: str) -> TextToImageParameter:
         for parameter in self.parameters:
@@ -294,6 +299,7 @@ _PROFILES += (TextToImageProfile(
     parameters=qwen_image21_parameters(),
     dimension_multiple=32,
     supports_alpha=True,
+    max_reference_images=10,
 ),)
 
 _PROFILES += (TextToImageProfile(
@@ -306,6 +312,19 @@ _PROFILES += (TextToImageProfile(
     default_lora_adapters=qwen_image21_turbo8_adapters(),
     dimension_multiple=32,
     supports_alpha=True,
+    max_reference_images=10,
+),)
+
+_PROFILES += (TextToImageProfile(
+    stable_id=QWEN_IMAGE_21_TURBO_PROFILE_ID,
+    title="Qwen Image 2.1 Turbo (Official)",
+    provider=QWEN_IMAGE_21_PROVIDER,
+    model_id="Qwen/Qwen-Image-2.1-Turbo",
+    description="Official 8-step Turbo checkpoint with native transparency and reference images.",
+    parameters=qwen_image21_parameters(turbo=True),
+    dimension_multiple=32,
+    supports_alpha=True,
+    max_reference_images=10,
 ),)
 
 _PROFILE_BY_ID = {profile.stable_id: profile for profile in _PROFILES}

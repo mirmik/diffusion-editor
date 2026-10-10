@@ -524,3 +524,29 @@ def test_instruct_and_grounding_engines_map_process_results():
         assert result_event.result.canvas_height == 6
     finally:
         grounding.shutdown()
+
+
+def test_ordered_multiple_references_survive_worker_ipc():
+    from diffusion_editor.generation.provenance import image_content_hash
+    references = tuple(Image.new("RGBA", (8, 6), color) for color in
+                       [(255, 0, 0, 64), (0, 255, 0, 128), (0, 0, 255, 255)])
+    profile = text_to_image_profile("qwen-image-2.1-turbo")
+    client = _client()
+    cancel = threading.Event()
+    try:
+        data = dict(profile_id=profile.stable_id, parameters=profile.defaults(), width=13, height=17)
+        client.request("load_text_to_image", data, cancel)
+        result = client.request("text_to_image", dict(data, reference_count=3), cancel,
+                                images={f"reference_{i}": image for i, image in enumerate(references)})
+        assert result['provenance']['request']['parameters']['reference_image_hashes'] == [
+            image_content_hash(image.mode, image.size, image.tobytes()) for image in references]
+        for count in (-1, 11, True):
+            client.request("load_text_to_image", data, cancel)
+            with pytest.raises((RuntimeError, MlProtocolError), match="reference count"):
+                client.request("text_to_image", dict(data, reference_count=count), cancel)
+        client.request("load_text_to_image", data, cancel)
+        with pytest.raises((RuntimeError, MlProtocolError), match="requires reference_1"):
+            client.request("text_to_image", dict(data, reference_count=2), cancel,
+                           images={"reference_0": references[0]})
+    finally:
+        client.shutdown()

@@ -905,6 +905,16 @@ class LayerStack:
                         or reference_file not in available):
                     raise ValueError(
                         "project tool reference image entry is missing")
+                if tool_type == "text_to_image" and "references" in tool_dict:
+                    refs = tool_dict["references"]
+                    if not isinstance(refs, list) or len(refs) > 10:
+                        raise ValueError("Invalid Text to Image references list")
+                    for ref in refs:
+                        if not isinstance(ref, dict):
+                            raise ValueError("Invalid Text to Image reference")
+                        filename = ref.get("image_file")
+                        if filename is not None and (not isinstance(filename, str) or filename not in available):
+                            raise ValueError("project tool reference image entry is missing")
             children = layer_dict.get("children", [])
             if not isinstance(children, list):
                 raise ValueError("project layer children must be an array")
@@ -1157,6 +1167,10 @@ class LayerStack:
             self._required_int(
                 tool.seed, "tool seed", minimum=-1, maximum=2**32 - 1)
 
+        if isinstance(tool, TextToImageTool):
+            # Reuse the model's list/identity/source invariants without mutating it.
+            TextToImageTool.validate_references(tool.references)
+
         payload_bytes = 0
         source_patch = getattr(tool, "source_patch", None)
         if source_patch is not None:
@@ -1175,10 +1189,11 @@ class LayerStack:
             if source.shape[0] * source.shape[1] > self.MAX_PROJECT_PIXELS:
                 raise ValueError("tool source_patch exceeds the pixel budget")
             payload_bytes = int(source.nbytes)
-        if (
-                isinstance(tool, InstructTool)
-                and tool.reference_image is not None):
-            reference = np.asarray(tool.reference_image)
+        reference_images = ([ref.image for ref in tool.references if ref.image is not None]
+                            if isinstance(tool, TextToImageTool) else
+                            [tool.reference_image] if isinstance(tool, InstructTool) and tool.reference_image is not None else [])
+        for image in reference_images:
+            reference = np.asarray(image)
             if (
                     reference.dtype != np.uint8
                     or reference.ndim != 3

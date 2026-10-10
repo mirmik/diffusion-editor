@@ -24,6 +24,7 @@ from ..generation.provenance import (
     RequestProvenance,
     enforce_model_identity_policy,
     floating_model_identity,
+    image_content_hash,
     resolve_local_model_identity,
 )
 from ..generation.image_edit_profiles import (
@@ -40,7 +41,7 @@ from ..generation.image_edit_profiles import (
 )
 from ..generation.text_to_image_profiles import text_to_image_profile
 from ..generation.qwen_image21_config import (
-    QWEN_IMAGE_21_PROVIDER, QWEN_IMAGE_21_TURBO8_PROFILE_ID,
+    QWEN_IMAGE_21_PROVIDER, QWEN_IMAGE_21_TURBO8_PROFILE_ID, QWEN_IMAGE_21_TURBO_PROFILE_ID,
 )
 
 
@@ -435,6 +436,7 @@ class RealMlBackend:
 
         parameters = profile.normalize(data.get("parameters"))
         parameters["sampling_mode"] = (
+            "turbo" if profile.stable_id == QWEN_IMAGE_21_TURBO_PROFILE_ID else
             "turbo8" if profile.stable_id == QWEN_IMAGE_21_TURBO8_PROFILE_ID else "base")
         adapters = tuple(a.to_dict() for a in profile.normalize_lora_adapters(
             data.get("lora_adapters")))
@@ -903,7 +905,8 @@ class RealMlBackend:
         }
 
     def text_to_image(
-            self, data: dict[str, Any]
+            self, data: dict[str, Any], reference_image: Image.Image | None = None,
+            *, reference_images: tuple[Image.Image, ...] | None = None
     ) -> tuple[Image.Image, int, dict[str, Any]]:
         import torch
 
@@ -914,6 +917,13 @@ class RealMlBackend:
             raise RuntimeError(
                 f"Text-to-image profile is not loaded: {profile_id}")
         profile = text_to_image_profile(profile_id)
+        if reference_image is not None and reference_images is not None:
+            raise ValueError("Use reference_images or reference_image, not both")
+        references = tuple(reference_images) if reference_images is not None else (
+            (reference_image,) if reference_image is not None else ())
+        if len(references) > profile.max_reference_images:
+            raise ValueError(f"{profile.title} accepts at most {profile.max_reference_images} references")
+        reference_image = references[0] if references else None
         parameters = profile.normalize(data.get("parameters"))
         adapters = tuple(
             adapter.to_dict()
@@ -931,7 +941,8 @@ class RealMlBackend:
         seed = self._resolve_seed(int(parameters["seed"]))
         if profile.provider == QWEN_IMAGE_21_PROVIDER:
             result = self._text_to_image_pipe.generate(
-                parameters, seed, inference_width, inference_height)
+                parameters, seed, inference_width, inference_height,
+                reference_images=references)
         else:
             generator = torch.Generator(device="cpu").manual_seed(seed)
             true_cfg_scale = float(parameters["true_cfg_scale"])
@@ -955,12 +966,15 @@ class RealMlBackend:
             result = self._text_to_image_pipe(**kwargs).images[0]
         if result.size != (width, height):
             result = result.resize((width, height), Image.Resampling.LANCZOS)
+        reference_hashes = [image_content_hash(image.mode, image.size, image.tobytes()) for image in references]
         request = RequestProvenance.capture("text_to_image", {
             "model_profile_id": profile_id,
             "parameters": parameters,
             "lora_adapters": list(adapters),
             "width": width,
             "height": height,
+            "reference_image_hash": reference_hashes[0] if reference_hashes else None,
+            "reference_image_hashes": reference_hashes,
         })
         provenance = GenerationProvenance(
             operation="text_to_image",

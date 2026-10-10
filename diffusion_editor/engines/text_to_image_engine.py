@@ -110,6 +110,8 @@ class TextToImageEngine:
             for adapter in profile.normalize_lora_adapters(
                 request.lora_adapters)
         ]
+        if len(request.reference_images) > profile.max_reference_images:
+            raise ValueError(f"{profile.title} accepts at most {profile.max_reference_images} reference images")
         result = self._client.request(
             "text_to_image",
             {
@@ -118,8 +120,10 @@ class TextToImageEngine:
                 "lora_adapters": adapters,
                 "width": request.width,
                 "height": request.height,
+                "reference_count": len(request.reference_images),
             },
             cancel,
+            images={f"reference_{i}": image for i, image in enumerate(request.reference_images)},
         )
         image = result["image"]
         if image.size != (request.width, request.height):

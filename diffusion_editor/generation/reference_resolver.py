@@ -6,6 +6,7 @@ import numpy as np
 from PIL import Image
 
 from .image_edit_profiles import image_edit_profile
+from .text_to_image_profiles import text_to_image_profile
 from .types import (
     GenerationError,
     ReferenceImage,
@@ -14,7 +15,7 @@ from .types import (
 )
 from ..document.layer import Layer
 from ..document.layer_stack import LayerStack
-from ..document.tool import DiffusionTool, InstructTool
+from ..document.tool import DiffusionTool, InstructTool, TextToImageTool
 
 
 def _clip_local_rect(layer: Layer, rect: Rect) -> Rect:
@@ -101,24 +102,52 @@ def resolve_ip_adapter_reference(
 
 
 def resolve_image_edit_reference(
-        tool: InstructTool,
-        layer_stack: LayerStack,
+        tool: InstructTool | TextToImageTool,
+        layer_stack: LayerStack | None,
 ) -> Image.Image | GenerationError | None:
-    """Resolve the optional second AI Edit image from a layer or embedded file."""
-    preserve_alpha = image_edit_profile(tool.model_profile_id).supports_alpha
+    """Resolve an optional AI Edit/Text to Image reference from a layer or file."""
+    is_generation = isinstance(tool, TextToImageTool)
+    purpose = "Text to Image" if is_generation else "AI Edit"
+    profile = (text_to_image_profile if is_generation else image_edit_profile)(tool.model_profile_id)
+    preserve_alpha = profile.supports_alpha
     if tool.reference_layer_id is not None:
-        layer = layer_stack.find_layer_by_id(tool.reference_layer_id)
+        layer = (layer_stack.find_layer_by_id(tool.reference_layer_id)
+                 if layer_stack is not None else None)
         if layer is None:
             hint = tool.reference_layer_name_hint or tool.reference_layer_id
             return GenerationError(
-                message=f"AI Edit reference missing: {hint}",
-                log_message=f"AI Edit reference layer not found: {hint}",
+                message=f"{purpose} reference missing: {hint}",
+                log_message=f"{purpose} reference layer not found: {hint}",
             )
         resolved = layer_reference_image(
-            layer, purpose="AI Edit", preserve_alpha=preserve_alpha)
+            layer, purpose=purpose, preserve_alpha=preserve_alpha)
         if isinstance(resolved, GenerationError):
             return resolved
         return resolved.image
     if tool.reference_image is not None:
         return tool.reference_image.copy().convert("RGBA" if preserve_alpha else "RGB")
     return None
+
+
+def resolve_text_to_image_references(tool: TextToImageTool, layer_stack: LayerStack | None):
+    profile = text_to_image_profile(tool.model_profile_id)
+    if not profile.supports_reference_image:
+        return ()
+    if len(tool.references) > profile.max_reference_images:
+        return GenerationError(message=f"{profile.title} accepts at most {profile.max_reference_images} references")
+    images = []
+    for index, ref in enumerate(tool.references, 1):
+        if ref.layer_id is not None:
+            layer = layer_stack.find_layer_by_id(ref.layer_id) if layer_stack is not None else None
+            if layer is None:
+                return GenerationError(message=f"Text to Image reference <image{index}> missing or unavailable: {ref.layer_name_hint or ref.layer_id}")
+            resolved = layer_reference_image(layer, purpose=f"Reference <image{index}>", preserve_alpha=profile.supports_alpha)
+            if isinstance(resolved, GenerationError):
+                return resolved
+            image = resolved.image
+        elif ref.image is not None:
+            image = ref.image.copy().convert("RGBA" if profile.supports_alpha else "RGB")
+        else:
+            return GenerationError(message=f"Text to Image reference <image{index}> is empty")
+        images.append(image)
+    return tuple(images)

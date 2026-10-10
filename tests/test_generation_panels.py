@@ -452,6 +452,7 @@ def test_text_to_image_panel_switches_to_original_qwen_profile(tmp_path):
         QWEN_IMAGE_PROFILE_ID,
         "qwen-image-2.1",
         "qwen-image-2.1-turbo8",
+        "qwen-image-2.1-turbo",
     ]
     coordinator.handle_intent(GenerationIntent(
         GenerationAction.SELECT_TEXT_TO_IMAGE_PROFILE,
@@ -1022,3 +1023,160 @@ def test_qwen21_panel_keeps_transparent_reference_file(tmp_path):
     coordinator.handle_intent(GenerationIntent(GenerationAction.PICK_IMAGE_EDIT_REFERENCE))
     assert layer.tool.reference_image.mode == "RGBA"
     assert layer.tool.reference_image.getpixel((0, 0)) == (11, 22, 33, 64)
+
+
+def test_text_to_image_reference_selection_file_undo_and_profile_switch(tmp_path):
+    application, *_ = _application(tmp_path)
+    reference = application.layer_stack.active_layer
+    layer = _insert_tool_layer(application, "Generated", TextToImageTool("qwen-image-2.1-turbo"))
+    coordinator = GenerationPanelsCoordinator(application, _Canvas())
+    coordinator.handle_intent(GenerationIntent(GenerationAction.SELECT_TEXT_TO_IMAGE_REFERENCE, reference.id))
+    assert layer.tool.reference_layer_id == reference.id
+    assert coordinator.state.text_to_image.supports_reference_image
+    path = tmp_path / "reference.png"
+    Image.new("RGBA", (12, 7), (10, 20, 30, 64)).save(path)
+    coordinator.set_reference_file_picker(lambda selected: selected(str(path)))
+    coordinator.handle_intent(GenerationIntent(GenerationAction.PICK_TEXT_TO_IMAGE_REFERENCE))
+    assert layer.tool.references[0].layer_id == reference.id
+    assert layer.tool.references[1].layer_id is None
+    assert layer.tool.references[1].image.getpixel((0, 0)) == (10, 20, 30, 64)
+    coordinator.handle_intent(GenerationIntent(GenerationAction.SELECT_TEXT_TO_IMAGE_PROFILE, "qwen-image-2512"))
+    assert not coordinator.state.text_to_image.supports_reference_image
+    coordinator.handle_intent(GenerationIntent(GenerationAction.SELECT_TEXT_TO_IMAGE_PROFILE, "qwen-image-2.1-turbo"))
+    assert coordinator.state.text_to_image.references[1].name == "External: reference.png"
+    coordinator.handle_intent(GenerationIntent(GenerationAction.CLEAR_TEXT_TO_IMAGE_REFERENCE))
+    assert layer.tool.references == ()
+    application.document.undo()
+    assert layer.tool.references[1].image.getpixel((0, 0)) == (10, 20, 30, 64)
+    coordinator.close()
+
+
+def test_native_text_to_image_reference_controls_follow_profile(tmp_path):
+    application, *_ = _application(tmp_path)
+    reference = application.layer_stack.active_layer
+    layer = _insert_tool_layer(application, "Generated", TextToImageTool("qwen-image-2.1-turbo"))
+    coordinator = GenerationPanelsCoordinator(application, _Canvas())
+    document = tc_ui_document_create()
+    panel = NativeGenerationPanels(document, coordinator.state, coordinator.handle_intent, lambda: None)
+    coordinator.bind_view(panel)
+    try:
+        assert panel.text_to_image_reference_combo.widget.enabled
+        index = panel._text_to_image_reference_ids.index(reference.id)
+        panel.text_to_image_reference_combo.selected_index = index
+        assert layer.tool.reference_layer_id == reference.id
+        coordinator.handle_intent(GenerationIntent(GenerationAction.SELECT_TEXT_TO_IMAGE_PROFILE, "qwen-image-2512"))
+        assert not panel.text_to_image_reference_combo.widget.enabled
+        assert not panel.text_to_image_reference_browse.widget.enabled
+        assert panel.text_to_image_reference_clear.widget.enabled
+    finally:
+        panel.close()
+        coordinator.close()
+        tc_ui_document_destroy(document)
+
+
+@pytest.mark.parametrize("change", ["reference_pixels", "reference_selection", "embedded_pixels"])
+def test_text_to_image_rejects_result_after_reference_changes(tmp_path, change):
+    from diffusion_editor.document.commands import SetImageEditReferenceCommand
+    application, *_ = _application(tmp_path)
+    reference = application.layer_stack.active_layer
+    layer = _insert_tool_layer(application, "Generated", TextToImageTool("qwen-image-2.1"))
+    if change == "embedded_pixels":
+        layer.tool.reference_image = Image.new("RGBA", (8, 8), (0, 0, 0, 64))
+    else:
+        layer.tool.reference_layer_id = reference.id
+    before = layer.image.copy()
+    event = application.text_to_image_controller.start(layer)
+    assert "Generating" in event.status
+    if change == "reference_pixels":
+        reference.image[:] = 0
+        application.layer_stack.mark_layer_dirty(reference)
+    elif change == "reference_selection":
+        application.document.execute(SetImageEditReferenceCommand(layer=layer))
+    else:
+        layer.tool.reference_image.paste((255, 0, 0, 255), (0, 0, 8, 8))
+    application.text_to_image_engine.poll_result = EnginePollEvent(
+        task_type="inference", result=TextToImageInferenceResult(
+            Image.new("RGBA", (layer.width, layer.height), (40, 80, 120, 255)), 41))
+    application.poll()
+    np.testing.assert_array_equal(layer.image, before)
+
+
+def test_missing_text_to_image_reference_does_not_leave_panel_running(tmp_path):
+    application, *_ = _application(tmp_path)
+    tool = TextToImageTool("qwen-image-2.1", reference_layer_id="deleted-layer")
+    _insert_tool_layer(application, "Generated", tool)
+    coordinator = GenerationPanelsCoordinator(application, _Canvas())
+    coordinator.handle_intent(GenerationIntent(GenerationAction.RUN))
+    assert coordinator.state.text_to_image.phase == GenerationPhase.ERROR
+    assert "missing" in coordinator.state.text_to_image.message
+    assert application.text_to_image_controller.pending_context is None
+    coordinator.close()
+
+
+def test_multiple_reference_rows_reorder_remove_limit_and_undo(tmp_path):
+    application, *_ = _application(tmp_path)
+    reference = application.layer_stack.active_layer
+    layer = _insert_tool_layer(application, "Generated", TextToImageTool("qwen-image-2.1-turbo"))
+    coordinator = GenerationPanelsCoordinator(application, _Canvas())
+    document = tc_ui_document_create()
+    panel = NativeGenerationPanels(document, coordinator.state, coordinator.handle_intent, lambda: None)
+    coordinator.bind_view(panel)
+    try:
+        for _ in range(10):
+            coordinator.handle_intent(GenerationIntent(GenerationAction.SELECT_TEXT_TO_IMAGE_REFERENCE, reference.id))
+        refs = layer.tool.references
+        assert len(refs) == len(panel._text_to_image_reference_rows) == 10
+        assert panel._text_to_image_reference_rows[9]['label'].text.startswith('<image10>')
+        assert not panel.text_to_image_reference_browse.widget.enabled
+        coordinator.handle_intent(GenerationIntent(GenerationAction.SELECT_TEXT_TO_IMAGE_REFERENCE, reference.id))
+        assert len(layer.tool.references) == 10
+        coordinator.handle_intent(GenerationIntent(GenerationAction.MOVE_TEXT_TO_IMAGE_REFERENCE, (refs[1].stable_id, -1)))
+        assert [r.stable_id for r in layer.tool.references[:2]] == [refs[1].stable_id, refs[0].stable_id]
+        assert panel._text_to_image_reference_rows[0]['stable_id'] == refs[1].stable_id
+        coordinator.handle_intent(GenerationIntent(GenerationAction.REMOVE_TEXT_TO_IMAGE_REFERENCE, refs[1].stable_id))
+        assert len(layer.tool.references) == 9
+        assert panel.text_to_image_reference_browse.widget.enabled
+        assert panel._text_to_image_reference_rows[0]['label'].text.startswith('<image1>')
+        application.document.undo()
+        assert layer.tool.references[0].stable_id == refs[1].stable_id
+        application.document.undo()
+        assert layer.tool.references[0].stable_id == refs[0].stable_id
+        application.document.redo()
+        assert layer.tool.references[0].stable_id == refs[1].stable_id
+    finally:
+        panel.close()
+        coordinator.close()
+        tc_ui_document_destroy(document)
+
+
+@pytest.mark.parametrize("change", ["linked_pixels", "embedded_pixels", "reorder", "remove_layer"])
+def test_nonfirst_reference_change_rejects_late_result(tmp_path, change):
+    from diffusion_editor.document.tool import TextToImageReference
+    from diffusion_editor.document.commands import SetTextToImageReferencesCommand
+    application, *_ = _application(tmp_path)
+    linked = application.layer_stack.active_layer
+    tool = TextToImageTool("qwen-image-2.1", references=(
+        TextToImageReference(image=Image.new("RGBA", (8, 8), (255, 0, 0, 255))),
+        TextToImageReference(layer_id=linked.id),
+        TextToImageReference(image=Image.new("RGBA", (8, 8), (0, 0, 255, 64))),
+    ))
+    layer = _insert_tool_layer(application, "Generated", tool)
+    before = layer.image.copy()
+    application.text_to_image_controller.start(layer)
+    context = application.text_to_image_controller.pending_context
+    assert len(context.reference_images) == 3
+    assert len(context.request_provenance.parameters.to_dict()['references']) == 3
+    if change == "linked_pixels":
+        linked.image[:] = 0
+        application.layer_stack.mark_layer_dirty(linked)
+    elif change == "embedded_pixels":
+        tool.references[2].image.paste((0, 0, 0, 0), (0, 0, 8, 8))
+    elif change == "reorder":
+        application.document.execute(SetTextToImageReferencesCommand(layer, tuple(reversed(tool.references))))
+    else:
+        application.layer_stack.remove_layer(linked)
+    application.text_to_image_engine.poll_result = EnginePollEvent(
+        task_type="inference", result=TextToImageInferenceResult(
+            Image.new("RGBA", (layer.width, layer.height), (40, 80, 120, 255)), 41))
+    application.poll()
+    np.testing.assert_array_equal(layer.image, before)

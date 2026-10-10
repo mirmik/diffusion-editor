@@ -7,6 +7,9 @@ the layer reference.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field, replace
+from uuid import uuid4
+
 from PIL import Image
 
 from ..generation.provenance import (
@@ -71,10 +74,48 @@ class DiffusionTool(Tool):
         self.generation_provenance = None
 
 
+@dataclass(frozen=True)
+class TextToImageReference:
+    stable_id: str = field(default_factory=lambda: uuid4().hex)
+    layer_id: str | None = None
+    layer_name_hint: str = ""
+    image: Image.Image | None = None
+    image_name_hint: str = ""
+
+    def copy(self):
+        return replace(self, image=self.image.copy() if self.image is not None else None)
+
+    @property
+    def label(self) -> str:
+        if self.layer_id is not None:
+            return f"Layer: {self.layer_name_hint or self.layer_id}"
+        return f"External: {self.image_name_hint or 'image'}"
+
+
+def _first_reference_property(name, default):
+    """Compatibility access to the first entry for older integrations."""
+    def get(tool):
+        return getattr(tool.references[0], name) if tool.references else default
+
+    def set_value(tool, value):
+        refs = list(tool.references)
+        first = refs[0] if refs else TextToImageReference()
+        first = replace(first, **{name: value})
+        if first.layer_id is not None or first.image is not None:
+            tool.references = (first, *refs[1:])
+        elif refs:
+            tool.references = tuple(refs[1:])
+    return property(get, set_value)
+
+
 class TextToImageTool(Tool):
     """Persistent settings for generation that has no source image."""
 
     tool_type = "text_to_image"
+    reference_layer_id = _first_reference_property("layer_id", None)
+    reference_layer_name_hint = _first_reference_property("layer_name_hint", "")
+    reference_image = _first_reference_property("image", None)
+    reference_image_name_hint = _first_reference_property("image_name_hint", "")
 
     def __init__(
             self,
@@ -82,7 +123,18 @@ class TextToImageTool(Tool):
             profile_parameters: dict[str, dict] | None = None,
             profile_lora_adapters: dict[str, list[dict]] | None = None,
             *,
-            profile_schema_version: int = TEXT_TO_IMAGE_PROFILE_SCHEMA_VERSION):
+            profile_schema_version: int = TEXT_TO_IMAGE_PROFILE_SCHEMA_VERSION,
+            reference_layer_id: str | None = None,
+            reference_layer_name_hint: str = "",
+            reference_image: Image.Image | None = None,
+            reference_image_name_hint: str = "",
+            references: tuple[TextToImageReference, ...] | None = None):
+        if references is None:
+            references = ((TextToImageReference(
+                layer_id=reference_layer_id, layer_name_hint=reference_layer_name_hint,
+                image=reference_image, image_name_hint=reference_image_name_hint),)
+                if reference_layer_id is not None or reference_image is not None else ())
+        self.set_references(references)
         # Schema v2 introduced Lightning defaults.  Later migrations must not
         # re-apply that one-time policy to already-v2 documents.
         adopt_lightning_defaults = int(profile_schema_version) < 2
@@ -96,6 +148,29 @@ class TextToImageTool(Tool):
         self.model_profile_id = model_profile_id
         text_to_image_profile(model_profile_id)
         self.generation_provenance = None
+
+    @staticmethod
+    def validate_references(references):
+        references = tuple(references)
+        if len(references) > 10:
+            raise ValueError("Text to Image supports at most 10 references")
+        ids = set()
+        for ref in references:
+            if not isinstance(ref, TextToImageReference):
+                raise ValueError("Invalid Text to Image reference")
+            if not isinstance(ref.stable_id, str) or not ref.stable_id or ref.stable_id in ids:
+                raise ValueError("Reference IDs must be non-empty and unique")
+            ids.add(ref.stable_id)
+            if (ref.layer_id is None) == (ref.image is None):
+                raise ValueError("A reference needs exactly one layer or image")
+            if ref.layer_id is not None and (not isinstance(ref.layer_id, str) or not ref.layer_id):
+                raise ValueError("Reference layer ID must be a non-empty string")
+            if not isinstance(ref.layer_name_hint, str) or not isinstance(ref.image_name_hint, str):
+                raise ValueError("Reference names must be strings")
+        return references
+
+    def set_references(self, references) -> None:
+        self.references = tuple(ref.copy() for ref in self.validate_references(references))
 
     @property
     def parameters(self) -> dict:

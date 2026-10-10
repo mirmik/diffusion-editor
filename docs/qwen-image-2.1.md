@@ -15,8 +15,8 @@ Transparent source/reference layers and embedded PNG files retain their alpha.
 
 Output follows the target layer (generation) or source patch (editing). Inference
 rounds up to multiples of 32, aligns the first reference to those dimensions, and
-resizes the result back to the requested size. An additional reference retains its
-own aspect ratio. VAE tiling is optional; automatic offload is the default, with a
+resizes the result back to the requested size. Additional references retain their
+own aspect ratios (rounded to multiples of 32). VAE tiling is optional; automatic offload is the default, with a
 low-VRAM mode available.
 
 ## Local runtime
@@ -114,3 +114,122 @@ The output directory contains source/result PNGs and generation provenance JSON.
 The smoke uses the editor's real backend and the dedicated runtime subprocess.
 Contract tests cover process errors/timeouts, cleanup, reference alpha, frozen
 result application, profile settings, and compatibility of the old profiles.
+
+## Official Qwen Image 2.1 Turbo
+
+**Qwen Image 2.1 Turbo (Official)** is a separate profile in Text to Image and
+AI Edit using the released `Qwen/Qwen-Image-2.1-Turbo` checkpoint. It does not
+require the community Turbo8 LoRA above. All three profiles retain independent
+settings. The official Turbo uses 8 Euler steps, CFG 1 and its published sigma
+schedule, followed by a zero terminal sigma:
+
+`1, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0`
+
+There is no resolution-dependent shift or terminal stretching for this profile.
+The schedule comes from the official model's `model_index.json`, revision
+`d65dbc9a7e8f6b5479e33dee6030eaab2a906509`; its scheduler has shift 1 and dynamic
+shifting disabled. The existing isolated Comfy runtime executes this schedule,
+so upgrading the shared Diffusers environment is unnecessary. The actual schedule
+is recorded in provenance. This integration does not enable prefix KV caching.
+
+Default transformer:
+`~/soft/ComfyUI/models/diffusion_models/qwen_image_2.1_turbo_bf16.safetensors`.
+Override with `DIFFUSION_EDITOR_QWEN21_TURBO_MODEL` or the checkpoint field.
+The text encoder and RGBA VAE are shared with the base 2.1 profile.
+
+Installed and SHA256-verified on 2026-10-10 from
+[Comfy-Org/Qwen-Image-2.1](https://huggingface.co/Comfy-Org/Qwen-Image-2.1):
+
+- Revision: `df94239739eef7205973a145ffa6f441f7b64e84`.
+- Size: 14,230,280,616 bytes.
+- SHA256: `8b74237a7f505773e2c66726fa696444b4c704585c93a347cff9044937f7914a`.
+
+See the [official model card](https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo).
+
+## Text to Image references
+
+All three Qwen 2.1 profiles accept an ordered list of up to 10 optional reference
+images in Text to Image. **Add layer reference…** and **Add Image...** append
+layers and files; they can be mixed. Each row shows its current `<imageN>` tag.
+Use the arrows to reorder, **×** to remove one, and **Clear All** to empty the list.
+These actions support undo/redo. Reordering or removing entries reassigns the
+numbered tags; prompts are not rewritten automatically.
+
+Imported images are embedded in `.deproj`, including alpha. Order, stable entry
+IDs and linked layers survive save/load. Earlier projects containing a single
+reference migrate to a one-entry list. AI Edit still accepts its source and one
+optional reference.
+
+The target layer defines the output size; its pixels are not sent to the model.
+References are passed as `<image1>`, `<image2>`, and so on in list order.
+Describe their roles in the prompt. For a single style reference:
+
+> Create a new illustration of a lighthouse on a rocky coast. Use <image1>
+> only as a style reference for palette, linework and texture. Create a new
+> composition without copying its objects.
+
+For separate style, character and composition references:
+
+> Use <image1> for palette and brushwork, the character from <image2>, and the
+> composition from <image3>. Create a new illustration of the character by a lighthouse.
+
+This is general image conditioning, with no independent style-strength slider.
+Style and content separation depends on the model and prompt. The first reference
+is fitted with transparent padding to the inference dimensions without stretching
+or cropping; the vision encoder sees that padding over white. This satisfies the
+runtime's first-reference/output geometry constraint. AI Edit keeps its existing
+source-image geometry behavior.
+
+Every reference is frozen at submission and hashed in ordered provenance. Changing
+or removing any referenced layer, changing an embedded image, or changing list order
+invalidates the pending result. Changes to the list do not reload model weights.
+Unsupported older Text to Image profiles disable additions and generate without
+the stored references; switching back restores their availability.
+
+The smoke script now checks reference-only generation with two seeds and an
+asymmetric reference/output size, in addition to generation and two-image editing:
+
+```sh
+.venv-workers/bin/python scripts/smoke_qwen_image21.py \
+  --turbo --size 512 --repeat-size 384 --output /tmp/qwen21-official-turbo
+```
+
+Verification on 2026-10-10 (RTX 5090, existing isolated runtime):
+
+- Base 40-step, community Turbo8, and official Turbo: generation, reference-only
+  generation with seeds 42/43 at 499 × 512, unload/reload and two-image editing
+  at 512 × 512 passed. Official Turbo also generated at 384 × 384 without reload.
+- Official Turbo passed the editor controller → engine → real ML worker →
+  Qwen subprocess path with one reference and a 499 × 512 RGBA result; the
+  reference hash and exact sigma schedule were verified in provenance.
+- Visual inspection confirmed new lighthouse content using the reference's palette
+  and flat outlined treatment. Some seeds reuse a circular motif from the reference;
+  prompt-based style isolation does not guarantee complete content separation.
+- 176 targeted tests passed across profiles, reference selection and native widgets,
+  dialogs, frozen jobs, serialization, undo, worker transport and provenance.
+
+Smoke artifacts and JSON provenance are in
+`/tmp/diffusion-editor-qwen21-turbo-official`,
+`/tmp/diffusion-editor-qwen21-base-reference`, and
+`/tmp/diffusion-editor-qwen21-turbo8-reference` on this machine.
+
+### Multiple-reference verification
+
+Run the editor controller → engine → real ML worker → Qwen subprocess smoke:
+
+```sh
+./venv/bin/python scripts/smoke_text_to_image_references.py \
+  --output /tmp/diffusion-editor-multiple-references
+```
+
+Verified on 2026-10-10 with official Turbo on RTX 5090: three transparent input
+images at 499 × 384, followed by two reordered inputs at 384 × 499 without model
+reload. Output size, RGBA mode, ordered IDs, every reference hash and runtime input
+count passed. Visual inspection confirmed the requested left-to-right order of
+three distinct shapes, then the changed order with one shape omitted. PNGs and
+JSON provenance are saved in the output directory.
+
+184 targeted tests passed, covering mixed layer/file lists, the 10-entry UI limit,
+reorder/remove undo/redo, alpha and order roundtrip, legacy migration, missing
+non-first embedded assets, ordered worker IPC, invalid counts and missing inputs,
+and stale-result rejection after changing a non-first reference.

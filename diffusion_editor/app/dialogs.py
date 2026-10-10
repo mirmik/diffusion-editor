@@ -317,7 +317,7 @@ class ApplicationDialogCoordinator:
         self._show_file(
             FileDialogSpec(
                 FileDialogKind.OPEN_FILE,
-                "Select AI Edit Reference",
+                "Select Reference Image",
                 self._application.last_dir,
                 _IMAGE_FILTER,
             ),

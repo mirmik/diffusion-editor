@@ -365,6 +365,15 @@ def enforce_model_identity_policy(
     return (warning,)
 
 
+def image_content_hash(mode: str, size: tuple[int, int], data: bytes) -> str:
+    """Hash image values consistently in the editor and isolated workers."""
+    digest = hashlib.sha256()
+    digest.update(mode.encode("utf-8"))
+    digest.update(f"{size[0]}x{size[1]}".encode("ascii"))
+    digest.update(data)
+    return f"sha256:{digest.hexdigest()}"
+
+
 def sha256_file(path: str | Path, *, chunk_size: int = 4 * 1024 * 1024) -> str:
     digest = hashlib.sha256()
     with Path(path).open("rb") as stream:
@@ -486,7 +495,13 @@ def capture_tool_state(tool: object | None) -> RequestProvenance:
                 tool, "profile_parameters", {}),
             "profile_lora_adapters": getattr(
                 tool, "profile_lora_adapters", {}),
+            "reference_layer_id": getattr(tool, "reference_layer_id", None),
         })
+        parameters["references"] = [{
+            "stable_id": ref.stable_id, "layer_id": ref.layer_id,
+            "image_hash": (image_content_hash(ref.image.mode, ref.image.size, ref.image.tobytes())
+                           if ref.image is not None else None),
+        } for ref in getattr(tool, "references", ())]
     elif kind == "instruct":
         profile_parameters = getattr(tool, "profile_parameters", None)
         if isinstance(profile_parameters, dict):

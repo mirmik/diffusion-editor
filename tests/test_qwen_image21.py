@@ -19,6 +19,7 @@ from diffusion_editor.workers.qwen_image21_process import QwenImage21Pipeline
 
 PROFILE = "qwen-image-2.1"
 TURBO8 = "qwen-image-2.1-turbo8"
+TURBO = "qwen-image-2.1-turbo"
 
 
 @pytest.mark.parametrize("get_profile", [text_to_image_profile, image_edit_profile])
@@ -233,7 +234,7 @@ def test_child_errors_are_reported_and_reaped(tmp_path, monkeypatch, body, messa
     assert children and children[0].poll() is not None
 
 
-@pytest.mark.parametrize("profile_id", [PROFILE, TURBO8])
+@pytest.mark.parametrize("profile_id", [PROFILE, TURBO8, TURBO])
 def test_backend_routes_new_model_sizes_alpha_and_lifecycle(tmp_path, monkeypatch, profile_id):
     import diffusion_editor.workers.qwen_image21_process as module
     p, _ = _fake_runtime(tmp_path, "")
@@ -245,12 +246,12 @@ def test_backend_routes_new_model_sizes_alpha_and_lifecycle(tmp_path, monkeypatc
 
         def __init__(self, parameters, adapters):
             self.parameters = parameters
-            assert parameters["sampling_mode"] == ("turbo8" if profile_id == TURBO8 else "base")
+            assert parameters["sampling_mode"] == ("turbo" if profile_id == TURBO else "turbo8" if profile_id == TURBO8 else "base")
             events.append("load")
 
         def generate(self, parameters, seed, width, height, **kwargs):
             events.append((width, height, seed))
-            if kwargs:
+            if "image" in kwargs:
                 assert kwargs["image"].mode == "RGBA"
                 assert kwargs["reference_image"].getpixel((0, 0))[3] == 64
             return Image.new("RGBA", (width, height), (40, 80, 120, 64))
@@ -293,3 +294,99 @@ def test_frozen_result_application_retains_transparency_after_profile_switch():
     result = Image.new("RGBA", (4, 4), (30, 60, 90, 64))
     ApplyFrozenGeneratedResultCommand(layer, result, paste, "Qwen result").apply(stack)
     assert np.all(layer.image[:, :, 3] == 64)
+
+
+@pytest.mark.parametrize("get_profile", [text_to_image_profile, image_edit_profile])
+def test_official_turbo_uses_its_own_checkpoint_without_lora(get_profile):
+    profile = get_profile(TURBO)
+    p = profile.normalize({"steps": 40, "true_cfg_scale": 4})
+    assert (p["steps"], p["true_cfg_scale"]) == (8, 1)
+    assert p["model"].endswith("qwen_image_2.1_turbo_bf16.safetensors")
+    assert profile.model_id == "Qwen/Qwen-Image-2.1-Turbo"
+    assert profile.default_lora_adapters == ()
+    assert get_profile(TURBO8).default_lora_adapters[0].stable_id == "turbo8"
+
+
+def test_reference_only_padding_preserves_shape_and_transparency():
+    from diffusion_editor.workers.qwen_image21_runner import prepare_reference
+    source = Image.new("RGBA", (80, 40), (10, 20, 30, 128))
+    result = prepare_reference(source, (64, 64), reference_only=True)
+    assert result.size == (64, 64)
+    assert result.getbbox() == (0, 16, 64, 48)
+    assert result.getpixel((32, 32))[3] == 128
+    assert source.size == (80, 40)
+    assert prepare_reference(source, (64, 64)).getbbox() == (0, 0, 64, 64)
+
+
+def test_official_turbo_passes_exact_sigmas_to_sampler(monkeypatch):
+    torch = SimpleNamespace(zeros=np.zeros, zeros_like=np.zeros_like,
+                            tensor=lambda value, dtype: np.array(value, dtype=dtype),
+                            float32=np.float32)
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    from diffusion_editor.workers.qwen_image21_runner import Runtime, TURBO_SIGMAS
+    calls = []
+    sample = SimpleNamespace(
+        prepare_noise=lambda latent, seed: torch.zeros_like(latent),
+        sample=lambda *args, **kwargs: calls.append((args, kwargs)) or args[8])
+    comfy = SimpleNamespace(sample=sample, utils=SimpleNamespace(PROGRESS_BAR_ENABLED=True))
+    monkeypatch.setitem(sys.modules, "comfy", comfy)
+    monkeypatch.setitem(sys.modules, "comfy.sample", sample)
+    monkeypatch.setitem(sys.modules, "comfy.utils", comfy.utils)
+    monkeypatch.setitem(sys.modules, "nodes", SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "latent_preview", SimpleNamespace(prepare_callback=lambda *a: None))
+    runtime = Runtime.__new__(Runtime)
+    runtime.sampling_mode = "turbo"
+    runtime.sample(object(), 42, 8, 1, [], [], {"samples": torch.zeros((1, 64, 4, 4))})
+    args, kwargs = calls[0]
+    assert args[2:6] == (8, 1.0, "euler", "simple")
+    assert kwargs["sigmas"].tolist() == pytest.approx(
+        [1, .978453, .95418, .926626, .89508, .845148, .704534, .414568, 0])
+    assert len(TURBO_SIGMAS) == 9
+    assert kwargs["seed"] == 42
+
+
+def test_text_to_image_engine_transports_reference_without_target_pixels():
+    import threading
+    from diffusion_editor.engines.text_to_image_engine import TextToImageEngine
+    from diffusion_editor.generation.types import TextToImageRequest
+    reference = Image.new("RGBA", (8, 5), (10, 20, 30, 64))
+    calls = []
+
+    class Client:
+        def request(self, operation, data, cancel, *, images):
+            calls.append((operation, data, images))
+            return {"image": Image.new("RGBA", (33, 65)), "seed": 42}
+
+    engine = TextToImageEngine(client=Client())
+    request = TextToImageRequest(TURBO, text_to_image_profile(TURBO).defaults(),
+                                 33, 65, reference_image=reference)
+    result = engine._run_inference(request, threading.Event())
+    assert result.image.size == (33, 65)
+    operation, data, images = calls[0]
+    assert operation == "text_to_image"
+    assert images == {"reference_0": reference}
+    assert data["reference_count"] == 1
+    assert "image" not in data and "image" not in images
+
+
+def test_reference_only_child_ipc_has_exactly_one_image(tmp_path):
+    p, runner = _fake_runtime(tmp_path, '''
+import json, sys
+from PIL import Image
+for line in sys.stdin:
+    r = json.loads(line)
+    if r['operation'] == 'generate':
+        assert r['reference_only'] is True
+        assert len(r['images']) == 1
+        im = Image.open(r['images'][0])
+        assert im.getpixel((0, 0)) == (10, 20, 30, 64)
+        im.save(r['output'])
+    print(json.dumps({'ok': True, 'result': {'provider': 'test'}}), flush=True)
+''')
+    pipe = QwenImage21Pipeline(p, runner_path=runner)
+    try:
+        image = pipe.generate(p, 42, 32, 32,
+                              reference_image=Image.new("RGBA", (32, 32), (10, 20, 30, 64)))
+        assert image.getpixel((0, 0)) == (10, 20, 30, 64)
+    finally:
+        pipe.close()
