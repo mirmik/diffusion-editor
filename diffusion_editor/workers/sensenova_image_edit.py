@@ -7,12 +7,40 @@ import os
 from pathlib import Path
 import sys
 from typing import Any
+from contextlib import contextmanager
 
 import numpy as np
 from PIL import Image
+from ..generation.progress import GenerationProgress
 
 
 _PATCH_SIZE = 32
+
+
+@contextmanager
+def sampling_progress(model, steps, on_progress):
+    """U1 completes each Euler step by unpatchifying its updated image."""
+    if on_progress is None:
+        yield
+        return
+    original = model.unpatchify
+    owned = "unpatchify" in vars(model)
+    current = 0
+    def unpatchify(*args, **kwargs):
+        nonlocal current
+        result = original(*args, **kwargs)
+        current += 1
+        on_progress(GenerationProgress("Sampling", min(current, steps), steps))
+        return result
+    model.unpatchify = unpatchify
+    try:
+        on_progress(GenerationProgress("Sampling", 0, steps))
+        yield
+    finally:
+        if owned:
+            model.unpatchify = original
+        else:
+            del model.unpatchify
 
 
 def _ensure_provider_overlay() -> None:
@@ -158,6 +186,7 @@ class SenseNovaImageEditPipeline:
             seed: int,
             *,
             reference_image: Image.Image | None = None,
+            on_progress=None,
     ) -> Image.Image:
         import torch
 
@@ -212,7 +241,8 @@ class SenseNovaImageEditPipeline:
         if width % _PATCH_SIZE or height % _PATCH_SIZE:
             raise ValueError(
                 "SenseNova output width and height must be multiples of 32")
-        with torch.inference_mode(), self._offload_context() as model:
+        with torch.inference_mode(), self._offload_context() as model, sampling_progress(
+                model, int(parameters["steps"]), on_progress):
             output = model.it2i_generate(
                 self.tokenizer,
                 prompt,

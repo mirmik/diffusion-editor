@@ -89,6 +89,8 @@ def _poll(engine, timeout: float = 2.0):
     event = None
     while event is None and time.monotonic() < deadline:
         event = engine.poll_event()
+        if event is not None and event.progress is not None:
+            event = None
         time.sleep(0.001)
     assert event is not None
     return event
@@ -360,7 +362,7 @@ def test_image_edit_engine_sends_optional_second_image_to_worker():
     class CaptureClient:
         is_running = True
 
-        def request(self, operation, data, cancel, images=None):
+        def request(self, operation, data, cancel, images=None, on_progress_update=None):
             assert operation == "image_edit"
             assert images["image"].getpixel((0, 0)) == (255, 0, 0)
             assert images["reference_image"].getpixel((0, 0)) == (0, 0, 255)

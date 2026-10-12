@@ -107,3 +107,23 @@ Qwen Image 2.1 reuses a separate local Comfy inference environment through a
 private subprocess owned by the ML worker. It does not change the shared
 Diffusers dependency lock or require a running Comfy server. See
 [Qwen Image 2.1](qwen-image-2.1.md) for model paths, configuration and GPU smokes.
+
+## Generation progress
+
+Text to Image, AI Edit and Stable Diffusion show a progress bar, current step,
+total steps and percentage in the AI Attach inspector. The same stage text is
+also shown in the status bar. Loading, input encoding and finalization have
+stage messages; percentages describe sampling steps, not the whole job.
+The bar resets on a new run, result, error or cancellation.
+
+Step counts come from the Comfy sampling hook for Qwen 2.1, Diffusers callbacks
+(using the actual shortened schedule for img2img), and completed Euler steps
+for SenseNova. Progress travels through the worker protocol and is tied to the
+active job identity. Terminal progress remains available. The existing 3D
+workspace keeps its separate per-stage counters.
+
+Native render/IPC smoke without models:
+`./venv/bin/python scripts/smoke_generation_progress.py`.
+Add `--real` for official Qwen Turbo with CFG 2 on CUDA. The smoke uses a separate
+temporary document and writes a rendered sampling UI frame plus progress JSON
+to `/tmp/diffusion-editor-progress-smoke`.

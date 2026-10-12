@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .progress import GenerationProgress
+
 from dataclasses import dataclass
 from enum import Enum
 import math
@@ -627,6 +629,7 @@ class EnginePollEvent:
     error: str | None = None
     meta: object | None = None
     job_id: str | None = None
+    progress: GenerationProgress | None = None
 
 
 @dataclass(frozen=True)

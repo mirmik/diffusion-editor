@@ -183,6 +183,7 @@ class NativeGenerationPanels:
                     )
             self.text_to_image_status.text = (
                 f"{text_to_image.phase.value}: {text_to_image.message}")
+            self._sync_progress(self.text_to_image_progress, text_to_image)
             self.text_to_image_info.text = text_to_image.layer_info
             text_to_image_busy = text_to_image.phase in {
                 GenerationPhase.LOADING,
@@ -251,6 +252,7 @@ class NativeGenerationPanels:
                 diffusion.resize_to_model_resolution)
             self.diffusion_status.text = (
                 f"{diffusion.phase.value}: {diffusion.message}")
+            self._sync_progress(self.diffusion_progress, diffusion)
             self.diffusion_diagnostics.text = (
                 diffusion.model_diagnostics)
             self.diffusion_info.text = diffusion.layer_info
@@ -348,6 +350,7 @@ class NativeGenerationPanels:
                     )
             self.instruct_status.text = (
                 f"{instruct.phase.value}: {instruct.message}")
+            self._sync_progress(self.instruct_progress, instruct)
             self.instruct_info.text = instruct.layer_info
             self.instruct_load_button.widget.enabled = (
                 not instruct_busy)
@@ -438,6 +441,7 @@ class NativeGenerationPanels:
             content, "None", "text-to-image.reference.label")
         self.text_to_image_status = self._label(
             content, "", "text-to-image.status")
+        self.text_to_image_progress = self._progress_bar(content, "text-to-image.progress")
         self.text_to_image_load_button = self._button(
             content,
             "Load Model",
@@ -565,6 +569,7 @@ class NativeGenerationPanels:
             lambda: self._emit(GenerationAction.LOAD_MODEL))
         self.diffusion_status = self._label(
             content, "", "diffusion.status")
+        self.diffusion_progress = self._progress_bar(content, "diffusion.progress")
         self.diffusion_diagnostics = self._label(
             content, "", "diffusion.diagnostics")
 
@@ -726,6 +731,7 @@ class NativeGenerationPanels:
             content, "None", "instruct.reference.label")
         self.instruct_status = self._label(
             content, "", "instruct.status")
+        self.instruct_progress = self._progress_bar(content, "instruct.progress")
         self.instruct_load_button = self._button(
             content, "Load Model", "instruct.load-model",
             lambda: self._emit(GenerationAction.LOAD_MODEL))
@@ -1212,6 +1218,21 @@ class NativeGenerationPanels:
         content.set_layout_spacing(4.0)
         group.set_content(content)
         return group, content
+
+    def _progress_bar(self, parent, suffix):
+        bar = self._document.create_progress_bar(0.0)
+        bar.widget.stable_id = f"diffusion-editor.generation.{suffix}"
+        bar.widget.visible = False
+        parent.add_preferred_child(bar.widget)
+        return bar
+
+    @staticmethod
+    def _sync_progress(bar, state):
+        progress = state.progress
+        fraction = progress.fraction if progress is not None else None
+        bar.widget.visible = (fraction is not None and state.phase in {
+            GenerationPhase.LOADING, GenerationPhase.RUNNING})
+        bar.value = fraction if fraction is not None else 0.0
 
     def _label(self, parent, text: str, suffix: str):
         label = self._document.create_label(

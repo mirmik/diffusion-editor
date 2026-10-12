@@ -9,6 +9,7 @@ from typing import Generic, Literal, TypeVar
 import uuid
 
 from ..generation.types import EnginePollEvent
+from ..generation.progress import GenerationProgress
 
 
 EventT = TypeVar("EventT")
@@ -138,6 +139,7 @@ class EngineTaskQueue:
     """Single-worker queue that publishes standard generation engine events."""
 
     def __init__(self) -> None:
+        self._active = threading.local()
         self._worker: SingleWorkerEventQueue[EnginePollEvent] = (
             SingleWorkerEventQueue()
         )
@@ -162,6 +164,7 @@ class EngineTaskQueue:
             result: object | None = None
             error: str | None = None
             try:
+                self._active.job = (task_type, terminal_job_id)
                 result = operation(cancel)
                 if cancel.is_set():
                     raise TaskCancelled("Operation cancelled")
@@ -173,6 +176,7 @@ class EngineTaskQueue:
                     except Exception:
                         pass
                 error = str(exc)
+            self._active.job = None
             return EnginePollEvent(
                 task_type=task_type,
                 result=result,
@@ -185,6 +189,12 @@ class EngineTaskQueue:
 
     def poll_event(self) -> EnginePollEvent | None:
         return self._worker.poll_event()
+
+    def emit_progress(self, progress: GenerationProgress) -> None:
+        active = getattr(self._active, "job", None)
+        if active is not None and not self._worker.cancellation_requested:
+            task_type, job_id = active
+            self.emit(EnginePollEvent(task_type=task_type, job_id=job_id, progress=progress))
 
     def emit(self, event: EnginePollEvent) -> None:
         """Publish a non-terminal event from the active worker operation."""

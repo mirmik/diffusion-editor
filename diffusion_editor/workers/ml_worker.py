@@ -14,6 +14,7 @@ from typing import Any, Callable
 
 import numpy as np
 from PIL import Image
+from ..generation.progress import GenerationProgress
 
 from ..generation.provenance import (
     FrozenJsonObject,
@@ -63,7 +64,7 @@ class _Backend:
         self,
         operation: str,
         data: dict[str, Any],
-        progress: Callable[[str], None],
+        progress: Callable[[str | GenerationProgress], None],
     ) -> dict[str, Any]:
         if self.name == "hang":
             while True:
@@ -88,7 +89,7 @@ class _Backend:
         self,
         operation: str,
         data: dict[str, Any],
-        progress: Callable[[str], None],
+        progress: Callable[[str | GenerationProgress], None],
     ) -> dict[str, Any]:
         output_dir = Path(data["output_dir"])
         if operation == "gpu_available":
@@ -102,7 +103,7 @@ class _Backend:
         if operation == "diffusion":
             progress("Running diffusion...")
             images = self._open_images(data, ("image", "mask", "ip_adapter"))
-            result, seed, provenance = self._real.diffusion(data, images)
+            result, seed, provenance = self._real.diffusion(data, images, on_progress=progress)
             output = output_dir / "result.png"
             result.save(output, format="PNG")
             return {
@@ -116,7 +117,7 @@ class _Backend:
         if operation == "instruct":
             progress("Running InstructPix2Pix...")
             image = self._open_required(data, "image")
-            result, seed, provenance = self._real.instruct(data, image)
+            result, seed, provenance = self._real.instruct(data, image, on_progress=progress)
             output = output_dir / "result.png"
             result.save(output, format="PNG")
             return {
@@ -136,7 +137,7 @@ class _Backend:
                 self._open_required(data, "reference_image")
                 if data.get("reference_image_path") else None)
             result, seed, provenance = self._real.image_edit(
-                data, image, reference_image)
+                data, image, reference_image, on_progress=progress)
             output = output_dir / "result.png"
             result.save(output, format="PNG")
             return {
@@ -152,7 +153,7 @@ class _Backend:
             profile = text_to_image_profile(str(data["profile_id"]))
             progress(f"Running {profile.title}...")
             references = self._text_to_image_references(data, profile)
-            result, seed, provenance = self._real.text_to_image(data, reference_images=references)
+            result, seed, provenance = self._real.text_to_image(data, reference_images=references, on_progress=progress)
             output = output_dir / "result.png"
             result.save(output, format="PNG")
             return {
@@ -183,7 +184,7 @@ class _Backend:
         self,
         operation: str,
         data: dict[str, Any],
-        progress: Callable[[str], None],
+        progress: Callable[[str | GenerationProgress], None],
     ) -> dict[str, Any]:
         output_dir = Path(data["output_dir"])
         if operation == "gpu_available":
@@ -234,6 +235,8 @@ class _Backend:
                 )
             else:
                 result = self._open_required(data, "image").convert("RGB")
+            progress(GenerationProgress("Sampling", 1, 2))
+            progress(GenerationProgress("Sampling", 2, 2))
             output = output_dir / "result.png"
             result.save(output, format="PNG")
             seed = 4242 if int(data["seed"]) == -1 else int(data["seed"])
@@ -411,6 +414,8 @@ class _Backend:
                 raise RuntimeError(
                     "Image edit LoRA configuration is not loaded")
             progress(f"Running {profile.title}...")
+            progress(GenerationProgress("Sampling", 1, 2))
+            progress(GenerationProgress("Sampling", 2, 2))
             output = output_dir / "result.png"
             self._open_required(data, "image").convert("RGB").save(
                 output, format="PNG")
@@ -496,6 +501,8 @@ class _Backend:
             width = int(data["width"])
             height = int(data["height"])
             result = Image.new("RGB", (width, height), "teal")
+            progress(GenerationProgress("Sampling", 1, 2))
+            progress(GenerationProgress("Sampling", 2, 2))
             output = output_dir / "result.png"
             result.save(output, format="PNG")
             requested_seed = int(parameters["seed"])
@@ -710,15 +717,11 @@ def run(backend_name: str) -> int:
             ):
                 raise RuntimeError("Invalid ML request")
             request_id = request["request_id"]
-            progress = lambda text: _send(
-                wire,
-                {
-                    "protocol": PROTOCOL_VERSION,
-                    "type": "progress",
-                    "request_id": request_id,
-                    "message": text,
-                },
-            )
+            def progress(update):
+                values = (update.to_dict() if isinstance(update, GenerationProgress)
+                          else {"message": str(update)})
+                _send(wire, {"protocol": PROTOCOL_VERSION, "type": "progress",
+                             "request_id": request_id, **values})
             with redirect_stdout(sys.stderr):
                 result = backend.execute(
                     request["operation"], request["data"], progress

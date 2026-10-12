@@ -36,6 +36,7 @@ from diffusion_editor.document.tool import (
 )
 from diffusion_editor.generation.types import (
     DiffusionInferenceResult,
+    InstructInferenceResult,
     EnginePollEvent,
     TextToImageInferenceResult,
 )
@@ -603,6 +604,62 @@ def test_fake_diffusion_engine_result_flows_through_application_poll(tmp_path):
     assert coordinator.state.diffusion.phase == GenerationPhase.RESULT
 
 
+@pytest.mark.parametrize("kind,tool_factory,result_type", [
+    ("diffusion", _diffusion_tool, DiffusionInferenceResult),
+    ("instruct", _qwen_edit_tool, InstructInferenceResult),
+    ("text_to_image", TextToImageTool, TextToImageInferenceResult),
+])
+def test_live_job_progress_reaches_native_bar_without_finishing_job(
+        tmp_path, kind, tool_factory, result_type):
+    from diffusion_editor.generation.progress import GenerationProgress
+    application, *_ = _application(tmp_path)
+    layer = _insert_tool_layer(application, "Progress", tool_factory())
+    coordinator = GenerationPanelsCoordinator(application, _Canvas())
+    application.bind_view(ViewPorts(panels=coordinator))
+    document = tc_ui_document_create()
+    panel = NativeGenerationPanels(document, coordinator.state, coordinator.handle_intent, lambda: None)
+    coordinator.bind_view(panel)
+    engine = getattr(application.engines, kind)
+    controller = getattr(application, f"{kind}_controller")
+    try:
+        coordinator.handle_intent(GenerationIntent(GenerationAction.RUN))
+        # If the profile needs a load, let its terminal load event start inference.
+        if controller.pending_context is not None and (
+                getattr(coordinator.state, kind).phase == GenerationPhase.LOADING):
+            engine.poll_result = EnginePollEvent(task_type="load", result=True)
+            application.poll()
+        expected_id = controller._active_operation_id
+        assert expected_id is not None
+        engine.supports_job_ids = True
+        original = layer.image.copy()
+        progress = GenerationProgress("Sampling", 3, 8)
+        engine.poll_result = EnginePollEvent(task_type="inference", job_id=expected_id, progress=progress)
+        application.poll()
+        assert controller._active_operation_id == expected_id
+        assert controller.pending_context is not None
+        assert np.array_equal(layer.image, original)
+        state = getattr(coordinator.state, kind)
+        assert state.progress == progress and state.phase == GenerationPhase.RUNNING
+        bar = getattr(panel, f"{kind}_progress")
+        assert bar.widget.visible and bar.value == pytest.approx(3/8)
+        assert "3/8" in getattr(panel, f"{kind}_status").text
+        engine.poll_result = EnginePollEvent(task_type="inference", job_id="old-job",
+                                             progress=GenerationProgress("Sampling", 7, 8))
+        application.poll()
+        assert getattr(coordinator.state, kind).progress == progress
+        engine.poll_result = EnginePollEvent(task_type="inference", job_id=expected_id,
+            result=result_type(Image.new("RGBA", (16,16), (12,34,56,255)), 42))
+        application.poll()
+        assert getattr(coordinator.state, kind).phase == GenerationPhase.RESULT
+        assert not bar.widget.visible
+        assert getattr(coordinator.state, kind).progress is None
+        assert tuple(layer.image[0,0]) == (12,34,56,255)
+    finally:
+        panel.close()
+        coordinator.close()
+        tc_ui_document_destroy(document)
+
+
 def test_native_generation_panels_sync_without_feedback_and_edit_all_fields(
     tmp_path,
 ):
@@ -793,6 +850,19 @@ def test_native_turbo8_sampling_is_fixed_and_base_controls_restore(
         coordinator.handle_intent(GenerationIntent(action, "qwen-image-2.1-turbo8"))
         assert widgets["steps"].value == 8
         assert not widgets["steps"].widget.enabled
+        coordinator.handle_intent(GenerationIntent(action, "qwen-image-2.1-turbo"))
+        assert not widgets["steps"].widget.enabled
+        assert widgets["true_cfg_scale"].widget.enabled
+        assert widgets["true_cfg_scale"].value == 1
+        widgets["true_cfg_scale"].value = 2.5
+        state = (coordinator.state.text_to_image if tool_type is TextToImageTool
+                 else coordinator.state.instruct)
+        assert state.parameter_values["true_cfg_scale"] == 2.5
+        coordinator.handle_intent(GenerationIntent(action, "qwen-image-2.1-turbo8"))
+        assert not widgets["true_cfg_scale"].widget.enabled
+        assert widgets["true_cfg_scale"].value == 1
+        coordinator.handle_intent(GenerationIntent(action, "qwen-image-2.1-turbo"))
+        assert widgets["true_cfg_scale"].value == 2.5
     finally:
         panel.close()
         coordinator.close()

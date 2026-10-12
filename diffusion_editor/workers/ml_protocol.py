@@ -7,6 +7,9 @@ import json
 from typing import Any, Literal
 
 
+from ..generation.progress import GenerationProgress
+
+
 PROTOCOL_VERSION = 1
 MAX_MESSAGE_BYTES = 256 * 1024
 
@@ -32,6 +35,7 @@ class MlResponse:
     data: dict[str, Any] | None = None
     error: str | None = None
     runtime: MlRuntime | None = None
+    progress: GenerationProgress | None = None
 
 
 def encode_message(payload: dict[str, Any]) -> bytes:
@@ -94,7 +98,12 @@ def decode_response(message: bytes) -> MlResponse:
         message_text = payload.get("message")
         if not isinstance(message_text, str):
             raise MlProtocolError("ML progress response has no message")
+        try:
+            progress = GenerationProgress.from_dict(payload)
+        except ValueError as exc:
+            raise MlProtocolError(str(exc)) from exc
         return MlResponse(
+            progress=progress,
             kind="progress",
             request_id=request_id,
             message=message_text,

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..generation.progress import GenerationProgress
+
 from dataclasses import dataclass, replace
 import copy
 from enum import Enum
@@ -156,7 +158,7 @@ class DiffusionPanelState:
     model_diagnostics: str = ""
     ip_adapter_message: str = "Not loaded"
     layer_info: str = "No diffusion layer selected"
-
+    progress: GenerationProgress | None = None
 
 @dataclass(frozen=True)
 class LamaPanelState:
@@ -188,7 +190,7 @@ class InstructPanelState:
     supports_reference_image: bool = False
     reference_layer_id: str | None = None
     reference_label: str = "None"
-
+    progress: GenerationProgress | None = None
 
 @dataclass(frozen=True)
 class TextToImagePanelState:
@@ -211,7 +213,7 @@ class TextToImagePanelState:
 
     references: tuple[ReferenceChoice, ...] = ()
     max_reference_images: int = 0
-
+    progress: GenerationProgress | None = None
 
 @dataclass(frozen=True)
 class GenerationPanelsState:
@@ -253,6 +255,7 @@ class GenerationPanelsCoordinator:
             Callable[[Callable[[str], None]], None] | None
         ) = None
         self._closed = False
+        self._progress: dict[str, GenerationProgress] = {}
         self._mask = MaskBrushState()
         self._models = self._scan_models()
         self._lora_catalog = self._scan_loras()
@@ -320,6 +323,21 @@ class GenerationPanelsCoordinator:
         """PanelPresentation port used by EditorApplication.poll."""
         if self._closed:
             return
+        if update.state == "progress":
+            progress = update.payload.get("progress")
+            if isinstance(progress, GenerationProgress):
+                self._progress[update.panel_id] = progress
+                prefix = {"diffusion": "diffusion", "instruct": "instruct",
+                          "text_to_image": "text_to_image"}.get(update.panel_id)
+                if prefix is not None:
+                    setattr(self, f"_{prefix}_message", progress.text)
+                    if (progress.current is not None or
+                            getattr(self, f"_{prefix}_phase") != GenerationPhase.LOADING):
+                        setattr(self, f"_{prefix}_phase", GenerationPhase.RUNNING)
+            self.refresh()
+            return
+        if update.state not in {"ip-adapter-error", "ip-adapter-loaded"}:
+            self._progress.pop(update.panel_id, None)
         message = str(update.payload.get("error", ""))
         if update.panel_id == "diffusion":
             if update.state == "model-loading":
@@ -619,6 +637,7 @@ class GenerationPanelsCoordinator:
             return TextToImagePanelState(
                 phase=self._text_to_image_phase,
                 message=self._text_to_image_message,
+            progress=self._progress.get("text_to_image"),
                 model_profiles=profiles,
                 lora_catalog=self._lora_catalog,
             )
@@ -643,6 +662,7 @@ class GenerationPanelsCoordinator:
             draft,
             phase=self._text_to_image_phase,
             message=self._text_to_image_message,
+            progress=self._progress.get("text_to_image"),
             layer_info=self._layer_info(layer, tool),
             output_size=f"{layer.width} × {layer.height} px (layer size)",
             supports_reference_image=text_to_image_profile(draft.model_profile_id).supports_reference_image,
@@ -662,6 +682,7 @@ class GenerationPanelsCoordinator:
             return DiffusionPanelState(
                 phase=self._diffusion_phase,
                 message=self._diffusion_message,
+            progress=self._progress.get("diffusion"),
                 ip_adapter_message=self._ip_adapter_message,
             )
         cached = self._diffusion_drafts.get(layer.id)
@@ -693,6 +714,7 @@ class GenerationPanelsCoordinator:
             draft,
             phase=self._diffusion_phase,
             message=self._diffusion_message,
+            progress=self._progress.get("diffusion"),
             model_diagnostics=getattr(
                 self, "_diffusion_diagnostics", ""),
             ip_adapter_message=self._ip_adapter_message,
@@ -708,6 +730,7 @@ class GenerationPanelsCoordinator:
             return InstructPanelState(
                 phase=self._instruct_phase,
                 message=self._instruct_message,
+            progress=self._progress.get("instruct"),
                 model_profiles=tuple(
                     ReferenceChoice(profile.stable_id, profile.title)
                     for profile in image_edit_profiles()),
@@ -748,6 +771,7 @@ class GenerationPanelsCoordinator:
             draft,
             phase=self._instruct_phase,
             message=self._instruct_message,
+            progress=self._progress.get("instruct"),
             layer_info=self._layer_info(layer, tool),
             supports_reference_image=(
                 image_edit_profile(draft.model_profile_id).max_input_images > 1),
@@ -1114,7 +1138,17 @@ class GenerationPanelsCoordinator:
                     profile_parameters=stores,
                 ))
 
+    def _reset_progress(self, layer: Layer | None) -> None:
+        tool = getattr(layer, "tool", None)
+        for tool_type, panel_id in ((TextToImageTool, "text_to_image"),
+                                    (InstructTool, "instruct"),
+                                    (DiffusionTool, "diffusion")):
+            if isinstance(tool, tool_type):
+                self._progress.pop(panel_id, None)
+                break
+
     def _load_model(self, layer: Layer | None) -> None:
+        self._reset_progress(layer)
         if isinstance(getattr(layer, "tool", None), DiffusionTool):
             draft = self._diffusion_state(layer, layer.tool)
             if not draft.selected_model_path:
@@ -1151,6 +1185,7 @@ class GenerationPanelsCoordinator:
             self._handle_immediate_status(event.status)
 
     def _run(self, layer: Layer | None) -> None:
+        self._reset_progress(layer)
         if layer is None:
             return
         if isinstance(layer.tool, DiffusionTool):

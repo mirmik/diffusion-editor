@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..generation.progress import GenerationProgress
+
 from collections.abc import Callable
 import json
 import os
@@ -79,6 +81,7 @@ class MlProcessClient:
         *,
         images: dict[str, Image.Image | np.ndarray | None] | None = None,
         on_progress: Callable[[str], None] | None = None,
+        on_progress_update: Callable[[GenerationProgress], None] | None = None,
     ) -> dict[str, Any]:
         with self._operation_lock:
             process, responses = self._ensure_process()
@@ -128,6 +131,8 @@ class MlProcessClient:
                                 "ML worker response request ID mismatch"
                             )
                         if response.kind == "progress":
+                            if on_progress_update is not None:
+                                on_progress_update(response.progress)
                             if on_progress is not None:
                                 on_progress(response.message or "")
                             continue

@@ -14,6 +14,7 @@ import sys
 import threading
 import time
 import traceback
+from contextlib import contextmanager
 
 
 # Qwen/Qwen-Image-2.1-Turbo model_index.json at d65dbc9a7e8f6b5479e33dee6030eaab2a906509.
@@ -80,6 +81,28 @@ def import_runtime(parameters):
 
 
 class Runtime:
+    def report_progress(self, message, current=None, total=None):
+        callback = getattr(self, "on_progress", None)
+        if callback is not None:
+            callback({"type": "progress", "message": message,
+                      "current": current, "total": total})
+
+    @contextmanager
+    def sampling_progress(self, steps):
+        import comfy.utils
+
+        previous = comfy.utils.PROGRESS_BAR_HOOK
+        def hook(current, total, preview=None, **kwargs):
+            if previous is not None:
+                previous(current, total, preview, **kwargs)
+            self.report_progress("Sampling", int(current), int(total))
+        comfy.utils.set_progress_bar_global_hook(hook)
+        try:
+            self.report_progress("Sampling", 0, steps)
+            yield
+        finally:
+            comfy.utils.set_progress_bar_global_hook(previous)
+
     def __init__(self, parameters, adapters):
         self.info = import_runtime(parameters)
         self.sampling_mode = parameters.get("sampling_mode", "base")
@@ -152,6 +175,10 @@ class Runtime:
         return self.model
 
     def sample(self, model, seed, steps, cfg, positive, negative, latent):
+        with self.sampling_progress(steps):
+            return self._sample(model, seed, steps, cfg, positive, negative, latent)
+
+    def _sample(self, model, seed, steps, cfg, positive, negative, latent):
         import nodes
         if self.sampling_mode != "turbo":
             return nodes.common_ksampler(
@@ -165,7 +192,7 @@ class Runtime:
         samples = latent["samples"]
         noise = comfy.sample.prepare_noise(samples, seed)
         return comfy.sample.sample(
-            model, noise, 8, 1.0, "euler", "simple", positive, negative, samples,
+            model, noise, 8, cfg, "euler", "simple", positive, negative, samples,
             sigmas=torch.tensor(TURBO_SIGMAS, dtype=torch.float32),
             callback=latent_preview.prepare_callback(model, 8),
             disable_pbar=not comfy.utils.PROGRESS_BAR_ENABLED, seed=seed,
@@ -179,9 +206,10 @@ class Runtime:
         from comfy_extras.nodes_qwen import TextEncodeQwenImage21
 
         p = request["parameters"]
-        if self.sampling_mode in {"turbo8", "turbo"} and (
-                int(p["steps"]) != 8 or float(p["true_cfg_scale"]) != 1.0):
-            raise ValueError("Accelerated Qwen profiles require 8 steps and CFG 1.0")
+        if self.sampling_mode in {"turbo8", "turbo"} and int(p["steps"]) != 8:
+            raise ValueError("Accelerated Qwen profiles require 8 steps")
+        if self.sampling_mode == "turbo8" and float(p["true_cfg_scale"]) != 1.0:
+            raise ValueError("Qwen Turbo8 requires CFG 1.0")
         width, height = int(request["width"]), int(request["height"])
         if width < 32 or height < 32 or width % 32 or height % 32:
             raise ValueError("Qwen Image 2.1 inference dimensions must be positive multiples of 32")
@@ -201,12 +229,18 @@ class Runtime:
                 image, size, reference_only=i == 0 and request.get("reference_only", False))
             images[f"image_{i + 1}"] = torch.from_numpy(
                 np.array(image, dtype=np.float32) / 255.0).unsqueeze(0)
-        with torch.inference_mode():
+        # Comfy moves/rebuilds quantized Parameters while offloading. Tensors
+        # created in inference_mode cannot be rewrapped as those Parameters on
+        # the next request. Disable autograd without creating inference tensors.
+        with torch.no_grad():
+            self.report_progress("Encoding prompt and references...")
             encoded = TextEncodeQwenImage21.execute(
                 self.clip, str(p["prompt"]), str(p["negative_prompt"]),
                 vae=self.vae, resolution=0, images=images,
             )
             positive, negative = encoded[0], encoded[1]
+            encoder_devices_after_encoding = sorted({
+                str(parameter.device) for parameter in self.clip.cond_stage_model.parameters()})
             latent = {"samples": torch.zeros(
                 [1, 64, height // 16, width // 16], device=mm.intermediate_device())}
             # Turbo8 needs its resolution-dependent shift; base uses the
@@ -216,6 +250,9 @@ class Runtime:
                 model, int(request["seed"]), int(p["steps"]),
                 float(p["true_cfg_scale"]), positive, negative, latent,
             )
+            encoder_devices_after_sampling = sorted({
+                str(parameter.device) for parameter in self.clip.cond_stage_model.parameters()})
+            self.report_progress("Decoding image...")
             pixels = (self.vae.decode_tiled(sampled) if p["vae_tiling"]
                       else self.vae.decode(sampled))
             # VAE may expose a singleton frame dimension.
@@ -237,6 +274,8 @@ class Runtime:
                 "sigmas": list(TURBO_SIGMAS) if self.sampling_mode == "turbo" else None,
                 "reference_count": len(images),
                 "reference_fit": "contain" if request.get("reference_only") and images else "resize",
+                "encoder_devices_after_encoding": encoder_devices_after_encoding,
+                "encoder_devices_after_sampling": encoder_devices_after_sampling,
                 "steps": int(p["steps"]), "cfg": float(p["true_cfg_scale"]),
                 "width": width, "height": height,
                 "shift": float(model.get_model_object("model_sampling").shift),
@@ -263,7 +302,14 @@ def main():
             elif operation == "generate":
                 if runtime is None:
                     raise RuntimeError("Qwen Image 2.1 is not loaded")
-                result = runtime.generate(request)
+                def send_progress(payload):
+                    protocol.write(json.dumps(payload) + "\n")
+                    protocol.flush()
+                runtime.on_progress = send_progress if request.get("report_progress") else None
+                try:
+                    result = runtime.generate(request)
+                finally:
+                    runtime.on_progress = None
             else:
                 raise ValueError(f"Unknown Qwen operation: {operation}")
             response = {"ok": True, "result": result}

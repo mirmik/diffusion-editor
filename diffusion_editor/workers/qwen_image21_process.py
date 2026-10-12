@@ -12,6 +12,7 @@ import tempfile
 import threading
 
 from PIL import Image
+from ..generation.progress import GenerationProgress
 
 
 class QwenImage21Pipeline:
@@ -102,17 +103,23 @@ class QwenImage21Pipeline:
         finally:
             responses.put(None)
 
-    def _request(self, request):
+    def _request(self, request, on_progress=None):
         process = self._process
         if process is None or process.poll() is not None:
             raise RuntimeError("Qwen Image 2.1 process is not running")
         try:
             process.stdin.write(json.dumps(request) + "\n")
             process.stdin.flush()
-            line = self._responses.get(timeout=self._timeout)
-            if line is None:
-                raise RuntimeError("Qwen Image 2.1 process exited unexpectedly")
-            response = json.loads(line)
+            while True:
+                line = self._responses.get(timeout=self._timeout)
+                if line is None:
+                    raise RuntimeError("Qwen Image 2.1 process exited unexpectedly")
+                response = json.loads(line)
+                if response.get("type") != "progress":
+                    break
+                update = GenerationProgress.from_dict(response)
+                if on_progress is not None:
+                    on_progress(update)
             if not response.get("ok"):
                 raise RuntimeError(response.get("error", "Qwen Image 2.1 failed"))
             return response["result"]
@@ -127,7 +134,7 @@ class QwenImage21Pipeline:
             raise RuntimeError(f"{message}\n{tail}") from exc
 
     def generate(self, parameters, seed, width, height, *, image=None, reference_image=None,
-                 reference_images=None):
+                 reference_images=None, on_progress=None):
         if self._process is None:
             raise RuntimeError("Qwen Image 2.1 process is closed; reload the model")
         if reference_images is not None:
@@ -150,7 +157,8 @@ class QwenImage21Pipeline:
             "operation": "generate", "parameters": parameters, "seed": seed,
             "width": width, "height": height, "images": images, "output": str(output),
             "reference_only": image is None,
-        })
+            "report_progress": on_progress is not None,
+        }, on_progress=on_progress)
         if "sampling" in response:
             self.runtime_info["sampling"] = response["sampling"]
         with Image.open(output) as result:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .progress import GenerationProgress
+
 from dataclasses import dataclass, replace
 import copy
 from typing import Callable
@@ -41,6 +43,7 @@ class TextToImageControllerEvent:
         tuple[InferenceJobContext, Image.Image, int] | None
     ) = None
     inference_error: str | None = None
+    progress: GenerationProgress | None = None
 
 
 @dataclass(frozen=True)
@@ -250,12 +253,21 @@ class TextToImageGenerationController:
         if event is None:
             return None
         expected_id = self._active_operation_id
+        if event.progress is not None and (
+                expected_id is None or not terminal_job_matches(
+                    self._engine, event.job_id, expected_id)):
+            return None
         if expected_id is None:
             return TextToImageControllerEvent(
                 status="Text to Image event ignored: no active job")
         if not terminal_job_matches(self._engine, event.job_id, expected_id):
             return TextToImageControllerEvent(
                 status="Text to Image event ignored: stale job identity")
+        if event.progress is not None:
+            if expected_id in self._invalidated_operations:
+                return None
+            return TextToImageControllerEvent(progress=event.progress, status=event.progress.text)
+
         invalidation = self._invalidated_operations.pop(expected_id, None)
         self._active_operation_id = None
         if invalidation is not None:

@@ -18,6 +18,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, default=Path("/tmp/diffusion-editor-qwen21-smoke"))
     parser.add_argument("--steps", type=int, default=4)
+    parser.add_argument("--cfg", type=float, default=1.0)
+    parser.add_argument("--memory-mode", choices=("auto", "lowvram"), default="auto")
     profiles = parser.add_mutually_exclusive_group()
     profiles.add_argument("--turbo8", action="store_true")
     profiles.add_argument("--turbo", action="store_true")
@@ -42,7 +44,7 @@ def main():
             pipe.close()
         return
     args.output.mkdir(parents=True, exist_ok=True)
-    p.update(steps=args.steps, seed=42,
+    p.update(steps=args.steps, true_cfg_scale=args.cfg, memory_mode=args.memory_mode, seed=42,
              prompt="This is an RGBA image with transparency. A red ceramic teapot. The image has alpha channel and the background is transparent.")
     backend = RealMlBackend()
     data = {"profile_id": profile_id, "parameters": p,

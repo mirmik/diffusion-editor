@@ -300,7 +300,8 @@ def test_frozen_result_application_retains_transparency_after_profile_switch():
 def test_official_turbo_uses_its_own_checkpoint_without_lora(get_profile):
     profile = get_profile(TURBO)
     p = profile.normalize({"steps": 40, "true_cfg_scale": 4})
-    assert (p["steps"], p["true_cfg_scale"]) == (8, 1)
+    assert (p["steps"], p["true_cfg_scale"]) == (8, 4)
+    assert profile.defaults()["true_cfg_scale"] == 1
     assert p["model"].endswith("qwen_image_2.1_turbo_bf16.safetensors")
     assert profile.model_id == "Qwen/Qwen-Image-2.1-Turbo"
     assert profile.default_lora_adapters == ()
@@ -318,7 +319,8 @@ def test_reference_only_padding_preserves_shape_and_transparency():
     assert prepare_reference(source, (64, 64)).getbbox() == (0, 0, 64, 64)
 
 
-def test_official_turbo_passes_exact_sigmas_to_sampler(monkeypatch):
+@pytest.mark.parametrize("cfg", [1.0, 2.5, 4.0])
+def test_official_turbo_passes_cfg_and_exact_sigmas_to_sampler(monkeypatch, cfg):
     torch = SimpleNamespace(zeros=np.zeros, zeros_like=np.zeros_like,
                             tensor=lambda value, dtype: np.array(value, dtype=dtype),
                             float32=np.float32)
@@ -328,17 +330,18 @@ def test_official_turbo_passes_exact_sigmas_to_sampler(monkeypatch):
     sample = SimpleNamespace(
         prepare_noise=lambda latent, seed: torch.zeros_like(latent),
         sample=lambda *args, **kwargs: calls.append((args, kwargs)) or args[8])
-    comfy = SimpleNamespace(sample=sample, utils=SimpleNamespace(PROGRESS_BAR_ENABLED=True))
+    comfy = SimpleNamespace(sample=sample, utils=SimpleNamespace(PROGRESS_BAR_ENABLED=True, PROGRESS_BAR_HOOK=None))
     monkeypatch.setitem(sys.modules, "comfy", comfy)
     monkeypatch.setitem(sys.modules, "comfy.sample", sample)
+    comfy.utils.set_progress_bar_global_hook = lambda hook: setattr(comfy.utils, "PROGRESS_BAR_HOOK", hook)
     monkeypatch.setitem(sys.modules, "comfy.utils", comfy.utils)
     monkeypatch.setitem(sys.modules, "nodes", SimpleNamespace())
     monkeypatch.setitem(sys.modules, "latent_preview", SimpleNamespace(prepare_callback=lambda *a: None))
     runtime = Runtime.__new__(Runtime)
     runtime.sampling_mode = "turbo"
-    runtime.sample(object(), 42, 8, 1, [], [], {"samples": torch.zeros((1, 64, 4, 4))})
+    runtime.sample(object(), 42, 8, cfg, [], [], {"samples": torch.zeros((1, 64, 4, 4))})
     args, kwargs = calls[0]
-    assert args[2:6] == (8, 1.0, "euler", "simple")
+    assert args[2:6] == (8, cfg, "euler", "simple")
     assert kwargs["sigmas"].tolist() == pytest.approx(
         [1, .978453, .95418, .926626, .89508, .845148, .704534, .414568, 0])
     assert len(TURBO_SIGMAS) == 9
@@ -353,7 +356,7 @@ def test_text_to_image_engine_transports_reference_without_target_pixels():
     calls = []
 
     class Client:
-        def request(self, operation, data, cancel, *, images):
+        def request(self, operation, data, cancel, *, images, on_progress_update=None):
             calls.append((operation, data, images))
             return {"image": Image.new("RGBA", (33, 65)), "seed": 42}
 
@@ -388,5 +391,30 @@ for line in sys.stdin:
         image = pipe.generate(p, 42, 32, 32,
                               reference_image=Image.new("RGBA", (32, 32), (10, 20, 30, 64)))
         assert image.getpixel((0, 0)) == (10, 20, 30, 64)
+    finally:
+        pipe.close()
+
+
+def test_child_progress_is_streamed_before_result_without_corrupting_ipc(tmp_path):
+    from diffusion_editor.generation.progress import GenerationProgress
+    p, runner = _fake_runtime(tmp_path, '''
+import json, sys
+from PIL import Image
+for line in sys.stdin:
+    r = json.loads(line)
+    if r['operation'] == 'generate':
+        assert r['report_progress']
+        for current in (0, 1, 2):
+            print(json.dumps({'type': 'progress', 'message': 'Sampling',
+                              'current': current, 'total': 2}), flush=True)
+        Image.new('RGBA', (32,32), (10,20,30,64)).save(r['output'])
+    print(json.dumps({'ok': True, 'result': {'provider': 'test'}}), flush=True)
+''')
+    updates = []
+    pipe = QwenImage21Pipeline(p, runner_path=runner)
+    try:
+        for seed in (42, 43):
+            assert pipe.generate(p, seed, 32, 32, on_progress=updates.append).size == (32,32)
+        assert updates == [GenerationProgress("Sampling", n, 2) for n in (0,1,2,0,1,2)]
     finally:
         pipe.close()

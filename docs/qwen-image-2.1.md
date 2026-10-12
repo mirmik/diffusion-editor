@@ -55,6 +55,13 @@ Runtime stderr is streamed to the launching terminal, including the live step
 counter, while retaining a temporary diagnostic log. Errors include the log tail;
 the subprocess and its output relay are stopped before the log is removed.
 
+Sampling progress is also streamed as structured step events to the AI Attach
+inspector. Prompt/reference encoding and VAE decoding have separate status
+messages. The runner uses `torch.no_grad()` rather than `inference_mode()`:
+Comfy offload can rebuild quantized Parameters when moving the text encoder
+back to GPU on the next request, which requires ordinary tensors with version
+counters. Repeated seed changes must not require reloading model weights.
+
 ## Turbo8
 
 Select **Qwen Image 2.1 Turbo8** in **Text to Image** or **AI Edit**. This separate
@@ -120,10 +127,17 @@ result application, profile settings, and compatibility of the old profiles.
 **Qwen Image 2.1 Turbo (Official)** is a separate profile in Text to Image and
 AI Edit using the released `Qwen/Qwen-Image-2.1-Turbo` checkpoint. It does not
 require the community Turbo8 LoRA above. All three profiles retain independent
-settings. The official Turbo uses 8 Euler steps, CFG 1 and its published sigma
+settings. The official Turbo uses 8 Euler steps, CFG 1 by default and its published sigma
 schedule, followed by a zero terminal sigma:
 
 `1, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0`
+
+CFG is editable from 1 to 20 in both Text to Image and AI Edit; the selected value
+is passed to the sampler and recorded in provenance. CFG 1 remains the official
+default; other values are available for experiments, not a validated quality
+preset. Above 1 the negative prompt also takes effect. The community Turbo8
+profile still fixes CFG to 1. To check official Turbo with CFG 2, run
+`.venv-workers/bin/python scripts/smoke_qwen_image21.py --turbo --cfg 2`.
 
 There is no resolution-dependent shift or terminal stretching for this profile.
 The schedule comes from the official model's `model_index.json`, revision
@@ -179,6 +193,26 @@ is fitted with transparent padding to the inference dimensions without stretchin
 or cropping; the vision encoder sees that padding over white. This satisfies the
 runtime's first-reference/output geometry constraint. AI Edit keeps its existing
 source-image geometry behavior.
+
+Prompts are passed verbatim: the editor does not run Qwen's separate prompt
+enhancer or translate instructions. Use the exact `<image1>` tag (no space)
+to match the reference label injected by the runtime. Qwen's official edit
+prompt enhancer writes English descriptions for instructions in languages other
+than English or Chinese. For diagnosing reference copying, compare an explicit
+English prompt and the same seed against the original prompt, then repeat
+without the reference. For example:
+
+> Create a completely new illustration of a cat walking along a city street,
+> with buildings and a sidewalk. Use <image1> only for its anime linework,
+> cel shading and blue-violet lighting. The subject is a cat, and the setting
+> is an outdoor street. Do not preserve the people, nightclub, composition
+> or lettering of the reference image.
+
+Reference conditioning includes both vision-encoder features and VAE reference
+latents. The output starts from noise at full strength; these reference latents
+are conditioning, not an img2img starting image. CFG above 1 changes text
+guidance against a negative branch that also receives the same references;
+it is not an independent control for reference/style strength.
 
 Every reference is frozen at submission and hashed in ordered provenance. Changing
 or removing any referenced layer, changing an embedded image, or changing list order

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .progress import GenerationProgress
+
 from dataclasses import dataclass, replace
 from typing import Callable
 
@@ -45,6 +47,7 @@ class DiffusionControllerEvent:
         tuple[InferenceJobContext, Image.Image, int] | None
     ) = None
     inference_error: str | None = None
+    progress: GenerationProgress | None = None
 
 
 @dataclass(frozen=True)
@@ -476,6 +479,10 @@ class DiffusionGenerationController:
             return None
 
         expected_id = self._active_operation_id
+        if engine_event.progress is not None and (
+                expected_id is None or not terminal_job_matches(
+                    self._engine, engine_event.job_id, expected_id)):
+            return None
         if expected_id is None:
             return DiffusionControllerEvent(
                 status="Diffusion event ignored: no active job")
@@ -483,6 +490,11 @@ class DiffusionGenerationController:
                 self._engine, engine_event.job_id, expected_id):
             return DiffusionControllerEvent(
                 status="Diffusion event ignored: stale job identity")
+
+        if engine_event.progress is not None:
+            if expected_id in self._invalidated_operations:
+                return None
+            return DiffusionControllerEvent(progress=engine_event.progress, status=engine_event.progress.text)
 
         invalidation_reason = self._invalidated_operations.pop(
             expected_id, None)

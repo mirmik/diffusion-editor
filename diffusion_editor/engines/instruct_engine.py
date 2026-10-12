@@ -93,6 +93,7 @@ class InstructEngine:
                 "lora_adapters": list(lora_adapters),
             },
             cancel,
+            on_progress_update=self._tasks.emit_progress,
         )
         self.model_info = dict(result)
         self._loaded = True
@@ -137,6 +138,7 @@ class InstructEngine:
                 "lora_adapters": lora_adapters,
             },
             cancel,
+            on_progress_update=self._tasks.emit_progress,
             images={
                 "image": request.image,
                 "reference_image": request.reference_image,

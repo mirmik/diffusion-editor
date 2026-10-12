@@ -79,6 +79,7 @@ class DiffusionEngine:
                 "model_identity_policy": model_identity_policy,
             },
             cancel,
+            on_progress_update=self._tasks.emit_progress,
             on_progress=lambda message: log.info(
                 f"[Diffusion worker] {message}"
             ),
@@ -155,6 +156,7 @@ class DiffusionEngine:
                     "mask": request.mask_image,
                     "ip_adapter": request.ip_adapter_image,
                 },
+                on_progress_update=self._tasks.emit_progress,
                 on_progress=lambda message: log.info(
                     f"[Diffusion worker] {message}"
                 ),

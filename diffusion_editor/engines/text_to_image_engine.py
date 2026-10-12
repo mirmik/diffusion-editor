@@ -81,6 +81,7 @@ class TextToImageEngine:
                 "lora_adapters": list(adapters),
             },
             cancel,
+            on_progress_update=self._tasks.emit_progress,
         )
         self.model_info = dict(result)
         self._loaded = True
@@ -123,6 +124,7 @@ class TextToImageEngine:
                 "reference_count": len(request.reference_images),
             },
             cancel,
+            on_progress_update=self._tasks.emit_progress,
             images={f"reference_{i}": image for i, image in enumerate(request.reference_images)},
         )
         image = result["image"]

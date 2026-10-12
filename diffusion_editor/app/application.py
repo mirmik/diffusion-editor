@@ -818,6 +818,10 @@ class EditorApplication:
         event = self.instruct_controller.poll()
         if event is None:
             return
+        if getattr(event, "progress", None) is not None:
+            self.update_panel("instruct", "progress", progress=event.progress)
+            self.set_status(event.progress.text)
+            return
         if event.model_loading:
             self.update_panel("instruct", "model-loading")
         if event.model_error is not None:
@@ -882,6 +886,10 @@ class EditorApplication:
         event = self.diffusion_controller.poll()
         if event is None:
             return
+        if getattr(event, "progress", None) is not None:
+            self.update_panel("diffusion", "progress", progress=event.progress)
+            self.set_status(event.progress.text)
+            return
         if event.model_error is not None:
             self.update_panel("diffusion", "model-error", error=event.model_error)
         elif event.model_loaded_path is not None:
@@ -944,6 +952,10 @@ class EditorApplication:
     def _poll_text_to_image(self) -> None:
         event = self.text_to_image_controller.poll()
         if event is None:
+            return
+        if getattr(event, "progress", None) is not None:
+            self.update_panel("text_to_image", "progress", progress=event.progress)
+            self.set_status(event.progress.text)
             return
         if event.model_loading:
             self.update_panel("text_to_image", "model-loading")

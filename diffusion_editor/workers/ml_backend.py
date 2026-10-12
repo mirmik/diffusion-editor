@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import gc
+import inspect
 import os
 import json
 from pathlib import Path
@@ -14,6 +15,7 @@ from typing import Any, Callable
 
 import numpy as np
 from PIL import Image, ImageFilter
+from ..generation.progress import GenerationProgress
 
 from ..generation.provenance import (
     FrozenJsonObject,
@@ -330,6 +332,7 @@ class RealMlBackend:
         self,
         data: dict[str, Any],
         images: dict[str, Image.Image | None],
+        *, on_progress=None,
     ) -> tuple[Image.Image, int, dict[str, Any]]:
         import torch
 
@@ -382,7 +385,7 @@ class RealMlBackend:
         if ip_image is not None and self._ip_adapter_loaded:
             pipe.set_ip_adapter_scale(float(data["ip_adapter_scale"]))
             kwargs["ip_adapter_image"] = ip_image.convert("RGB")
-        output = pipe(**kwargs).images[0]
+        output = self._run_diffusers(pipe, kwargs, on_progress).images[0]
         provenance = self._diffusion_provenance(
             data,
             pipe=pipe,
@@ -391,6 +394,31 @@ class RealMlBackend:
             height=height,
         )
         return output, seed, provenance.to_dict()
+
+    @staticmethod
+    def _run_diffusers(pipe, kwargs, on_progress=None):
+        if on_progress is None:
+            return pipe(**kwargs)
+        on_progress(GenerationProgress("Preparing inputs..."))
+        parameters = inspect.signature(pipe.__call__).parameters
+        def report(pipeline, index):
+            # Includes strength-shortened schedules and multi-step schedulers.
+            total = int(getattr(pipeline, "num_timesteps", 0)
+                        or getattr(pipeline, "_num_timesteps", 0)
+                        or len(pipeline.scheduler.timesteps))
+            current = min(int(index) + 1, total)
+            on_progress(GenerationProgress("Sampling", current, total))
+            if current == total:
+                on_progress(GenerationProgress("Decoding image...", current, total))
+        if "callback_on_step_end" in parameters:
+            def callback(pipeline, index, timestep, tensors):
+                report(pipeline, index)
+                return tensors
+            kwargs["callback_on_step_end"] = callback
+        elif "callback" in parameters:
+            kwargs["callback"] = lambda index, timestep, latents: report(pipe, index)
+            kwargs["callback_steps"] = 1
+        return pipe(**kwargs)
 
     @staticmethod
     def _prepare_masked_content(
@@ -906,7 +934,8 @@ class RealMlBackend:
 
     def text_to_image(
             self, data: dict[str, Any], reference_image: Image.Image | None = None,
-            *, reference_images: tuple[Image.Image, ...] | None = None
+            *, reference_images: tuple[Image.Image, ...] | None = None,
+            on_progress=None,
     ) -> tuple[Image.Image, int, dict[str, Any]]:
         import torch
 
@@ -942,7 +971,8 @@ class RealMlBackend:
         if profile.provider == QWEN_IMAGE_21_PROVIDER:
             result = self._text_to_image_pipe.generate(
                 parameters, seed, inference_width, inference_height,
-                reference_images=references)
+                reference_images=references,
+                **({"on_progress": on_progress} if on_progress is not None else {}))
         else:
             generator = torch.Generator(device="cpu").manual_seed(seed)
             true_cfg_scale = float(parameters["true_cfg_scale"])
@@ -963,7 +993,7 @@ class RealMlBackend:
                 if not isinstance(parsed, dict):
                     raise ValueError("attention_kwargs must be a JSON object")
                 kwargs["attention_kwargs"] = parsed
-            result = self._text_to_image_pipe(**kwargs).images[0]
+            result = self._run_diffusers(self._text_to_image_pipe, kwargs, on_progress).images[0]
         if result.size != (width, height):
             result = result.resize((width, height), Image.Resampling.LANCZOS)
         reference_hashes = [image_content_hash(image.mode, image.size, image.tobytes()) for image in references]
@@ -1284,6 +1314,7 @@ class RealMlBackend:
         data: dict[str, Any],
         image: Image.Image,
         reference_image: Image.Image | None = None,
+        *, on_progress=None,
     ) -> tuple[Image.Image, int, dict[str, Any]]:
         import torch
 
@@ -1310,6 +1341,7 @@ class RealMlBackend:
             result = self._instruct_pipe.generate(
                 parameters, seed, width, height,
                 image=image, reference_image=reference_image,
+                **({"on_progress": on_progress} if on_progress is not None else {}),
             )
             if result.size != image.size:
                 result = result.resize(image.size, Image.Resampling.LANCZOS)
@@ -1322,6 +1354,7 @@ class RealMlBackend:
                 parameters,
                 seed,
                 reference_image=reference_image,
+                **({"on_progress": on_progress} if on_progress is not None else {}),
             )
             provenance = self._image_edit_provenance(
                 profile_id, parameters, requested_adapters, seed, result.size)
@@ -1378,7 +1411,7 @@ class RealMlBackend:
                 "image_guidance_scale": float(
                     parameters["image_guidance_scale"]),
             })
-        result = self._instruct_pipe(**kwargs).images[0]
+        result = self._run_diffusers(self._instruct_pipe, kwargs, on_progress).images[0]
         provenance = self._image_edit_provenance(
             profile_id, parameters, requested_adapters, seed, result.size)
         return result, seed, provenance.to_dict()
@@ -1396,7 +1429,7 @@ class RealMlBackend:
             "parameters": parameters,
         })
 
-    def instruct(self, data, image):
+    def instruct(self, data, image, *, on_progress=None):
         parameters = image_edit_profile(
             LEGACY_INSTRUCT_PROFILE_ID).defaults()
         parameters.update({
@@ -1409,7 +1442,7 @@ class RealMlBackend:
         return self.image_edit({
             "profile_id": LEGACY_INSTRUCT_PROFILE_ID,
             "parameters": parameters,
-        }, image)
+        }, image, on_progress=on_progress)
 
     @staticmethod
     def _package_version(name: str) -> str | None:

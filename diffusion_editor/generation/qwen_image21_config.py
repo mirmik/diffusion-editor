@@ -39,7 +39,7 @@ def qwen_image21_parameters(*, turbo8=False, turbo=False):
         P("steps", "Steps", K.INTEGER, 8 if accelerated else 40, "Sampling",
           8 if accelerated else 1, 8 if accelerated else 100, 1),
         P("true_cfg_scale", "CFG scale", K.FLOAT, 1.0, "Sampling",
-          1, 1 if accelerated else 20, 0.1, 2),
+          1, 1 if turbo8 else 20, 0.1, 2),
         P("seed", "Seed", K.INTEGER, -1, "Sampling", -1, 2**32 - 1, 1),
         P("output_mode", "Output", K.CHOICE, "RGBA", "Output",
           choices=(C("RGBA", "Preserve transparency"), C("RGB", "Opaque RGB"))),
