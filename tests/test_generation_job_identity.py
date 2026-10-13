@@ -192,6 +192,31 @@ def _complete(
     ))
 
 
+def test_unmasked_inpaint_applies_to_full_canvas_and_can_be_undone():
+    application, engine = _application()
+    layer = _insert_diffusion_layer(application, patch=(1, 2, 3, 2))
+    layer.tool.mode = "inpaint"
+    before = layer.image.copy()
+
+    context = _start(application, engine, layer)
+    request = engine.submissions[-1][2]
+    assert request.image.size == request.mask_image.size == (8, 8)
+    assert request.image.getpixel((0, 0)) == (20, 30, 40)
+    assert request.mask_image.getextrema() == (255, 255)
+    assert context.paste.canvas_rect == (0, 0, 8, 8)
+    assert context.paste.layer_mask is None
+    assert not layer.has_mask()
+
+    _complete(engine, context.job_id)
+    application.poll()
+
+    assert np.all(layer.image == (200, 10, 20, 255))
+    assert not layer.has_mask()
+    assert application.document.undo() == "Apply Diffusion Result"
+    np.testing.assert_array_equal(layer.image, before)
+    assert not layer.has_mask()
+
+
 def test_completed_result_attaches_model_runtime_and_frozen_request_provenance():
     application, engine = _application()
     layer = _insert_diffusion_layer(application)

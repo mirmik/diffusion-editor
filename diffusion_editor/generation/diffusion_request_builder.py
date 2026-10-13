@@ -58,12 +58,6 @@ class DiffusionRequestBuilder:
                 log_message=f"Cannot build diffusion request for layer {layer.name}",
             ))
 
-        if tool.mode == "inpaint" and not layer.has_mask():
-            return DiffusionRequestBuildResult(error=GenerationError(
-                message="Inpaint requires a mask",
-                log_message=f"Inpaint requested without mask on layer {layer.name}",
-            ))
-
         if tool.mode != "txt2img":
             if composite_below is None:
                 return DiffusionRequestBuildResult(error=GenerationError(
@@ -73,7 +67,8 @@ class DiffusionRequestBuilder:
                         "composite_below is None"
                     ),
                 ))
-            patch = resolve_source_patch(layer, composite_below)
+            patch = resolve_source_patch(
+                layer, composite_below, default_to_full=tool.mode == "inpaint")
             if isinstance(patch, GenerationError):
                 return DiffusionRequestBuildResult(error=patch)
             if patch is not None:
@@ -89,15 +84,20 @@ class DiffusionRequestBuilder:
 
         mask_image = None
         if tool.mode == "inpaint":
-            mask_image = extract_layer_mask_patch(
-                layer,
-                (
-                    tool.patch_x,
-                    tool.patch_y,
-                    tool.patch_x + tool.patch_w,
-                    tool.patch_y + tool.patch_h,
-                ),
-            )
+            if layer.has_mask():
+                mask_image = extract_layer_mask_patch(
+                    layer,
+                    (
+                        tool.patch_x,
+                        tool.patch_y,
+                        tool.patch_x + tool.patch_w,
+                        tool.patch_y + tool.patch_h,
+                    ),
+                )
+            else:
+                # No painted mask means the whole processing area is editable.
+                # Keep this implicit mask in the request, not in the document.
+                mask_image = Image.new("L", (tool.patch_w, tool.patch_h), 255)
 
         reference_result = resolve_ip_adapter_reference(tool, self._layer_stack)
         if reference_result.error is not None:
